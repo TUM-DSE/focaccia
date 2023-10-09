@@ -3,7 +3,7 @@ import re
 import sys
 import shutil
 import argparse
-from typing import List
+from typing import List, Callable
 from functools import partial as bind
 
 from utils import check_version
@@ -39,48 +39,53 @@ class ContextBlock:
                 'flag DF']
 
     def __init__(self):
-        self.regs = {reg: None for reg in ContextBlock.regnames}
+        dict_type = dict[str, int|None]  # A register may not have a value
+        self.regs = dict_type({reg: None for reg in ContextBlock.regnames})
         self.has_backwards = False
         self.matched = False
 
     def set_backwards(self):
         self.has_backwards = True
 
-    def set(self, idx: int, value: int):
-        self.regs[list(self.regs.keys())[idx]] = value
+    def set(self, reg: str, value: int):
+        """Assign a value to a register.
+
+        :raises RuntimeError: if the register already has a value.
+        """
+        if self.regs[reg] != None:
+            raise RuntimeError("Reassigning register")
+        self.regs[reg] = value
 
     def __repr__(self):
         return self.regs.__repr__()
 
 class Constructor:
-    def __init__(self, structure: dict):
-        self.cblocks = []
-        self.structure = structure
-        self.patterns = list(self.structure.keys())
+    """Builds a list of context blocks."""
+    def __init__(self, structure: dict[str, tuple[str, Callable[[str], int]]]):
+        self.cblocks = list[ContextBlock]()
+        self.labels = structure
+        self.regex = re.compile("|".join(structure.keys()))
 
-    def match(self, line: str):
-        # find patterns that match it
-        regex = re.compile("|".join(self.patterns))
-        match = regex.match(line)
+    def match(self, line: str) -> (tuple[str, int] | None):
+        """Find a register name and that register's value in a line.
 
-        idx = self.patterns.index(match.group(0)) if match else 0
+        :return: A register name and a register value.
+        """
+        match = self.regex.match(line)
+        if match:
+            label = match.group(0)
+            register, get_reg_value = self.labels[label]
+            return register, get_reg_value(line)
 
-        pattern = self.patterns[idx]
-        register = ContextBlock.regnames[idx]
-
-        return register, self.structure[pattern](line)
+        return None
 
     def add_backwards(self):
         self.cblocks[-1].set_backwards()
 
-    def add(self, key: str, value: int):
-        if key == 'PC':
+    def add(self, reg: str, value: int):
+        if reg == 'PC':
             self.cblocks.append(ContextBlock())
-
-        if self.cblocks[-1].regs[key] != None:
-            raise RuntimeError("Reassigning register")
-
-        self.cblocks[-1].regs[key] = value
+        self.cblocks[-1].set(reg, value)
 
 class Transformations:
     def __init__(self, previous: ContextBlock, current: ContextBlock):
@@ -91,21 +96,18 @@ class Transformations:
                     continue
                 self.transformation.regs[el1] = current.regs[el1] - previous.regs[el2]
 
-def parse(lines: list, labels: list):
+def parse(lines: list[str], labels: dict):
+    """Parse a list of lines into a list of cblocks."""
     ctor = Constructor(labels)
-
-    patterns = ctor.patterns.copy()
-    patterns.append('Backwards')
-    regex = re.compile("|".join(patterns))
-    lines = [l for l in lines if regex.match(l) is not None]
-
     for line in lines:
         if 'Backwards' in line:
             ctor.add_backwards()
             continue
 
-        key, value = ctor.match(line)
-        ctor.add(key, value)
+        match = ctor.match(line)
+        if match:
+            key, value = match
+            ctor.add(key, value)
 
     return ctor.cblocks
 
@@ -116,29 +118,32 @@ def get_labels():
     split_second = bind(split_value, i=2)
 
     split_equal = lambda x,i: int(x.split('=')[i], 16)
-    labels = {'INVOKE': bind(split_equal, i=1),
-              'RAX': split_first,
-              'RBX': split_first,
-              'RCX': split_first,
-              'RDX': split_first,
-              'RSI': split_first,
-              'RDI': split_first,
-              'RBP': split_first,
-              'RSP': split_first,
-              'R8':  split_first,
-              'R9':  split_first,
-              'R10': split_first,
-              'R11': split_first,
-              'R12': split_first,
-              'R13': split_first,
-              'R14': split_first,
-              'R15': split_first,
-              'flag ZF': split_second,
-              'flag CF': split_second,
-              'flag OF': split_second,
-              'flag SF': split_second,
-              'flag PF': split_second,
-              'flag DF': split_second}
+
+    # A mapping from regex patterns to the register name and a
+    # function that extracts that register's value from the line
+    labels = {'INVOKE':  ('PC',      bind(split_equal, i=1)),
+              'RAX':     ('RAX',     split_first),
+              'RBX':     ('RBX',     split_first),
+              'RCX':     ('RCX',     split_first),
+              'RDX':     ('RDX',     split_first),
+              'RSI':     ('RSI',     split_first),
+              'RDI':     ('RDI',     split_first),
+              'RBP':     ('RBP',     split_first),
+              'RSP':     ('RSP',     split_first),
+              'R8':      ('R8',      split_first),
+              'R9':      ('R9',      split_first),
+              'R10':     ('R10',     split_first),
+              'R11':     ('R11',     split_first),
+              'R12':     ('R12',     split_first),
+              'R13':     ('R13',     split_first),
+              'R14':     ('R14',     split_first),
+              'R15':     ('R15',     split_first),
+              'flag ZF': ('flag ZF', split_second),
+              'flag CF': ('flag CF', split_second),
+              'flag OF': ('flag OF', split_second),
+              'flag SF': ('flag SF', split_second),
+              'flag PF': ('flag PF', split_second),
+              'flag DF': ('flag DF', split_second)}
     return labels
 
 def equivalent(val1, val2, transformation, previous_translation):
@@ -175,9 +180,6 @@ def verify(translation: ContextBlock, reference: ContextBlock,
     return 0
 
 def compare(txl: List[ContextBlock], native: List[ContextBlock], stats: bool = False):
-    txl = parse(txl, get_labels())
-    native = parse(native, get_labels())
-
     if len(txl) != len(native):
         print(f'Different number of blocks discovered translation: {len(txl)} vs. '
               f'reference: {len(native)}', file=sys.stdout)
@@ -350,5 +352,6 @@ if __name__ == "__main__":
         with open(native_path, 'w') as w:
             w.write(''.join(native))
 
+    txl = parse(txl, get_labels())
+    native = parse(native, get_labels())
     compare(txl, native, stats)
-
