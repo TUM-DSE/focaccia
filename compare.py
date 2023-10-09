@@ -87,15 +87,6 @@ class Constructor:
             self.cblocks.append(ContextBlock())
         self.cblocks[-1].set(reg, value)
 
-class Transformations:
-    def __init__(self, previous: ContextBlock, current: ContextBlock):
-        self.transformation = ContextBlock()
-        for el1 in current.regs.keys():
-            for el2 in previous.regs.keys():
-                if el1 != el2:
-                    continue
-                self.transformation.regs[el1] = current.regs[el1] - previous.regs[el2]
-
 def parse(lines: list[str], labels: dict):
     """Parse a list of lines into a list of cblocks."""
     ctor = Constructor(labels)
@@ -146,6 +137,20 @@ def get_labels():
               'flag DF': ('flag DF', split_second)}
     return labels
 
+def calc_transformation(previous: ContextBlock, current: ContextBlock):
+    """Calculate the difference between two context blocks.
+
+    :return: A context block that contains in its registers the difference
+             between the corresponding input blocks' register values.
+    """
+    transformation = ContextBlock()
+    for reg in ContextBlock.regnames:
+        prev_val, cur_val = previous.regs[reg], current.regs[reg]
+        if prev_val is not None and cur_val is not None:
+            transformation.regs[reg] = cur_val - prev_val
+
+    return transformation
+
 def equivalent(val1, val2, transformation, previous_translation):
     if val1 == val2:
         return True
@@ -154,29 +159,25 @@ def equivalent(val1, val2, transformation, previous_translation):
     return val1 - previous_translation == transformation
 
 def verify(translation: ContextBlock, reference: ContextBlock,
-           transformation: Transformations, previous_translation: ContextBlock):
+           transformation: ContextBlock, previous_translation: ContextBlock):
     if translation.regs["PC"] != reference.regs["PC"]:
         return 1
 
     print_separator()
     print(f'For PC={hex(translation.regs["PC"])}')
     print_separator()
-    for el1 in translation.regs.keys():
-        for el2 in reference.regs.keys():
-            if el1 != el2:
-                continue
+    for reg in ContextBlock.regnames:
+        if translation.regs[reg] is None:
+            print(f'Element not available in translation: {reg}')
+        elif reference.regs[reg] is None:
+            print(f'Element not available in reference: {reg}')
+        elif not equivalent(translation.regs[reg], reference.regs[reg],
+                            transformation.regs[reg],
+                            previous_translation.regs[reg]):
+            txl = hex(translation.regs[reg])
+            ref = hex(reference.regs[reg])
+            print(f'Difference for {reg}: {txl} != {ref}')
 
-            if translation.regs[el1] is None:
-                print(f'Element not available in translation: {el1}')
-                continue
-
-            if reference.regs[el2] is None:
-                print(f'Element not available in reference: {el2}')
-                continue
-
-            if not equivalent(translation.regs[el1], reference.regs[el2],
-                              transformation.regs[el1], previous_translation.regs[el1]):
-                print(f'Difference for {el1}: {hex(translation.regs[el1])} != {hex(reference.regs[el2])}')
     return 0
 
 def compare(txl: List[ContextBlock], native: List[ContextBlock], stats: bool = False):
@@ -196,8 +197,8 @@ def compare(txl: List[ContextBlock], native: List[ContextBlock], stats: bool = F
 
             while i < len(native):
                 reference = native[i]
-                transformations = Transformations(previous_reference, reference)
-                if verify(translation, reference, transformations.transformation, previous_translation) == 0:
+                transformation = calc_transformation(previous_reference, reference)
+                if verify(translation, reference, transformation, previous_translation) == 0:
                     reference.matched = True
                     break
 
@@ -237,11 +238,9 @@ def compare(txl: List[ContextBlock], native: List[ContextBlock], stats: bool = F
             if matched:
                 i += 1
     else:
-        txl = iter(txl)
-        native = iter(native)
         for translation, reference in zip(txl, native):
-            transformations = Transformations(previous_reference, reference)
-            if verify(translation, reference, transformations.transformation, previous_translation) == 1:
+            transformation = calc_transformation(previous_reference, reference)
+            if verify(translation, reference, transformation, previous_translation) == 1:
                 # TODO: add verbose output
                 print_separator(stream=sys.stdout)
                 print(f'No match for PC {hex(translation.regs["PC"])}', file=sys.stdout)
