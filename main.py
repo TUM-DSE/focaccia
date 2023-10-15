@@ -4,9 +4,9 @@ import argparse
 
 import arancini
 from arch import x86
-from compare import compare
+from compare import compare_simple
 from run import run_native_execution
-from utils import check_version
+from utils import check_version, print_separator
 
 def read_logs(txl_path, native_path, program):
     txl = []
@@ -85,7 +85,24 @@ def main():
 
     txl = arancini.parse(txl, arch)
     native = arancini.parse(native, arch)
-    compare(txl, native, stats)
+    result = compare_simple(txl, native)
+
+    # Print results
+    for res in result:
+        pc = res['pc']
+        print_separator()
+        print(f'For PC={hex(pc)}')
+        print_separator()
+
+        txl = res['txl']
+        ref = res['ref']
+        for err in res['errors']:
+            reg = err['reg']
+            print(f'Content of register {reg} is possibly false.'
+                  f' Expected difference: {err["expected"]}, actual difference'
+                  f' in the translation: {err["actual"]}.\n'
+                  f'    (txl) {reg}: {hex(txl.regs[reg])}\n'
+                  f'    (ref) {reg}: {hex(ref.regs[reg])}')
 
 if __name__ == "__main__":
     check_version('3.7')

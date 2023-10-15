@@ -18,6 +18,105 @@ def calc_transformation(previous: ProgramState, current: ProgramState):
 
     return transformation
 
+def find_errors(txl_state: ProgramState, prev_txl_state: ProgramState,
+                truth_state: ProgramState, prev_truth_state: ProgramState) \
+        -> list[dict]:
+    """Find possible errors between a reference and a tested state.
+
+    :param txl_state: The translated state to check for errors.
+    :param prev_txl_state: The translated snapshot immediately preceding
+                           `txl_state`.
+    :param truth_state: The reference state against which to check the
+                        translated state `txl_state` for errors.
+    :param prev_truth_state: The reference snapshot immediately preceding
+                           `prev_truth_state`.
+
+    :return: A list of errors; one entry for each register that may have
+             faulty contents. Is empty if no errors were found.
+    """
+    arch = txl_state.arch
+    errors = []
+
+    transform_truth = calc_transformation(prev_truth_state, truth_state)
+    transform_txl = calc_transformation(prev_txl_state, txl_state)
+    for reg in arch.regnames:
+        diff_txl = transform_txl.regs[reg]
+        diff_truth = transform_truth.regs[reg]
+        if diff_txl == diff_truth:
+            # The register contains a value that is expected
+            # by the transformation.
+            continue
+        if diff_truth is not None:
+            if diff_txl is None:
+                print(f'[WARNING] Expected the value of register {reg} to be'
+                      f' defined, but it is undefined in the translation.'
+                      f' This might hint at an error in the input data.')
+            else:
+                errors.append({
+                    'reg': reg,
+                    'expected': diff_truth, 'actual': diff_txl,
+                })
+
+    return errors
+
+def compare_simple(test_states: list[ProgramState],
+                   truth_states: list[ProgramState]) -> list[dict]:
+    """Simple comparison of programs.
+
+    :param test_states: A program flow to check for errors.
+    :param truth_states: A reference program flow that defines a correct
+                         program execution.
+
+    :return: Information, including possible errors, about each processed
+             snapshot.
+    """
+    PC_REGNAME = 'PC'
+
+    if len(test_states) == 0:
+        print('No states to compare. Exiting.')
+        return []
+
+    # No errors in initial snapshot because we can't perform difference
+    # calculations on it
+    result = [{
+        'pc': test_states[0].regs[PC_REGNAME],
+        'txl': test_states[0], 'ref': truth_states[0],
+        'errors': []
+    }]
+
+    it_prev = zip(iter(test_states), iter(truth_states))
+    it_cur = zip(iter(test_states[1:]), iter(truth_states[1:]))
+
+    for txl, truth in it_cur:
+        prev_txl, prev_truth = next(it_prev)
+
+        pc_txl = txl.regs[PC_REGNAME]
+        pc_truth = truth.regs[PC_REGNAME]
+
+        # The program counter should always be set on a snapshot
+        assert(pc_truth is not None)
+        assert(pc_txl is not None)
+
+        if pc_txl != pc_truth:
+            print(f'Unmatched program counter {txl.as_repr(PC_REGNAME)}'
+                  f' in translated code!')
+            continue
+        else:
+            txl.matched = True
+
+        errors = find_errors(txl, prev_txl, truth, prev_truth)
+        result.append({
+            'pc': pc_txl,
+            'txl': txl, 'ref': truth,
+            'errors': errors
+        })
+
+        # TODO: Why do we skip backward branches?
+        if txl.has_backwards:
+            print(f' -- Encountered backward branch. Don\'t skip.')
+
+    return result
+
 def equivalent(val1, val2, transformation, previous_translation):
     if val1 == val2:
         return True
