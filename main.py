@@ -8,21 +8,25 @@ from compare import compare_simple
 from run import run_native_execution
 from utils import check_version, print_separator
 
-def read_logs(txl_path, native_path, program):
+def parse_inputs(txl_path, ref_path, program):
+    # Our architecture
+    arch = x86.ArchX86()
+
     txl = []
     with open(txl_path, "r") as txl_file:
-        txl = txl_file.readlines()
+        txl = arancini.parse(txl_file.readlines(), arch)
 
-    native = []
+    ref = []
     if program is not None:
-        breakpoints = arancini.parse_break_addresses(txl)
-        native = run_native_execution(program, breakpoints)
+        with open(txl_path, "r") as txl_file:
+            breakpoints = arancini.parse_break_addresses(txl_file.readlines())
+        ref = run_native_execution(program, breakpoints)
     else:
-        assert(native_path is not None)
-        with open(native_path, "r") as native_file:
-            native = native_file.readlines()
+        assert(ref_path is not None)
+        with open(ref_path, "r") as native_file:
+            ref = arancini.parse(native_file.readlines(), arch)
 
-    return txl, native
+    return txl, ref
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Comparator for emulator logs to reference')
@@ -57,15 +61,12 @@ def main():
     args = parse_arguments()
 
     txl_path = args.txl
-    native_path = args.ref
+    reference_path = args.ref
     program = args.program
 
     stats = args.stats
     verbose = args.verbose
     progressive = args.progressive
-
-    # Our architexture
-    arch = x86.ArchX86()
 
     if verbose:
         print("Enabling verbose program output")
@@ -73,19 +74,18 @@ def main():
         print(f"Statistics: {stats}")
         print(f"Progressive: {progressive}")
 
-    if program is None and native_path is None:
+    if program is None and reference_path is None:
         raise ValueError('Either program or path to native file must be'
                          'provided')
 
-    txl, native = read_logs(txl_path, native_path, program)
+    txl, ref = parse_inputs(txl_path, reference_path, program)
 
-    if program != None and native_path != None:
-        with open(native_path, 'w') as w:
-            w.write(''.join(native))
+    if program != None and reference_path != None:
+        with open(reference_path, 'w') as w:
+            for snapshot in ref:
+                print(snapshot, file=w)
 
-    txl = arancini.parse(txl, arch)
-    native = arancini.parse(native, arch)
-    result = compare_simple(txl, native)
+    result = compare_simple(txl, ref)
 
     # Print results
     for res in result:

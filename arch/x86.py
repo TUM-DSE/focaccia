@@ -30,4 +30,4 @@ regnames = ['PC',
 
 class ArchX86(Arch):
     def __init__(self):
-        super().__init__(regnames)
+        super().__init__("X86", regnames)
