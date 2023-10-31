@@ -104,8 +104,6 @@ class Debugger:
             if state == lldb.eStateExited:
                 break
 
-        self.debugger.Terminate()
-
         print(f'Process state: {process.GetState()}')
         print('Program output:')
         print(process.GetSTDOUT(1024))
