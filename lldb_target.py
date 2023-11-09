@@ -6,7 +6,10 @@ from angr_targets.concrete import ConcreteTarget
 from angr_targets.memory_map import MemoryMap
 
 class LLDBConcreteTarget(ConcreteTarget):
-    def __init__(self, executable: str):
+    def __init__(self, executable: str, args: list[str] = []):
+        # Prepend the executable's path to argv, as is convention
+        args.insert(0, executable)
+
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(False)
         self.target = self.debugger.CreateTargetWithFileAndArch(executable,
@@ -18,7 +21,7 @@ class LLDBConcreteTarget(ConcreteTarget):
         self.error = lldb.SBError()
         self.listener = self.debugger.GetListener()
         self.process = self.target.Launch(self.listener,
-                                          None, None, None,
+                                          args, None, None,
                                           None, None, None, 0,
                                           True, self.error)
         if not self.process.IsValid():
