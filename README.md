@@ -48,6 +48,9 @@ real execution to 'concrete.log' and the symbolic difference to 'symbolic.log'.
     This first version is very fragile. As soon as angr can't handle a branch instruction (which is
 the case for almost any branch instruction), it aborts with an error.
 
+ - `interpreter.py`: Contains an algorithm that evaluates a symbolic expression to a concrete value,
+using a reference state as input.
+
 ## Helpers
 
  - `lldb_target.py`: Implements angr's `ConcreteTarget` interface for [LLDB](https://lldb.llvm.org/).

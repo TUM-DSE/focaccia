@@ -1,26 +1,43 @@
-import angr
 import argparse
-import claripy as cp
 import sys
 
+import angr
+import claripy as cp
 from angr.exploration_techniques import Symbion
+
 from arch import x86
 from gen_trace import record_trace
+from interpreter import eval, SimStateResolver
 from lldb_target import LLDBConcreteTarget
+from utils import to_str
 
-def print_state(state: angr.SimState, file=sys.stdout):
-    """Print a program state in a fancy way."""
+def print_state(state: angr.SimState, file=sys.stdout, conc_state=None):
+    """Print a program state in a fancy way.
+
+    :param conc_state: Provide a concrete program state as a reference to
+                       evaluate all symbolic values in `state` and print their
+                       concrete values in addition to the symbolic expression.
+    """
+    if conc_state is not None:
+        resolver = SimStateResolver(conc_state)
+
     print('-' * 80, file=file)
     print(f'State at {hex(state.addr)}:', file=file)
     print('-' * 80, file=file)
     for reg in x86.regnames:
         try:
-            val = state.regs.__getattr__(reg.lower())
-            print(f'{reg} = {val}', file=file)
-        except angr.SimConcreteRegisterError: pass
-        except angr.SimConcreteMemoryError: pass
-        except AttributeError: pass
-        except KeyError: pass
+            val = state.regs.get(reg.lower())
+        except angr.SimConcreteRegisterError: val = '<inaccessible>'
+        except angr.SimConcreteMemoryError:   val = '<inaccessible>'
+        except AttributeError:                val = '<inaccessible>'
+        except KeyError:                      val = '<inaccessible>'
+        if conc_state is not None:
+            concrete_value = eval(resolver, val)
+            if type(concrete_value) is int:
+                concrete_value = hex(concrete_value)
+            print(f'{reg} = {to_str(val)} ({concrete_value})', file=file)
+        else:
+            print(f'{reg} = {to_str(val)}', file=file)
 
     # Print some of the stack
     print('\nStack:', file=file)
@@ -49,13 +66,13 @@ def symbolize_state(state: angr.SimState,
     state = state.copy()
 
     stack_size = 0xc
-    symb_stack = cp.BVS('stack', stack_size * 8)
+    symb_stack = cp.BVS('stack', stack_size * 8, explicit_name=True)
     state.memory.store(state.regs.rbp - stack_size, symb_stack)
 
     _exclude = set(exclude)
     for reg in x86.regnames:
         if reg not in _exclude:
-            symb_val = cp.BVS(reg, 64)
+            symb_val = cp.BVS(reg, 64, explicit_name=True)
             try:
                 state.regs.__setattr__(reg.lower(), symb_val)
             except AttributeError:
@@ -104,7 +121,7 @@ def main():
             exit(1)
 
         print_state(conc_state, file=conc_log)
-        print_state(symb_exploration.found[0], file=symb_log)
+        print_state(symb_exploration.found[0], file=symb_log, conc_state=conc_state)
 
 if __name__ == "__main__":
     main()
