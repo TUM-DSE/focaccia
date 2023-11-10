@@ -1,7 +1,7 @@
 """Interpreter for claripy ASTs"""
 
 from inspect import signature
-from logging import warn, debug
+from logging import debug
 
 import claripy as cp
 
@@ -13,35 +13,10 @@ class SymbolResolver:
         raise NotImplementedError()
 
 class SymbolResolveError(Exception):
-    def __init__(self, symbol):
+    def __init__(self, symbol, reason: str = ""):
         super().__init__(f'Unable to resolve symbol name \"{symbol}\" to a'
-                          ' concrete value.')
-
-class SimStateResolver(SymbolResolver):
-    """A symbol resolver that resolves symbol names to program state in
-    `angr.SimState` objects.
-    """
-    import angr
-
-    def __init__(self, state: angr.SimState):
-        self._state = state
-
-    def resolve(self, symbol_name: str) -> cp.ast.Base | None:
-        # Process special (non-register) symbol names
-        if symbol_name == 'stack':
-            assert(self._state.regs.rbp.concrete)
-            assert(type(self._state.regs.rbp.v) is int)
-            rbp = self._state.regs.rbp.v
-            return self._state.memory.load(rbp - 0xffff, 0xffff)
-
-        # Try to interpret the symbol as a register name
-        try:
-            return self._state.regs.get(symbol_name.lower())
-        except AttributeError:
-            warn(f'[SimStateResolver]: No attribute {symbol_name} in program'
-                  ' state.')
-
-        return None
+                         ' concrete value'
+                         + f': {reason}' if len(reason) > 0 else '.')
 
 def eval(resolver: SymbolResolver, expr) -> int:
     """Evaluate a claripy expression to a concrete value.
