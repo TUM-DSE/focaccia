@@ -80,13 +80,17 @@ def _eval_op(resolver: SymbolResolver, op, *args) -> int:
     """
     assert(type(op) is str)
 
-    # Handle claripy's operators
-    if op == 'Concat':
+    def concat(*vals):
         res = 0
-        for val in args:
+        for val in vals:
             assert(type(val) is cp.ast.BV)
             res = res << val.length
             res = res | eval(resolver, val)
+        return res
+
+    # Handle claripy's operators
+    if op == 'Concat':
+        res = concat(*args)
         debug(f'Concatenating {args} to {hex(res)}')
         return res
     if op == 'Extract':
@@ -101,6 +105,9 @@ def _eval_op(resolver: SymbolResolver, op, *args) -> int:
         cond, iftrue, iffalse = (eval(resolver, arg) for arg in args)
         debug(f'Evaluated branch condition {args[0]} to {cond}')
         return iftrue if bool(cond) else iffalse
+    if op == 'Reverse':
+        assert(len(args) == 1)
+        return concat(*reversed(args[0].chop(8)))
 
     # `op` is not one of claripy's special operators, so treat it as the name
     # of a python operator function (because that is how claripy names its OR,
@@ -111,6 +118,9 @@ def _eval_op(resolver: SymbolResolver, op, *args) -> int:
     #       comparisons. I'm not sure that this is legal.
     if op in ['SGE', 'SGT', 'SLE', 'SLT', 'UGE', 'UGT', 'ULE', 'ULT']:
         op = '__' + op[1:].lower() + '__'
+
+    if op in ['And', 'Or']:
+        op =  '__' + op.lower() + '__'
 
     resolved_args = [eval(resolver, arg) for arg in args]
     try:
