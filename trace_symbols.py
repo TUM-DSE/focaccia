@@ -134,20 +134,50 @@ def main():
     entry_state.options.add(angr.options.SYMBION_KEEP_STUBS_ON_SYNC)
     entry_state.options.add(angr.options.SYMBION_SYNC_CLE)
 
-    for cur_inst, next_inst in zip(trace[0:-1], trace[1:]):
+    # We keep a history of concrete states at their addresses because of the
+    # backtracking approach described below.
+    concrete_states = {}
+
+    for (cur_idx, cur_inst), next_inst in zip(enumerate(trace[0:-1]), trace[1:]):
         symbion = proj.factory.simgr(entry_state)
         symbion.use_technique(Symbion(find=[cur_inst]))
 
         conc_exploration = symbion.run()
         conc_state = conc_exploration.found[0]
 
+        concrete_states[conc_state.addr] = conc_state.copy()
+
         # Start symbolic execution with the concrete ('truth') state and try
         # to reach the next instruction in the trace
         simgr = proj.factory.simgr(symbolize_state(conc_state))
         symb_exploration = simgr.explore(find=next_inst)
-        if len(symb_exploration.found) == 0:
+
+        # Symbolic execution can't handle starting at some jump instructions.
+        # When this occurs, we re-start symbolic execution at an earlier
+        # instruction.
+        #
+        # Example:
+        #   0x401155      cmp   -0x4(%rbp),%eax
+        #   0x401158      jle   0x401162
+        #   ...
+        #   0x401162      addl  $0x1337,-0xc(%rbp)
+        #
+        # Here, symbolic execution can't find a valid state at `0x401162` when
+        # starting at `0x401158`, but it finds it successfully when starting at
+        # `0x401155`.
+        while len(symb_exploration.found) == 0 and cur_idx > 0:
             print(f'Symbolic execution can\'t reach address {hex(next_inst)}'
-                  f' from {hex(cur_inst)}. Exiting.')
+                  f' from {hex(cur_inst)}.'
+                  f' Attempting to reach it from {hex(trace[cur_idx - 1])}...')
+            cur_idx -= 1
+            cur_inst = trace[cur_idx]
+            conc_state = concrete_states[cur_inst]
+            simgr = proj.factory.simgr(symbolize_state(conc_state))
+            symb_exploration = simgr.explore(find=next_inst)
+
+        if len(symb_exploration.found) == 0:
+            print(f'Symbolic execution can\'t reach address {hex(next_inst)}.'
+                  ' Exiting.')
             exit(1)
 
         print_state(conc_state, file=conc_log)
@@ -155,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print('\nDone.')
