@@ -9,6 +9,7 @@ from arch import x86
 from gen_trace import record_trace
 from interpreter import eval, SymbolResolver, SymbolResolveError
 from lldb_target import LLDBConcreteTarget
+from symbolic import symbolize_state, collect_symbolic_trace
 
 # Size of the memory region on the stack that is tracked symbolically
 # We track [rbp - STACK_SIZE, rbp).
@@ -72,8 +73,19 @@ def print_state(state: angr.SimState, file=sys.stdout, conc_state=None):
     # Print some of the stack
     print('\nStack:', file=file)
     try:
-        assert(state.regs.rbp.concrete)
-        stack_mem = state.memory.load(state.regs.rbp - STACK_SIZE, STACK_SIZE)
+        # Ensure that the base pointer is concrete
+        rbp = state.regs.rbp
+        if not rbp.concrete:
+            if resolver is None:
+                raise SymbolResolveError(rbp,
+                                         '[In print_state]: rbp is symbolic,'
+                                         ' but no resolver is defined. Can\'t'
+                                         ' print stack.')
+            else:
+                rbp = eval(resolver, rbp)
+
+        stack_mem = state.memory.load(rbp - STACK_SIZE, STACK_SIZE)
+
         if resolver is not None:
             print(hex(eval(resolver, stack_mem)), file=file)
         print(stack_mem, file=file)
@@ -83,105 +95,51 @@ def print_state(state: angr.SimState, file=sys.stdout, conc_state=None):
         print('<unable to read stack memory>', file=file)
     print('-' * 80, file=file)
 
-def symbolize_state(state: angr.SimState,
-                    exclude: list[str] = ['PC', 'RBP', 'RSP']) \
-        -> angr.SimState:
-    """Create a copy of a SimState and replace most of it with symbolic
-    values.
-
-    Leaves pc, rbp, and rsp concrete by default. This can be configured with
-    the `exclude` parameter.
-
-    :return: A symbolized SymState object.
-    """
-    state = state.copy()
-
-    symb_stack = cp.BVS(STACK_SYMBOL_NAME, STACK_SIZE * 8, explicit_name=True)
-    state.memory.store(state.regs.rbp - STACK_SIZE, symb_stack)
-
-    _exclude = set(exclude)
-    for reg in x86.regnames:
-        if reg not in _exclude:
-            symb_val = cp.BVS(reg, 64, explicit_name=True)
-            try:
-                state.regs.__setattr__(reg.lower(), symb_val)
-            except AttributeError:
-                pass
-    return state
-
 def parse_args():
     prog = argparse.ArgumentParser()
     prog.add_argument('binary', type=str)
     return prog.parse_args()
 
-def main():
-    args = parse_args()
-    binary = args.binary
-
-    conc_log = open('concrete.log', 'w')
-    symb_log = open('symbolic.log', 'w')
-
-    # Generate a program trace from a real execution
-    trace = record_trace(binary)
-    print(f'Found {len(trace)} trace points.')
-
+def collect_concrete_trace(binary: str) -> list[angr.SimState]:
     target = LLDBConcreteTarget(binary)
     proj = angr.Project(binary,
                         concrete_target=target,
                         use_sim_procedures=False)
 
-    entry_state = proj.factory.entry_state()
-    entry_state.options.add(angr.options.SYMBION_KEEP_STUBS_ON_SYNC)
-    entry_state.options.add(angr.options.SYMBION_SYNC_CLE)
+    state = proj.factory.entry_state()
+    state.options.add(angr.options.SYMBION_KEEP_STUBS_ON_SYNC)
+    state.options.add(angr.options.SYMBION_SYNC_CLE)
 
-    # We keep a history of concrete states at their addresses because of the
-    # backtracking approach described below.
-    concrete_states = {}
+    result = []
 
-    for (cur_idx, cur_inst), next_inst in zip(enumerate(trace[0:-1]), trace[1:]):
-        symbion = proj.factory.simgr(entry_state)
-        symbion.use_technique(Symbion(find=[cur_inst]))
+    trace = record_trace(binary)
+    for inst in trace:
+        symbion = proj.factory.simgr(state)
+        symbion.use_technique(Symbion(find=[inst]))
 
         conc_exploration = symbion.run()
-        conc_state = conc_exploration.found[0]
+        state = conc_exploration.found[0]
+        result.append(state.copy())
 
-        concrete_states[conc_state.addr] = conc_state.copy()
+    return result
 
-        # Start symbolic execution with the concrete ('truth') state and try
-        # to reach the next instruction in the trace
-        simgr = proj.factory.simgr(symbolize_state(conc_state))
-        symb_exploration = simgr.explore(find=next_inst)
+def main():
+    args = parse_args()
+    binary = args.binary
 
-        # Symbolic execution can't handle starting at some jump instructions.
-        # When this occurs, we re-start symbolic execution at an earlier
-        # instruction.
-        #
-        # Example:
-        #   0x401155      cmp   -0x4(%rbp),%eax
-        #   0x401158      jle   0x401162
-        #   ...
-        #   0x401162      addl  $0x1337,-0xc(%rbp)
-        #
-        # Here, symbolic execution can't find a valid state at `0x401162` when
-        # starting at `0x401158`, but it finds it successfully when starting at
-        # `0x401155`.
-        while len(symb_exploration.found) == 0 and cur_idx > 0:
-            print(f'Symbolic execution can\'t reach address {hex(next_inst)}'
-                  f' from {hex(cur_inst)}.'
-                  f' Attempting to reach it from {hex(trace[cur_idx - 1])}...')
-            cur_idx -= 1
-            cur_inst = trace[cur_idx]
-            conc_state = concrete_states[cur_inst]
-            simgr = proj.factory.simgr(symbolize_state(conc_state))
-            symb_exploration = simgr.explore(find=next_inst)
+    # Generate a program trace from a real execution
+    concrete_trace = collect_concrete_trace(binary)
+    trace = [int(state.addr) for state in concrete_trace]
+    print(f'Found {len(trace)} trace points.')
 
-        if len(symb_exploration.found) == 0:
-            print(f'Symbolic execution can\'t reach address {hex(next_inst)}.'
-                  ' Exiting.')
-            exit(1)
+    symbolic_trace = collect_symbolic_trace(binary, trace)
 
-        print_state(conc_state, file=conc_log)
-        print_state(symb_exploration.found[0], file=symb_log, conc_state=conc_state)
+    with open('concrete.log', 'w') as conc_log:
+        for state in concrete_trace:
+            print_state(state, file=conc_log)
+    with open('symbolic.log', 'w') as symb_log:
+        for conc, symb in zip(concrete_trace, symbolic_trace):
+            print_state(symb.state, file=symb_log, conc_state=conc)
 
 if __name__ == "__main__":
     main()

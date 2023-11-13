@@ -29,6 +29,9 @@ more architectures later. Currently, we only have X86.
 The following files belong to a prototype of a data-dependency generator based on symbolic
 execution:
 
+ - `symbolic.py`: Algorithms and data structures to compute and manipulate symbolic program
+transformations.
+
  - `gen_trace.py`: An invokable tool that generates an instruction trace for an executable's native
 execution. Is imported into `trace_symbols.py`, which uses the core function that records a trace.
 
@@ -44,9 +47,6 @@ changes it has made to the program state before that instruction.
 
     3. Writes the program state at each instruction to log files; writes the concrete state of the
 real execution to 'concrete.log' and the symbolic difference to 'symbolic.log'.
-
-    This first version is very fragile. As soon as angr can't handle a branch instruction (which is
-the case for almost any branch instruction), it aborts with an error.
 
  - `interpreter.py`: Contains an algorithm that evaluates a symbolic expression to a concrete value,
 using a reference state as input.
