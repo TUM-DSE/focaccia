@@ -72,14 +72,22 @@ class LLDBConcreteTarget(ConcreteTarget):
         self.debugger.Terminate()
         print(f'Program exited with status {self.process.GetState()}')
 
-    def read_register(self, regname: str) -> int:
+    def _get_register(self, regname: str) -> lldb.SBValue:
+        """Find a register by name.
+
+        :raise SimConcreteRegisterError: If no register with the specified name
+                                         can be found.
+        """
         frame = self.process.GetThreadAtIndex(0).GetFrameAtIndex(0)
         reg = frame.FindRegister(regname)
         if reg is None:
             raise SimConcreteRegisterError(
-                f'[In LLDBConcreteTarget.read_register]: Register {regname}'
+                f'[In LLDBConcreteTarget._get_register]: Register {regname}'
                 f' not found.')
+        return reg
 
+    def read_register(self, regname: str) -> int:
+        reg = self._get_register(regname)
         val = reg.GetValue()
         if val is None:
             raise SimConcreteRegisterError(
@@ -87,6 +95,15 @@ class LLDBConcreteTarget(ConcreteTarget):
                 f' invalid value of {val}.')
 
         return int(val, 16)
+
+    def write_register(self, regname: str, value: int):
+        reg = self._get_register(regname)
+        error = lldb.SBError()
+        reg.SetValueFromCString(hex(value), error)
+        if not error.success:
+            raise SimConcreteRegisterError(
+                f'[In LLDBConcreteTarget.write_register]: Unable to set'
+                f' {regname} to value {hex(value)}!')
 
     def read_memory(self, addr, size):
         err = lldb.SBError()
