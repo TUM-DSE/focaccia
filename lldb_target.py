@@ -65,6 +65,10 @@ class LLDBConcreteTarget(ConcreteTarget):
         assert(state == lldb.eStateStopped)
         self.process.Continue()
 
+    def step(self):
+        thread: lldb.SBThread = self.process.GetThreadAtIndex(0)
+        thread.StepInstruction(False)
+
     def stop(self):
         self.process.Stop()
 
