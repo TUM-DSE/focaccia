@@ -1,38 +1,40 @@
 from arch.arch import Arch
 
-class ProgramState():
+class ProgramState:
     """A snapshot of the program's state."""
     def __init__(self, arch: Arch):
         self.arch = arch
 
-        dict_t = dict[str, int]
-        self.regs = dict_t({ reg: None for reg in arch.regnames })
-        self.has_backwards = False
-        self.matched = False
+        dict_t = dict[str, int | None]
+        self.regs: dict_t = { reg: None for reg in arch.regnames }
 
-    def set_backwards(self):
-        self.has_backwards = True
+    def read(self, reg: str) -> int:
+        """Read a register's value.
+
+        :raise KeyError:   If `reg` is not a register name.
+        :raise ValueError: If the register has no value.
+        """
+        regname = self.arch.to_regname(reg)
+        if regname is None:
+            raise KeyError(f'Not a register name: {reg}')
+
+        assert(regname in self.regs)
+        regval = self.regs[regname]
+        if regval is None:
+            raise ValueError(f'Unable to read value of register {reg} (aka.'
+                             f' {regname}): The register contains no value.')
+        return regval
 
     def set(self, reg: str, value: int):
         """Assign a value to a register.
 
-        :raises RuntimeError: if the register already has a value.
+        :raise KeyError:   If `reg` is not a register name.
         """
-        assert(reg in self.arch.regnames)
+        regname = self.arch.to_regname(reg)
+        if regname is None:
+            raise KeyError(f'Not a register name: {regname}')
 
-        if self.regs[reg] != None:
-            raise RuntimeError("Reassigning register")
-        self.regs[reg] = value
-
-    def as_repr(self, reg: str):
-        """Get a representational string of a register's value."""
-        assert(reg in self.arch.regnames)
-
-        value = self.regs[reg]
-        if value is not None:
-            return hex(value)
-        else:
-            return "<none>"
+        self.regs[regname] = value
 
     def __repr__(self):
-        return self.regs.__repr__()
+        return repr(self.regs)

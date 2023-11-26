@@ -20,46 +20,17 @@ class SnapshotBuilder:
         self.states = []
         self.regnames = set(arch.regnames)
 
-    @staticmethod
-    def parse_flags(flag_reg: int):
-        flags = {'ZF': 0,
-                 'CF': 0,
-                 'OF': 0,
-                 'SF': 0,
-                 'PF': 0,
-                 'DF': 0}
-
-        # CF (Carry flag) Bit 0
-        # PF (Parity flag) Bit 2
-        # ZF (Zero flag) Bit 6
-        # SF (Sign flag) Bit 7
-        # TF (Trap flag) Bit 8
-        # IF (Interrupt enable flag) Bit 9
-        # DF (Direction flag) Bit 10
-        # OF (Overflow flag) Bit 11
-        flags['CF'] = int(0 != flag_reg & 1)
-        flags['ZF'] = int(0 != flag_reg & (1 << 6))
-        flags['OF'] = int(0 != flag_reg & (1 << 11))
-        flags['SF'] = int(0 != flag_reg & (1 << 7))
-        flags['DF'] = int(0 != flag_reg & (1 << 10))
-        flags['PF'] = int(0 != flag_reg & (1 << 1))
-        return flags
-
-    def create_snapshot(self, frame):
+    def create_snapshot(self, frame: lldb.SBFrame):
         state = ProgramState(self.arch)
         state.set('PC', frame.GetPC())
-        for reg in frame.GetRegisters():
-            for sub_reg in reg:
-                # Set the register's value in the current snapshot
-                regname = sub_reg.GetName().upper()
-                if regname in self.regnames:
-                    regval = int(sub_reg.GetValue(), base=16)
-                    if regname == 'RFLAGS':
-                        flags = SnapshotBuilder.parse_flags(regval)
-                        for flag, val in flags.items():
-                            state.set(f'flag {flag}', val)
-                    else:
-                        state.set(regname, regval)
+        for regname in self.arch.regnames:
+            reg = frame.FindRegister(regname)
+            regval = int(reg.GetValue(), base=16)
+            state.set(regname, regval)
+            if regname == 'RFLAGS':
+                flags = x86.decompose_rflags(regval)
+                for flag_name, val in flags.items():
+                    state.set(flag_name, val)
         return state
 
     def __call__(self, frame):

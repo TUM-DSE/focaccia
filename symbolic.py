@@ -10,7 +10,7 @@ from lldb_target import LLDBConcreteTarget
 
 def symbolize_state(state: angr.SimState,
                     arch: Arch = x86.ArchX86(),
-                    exclude: list[str] = ['PC', 'RBP', 'RSP'],
+                    exclude: list[str] = ['RIP', 'RBP', 'RSP'],
                     stack_name: str = 'stack',
                     stack_size: int = 0x10) \
         -> angr.SimState:

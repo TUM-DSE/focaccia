@@ -1,6 +1,5 @@
 import sys
-
-import IPython
+from typing import Any
 
 from miasm.arch.x86.sem import Lifter_X86_64
 from miasm.analysis.machine import Machine
@@ -31,37 +30,17 @@ def print_state(state: SymbolicState):
         print(f'{str(reg):10s} = {val}')
     print('=' * 80)
 
-def decompose_rflags(rflags: int) -> dict[str, int]:
-    """Decompose the RFLAGS register's value into its separate flags.
+def flag_names_to_miasm(regs: dict[str, Any]) -> dict:
+    """Convert standard flag names to Miasm's names.
 
-    :param rflags: The RFLAGS register value.
-    :return: A dictionary mapping Miasm's flag names to their values.
+    :param regs: Modified in-place.
+    :return: Returns `regs`.
     """
-    return {
-        # FLAGS
-        'cf':     rflags & 0x0001,
-        # reserved         0x0002
-        'pf':     rflags & 0x0004,
-        # reserved         0x0008
-        'af':     rflags & 0x0010,
-        # reserved         0x0020
-        'zf':     rflags & 0x0040,
-        'nf':     rflags & 0x0080,   # I think NF (Negative Flag) == SF (Sign Flag)?
-        'tf':     rflags & 0x0100,
-        'i_f':    rflags & 0x0200,
-        'df':     rflags & 0x0400,
-        'of':     rflags & 0x0800,
-        'iopl_f': rflags & 0x3000,
-        'nt':     rflags & 0x4000,
-
-        # EFLAGS
-        'rf':     rflags & 0x00010000,
-        'vm':     rflags & 0x00020000,
-        'ac':     rflags & 0x00040000,
-        'vif':    rflags & 0x00080000,
-        'vip':    rflags & 0x00100000,
-        'i_d':    rflags & 0x00200000,
-    }
+    regs['NF']     = regs.pop('SF')
+    regs['I_F']    = regs.pop('IF')
+    regs['IOPL_F'] = regs.pop('IOPL')
+    regs['I_D']    = regs.pop('ID')
+    return regs
 
 def disasm_elf(addr, mdis: disasmEngine) -> AsmCFG:
     """Try to disassemble all contents of an ELF file.
@@ -118,14 +97,16 @@ def create_state(target: LLDBConcreteTarget) -> MiasmProgramState:
     mem = []
 
     # Query and store register state
-    rflags = decompose_rflags(target.read_register('rflags'))
+    rflags = target.read_register('rflags')
+    rflags = flag_names_to_miasm(x86.decompose_rflags(rflags))
     for reg in machine.mn.regs.all_regs_ids_no_alias:
+        regname = reg.name.upper()  # Make flag names upper case, too
         try:
-            conc_val = target.read_register(reg.name)
+            conc_val = target.read_register(regname)
             regs[reg] = ExprInt(conc_val, reg.size)
         except SimConcreteRegisterError:
-            if reg.name in rflags:
-                regs[reg] = ExprInt(rflags[reg.name], reg.size)
+            if regname in rflags:
+                regs[reg] = ExprInt(rflags[regname], reg.size)
 
     # Query and store memory state
     for mapping in target.get_mappings():
