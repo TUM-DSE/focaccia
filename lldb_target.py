@@ -124,7 +124,7 @@ class LLDBConcreteTarget(ConcreteTarget):
             raise SimConcreteMemoryError(f'Error when writing to address'
                                          f' {hex(addr)}: {err}')
 
-    def get_mappings(self):
+    def get_mappings(self) -> list[MemoryMap]:
         mmap = []
 
         region_list = self.process.GetMemoryRegions()
@@ -134,11 +134,12 @@ class LLDBConcreteTarget(ConcreteTarget):
 
             perms = f'{"r" if region.IsReadable() else "-"}' \
                     f'{"w" if region.IsWritable() else "-"}' \
-                    f'{"x" if region.IsExecutable() else "-"}' \
+                    f'{"x" if region.IsExecutable() else "-"}'
+            name = region.GetName()
 
             mmap.append(MemoryMap(region.GetRegionBase(),
                                   region.GetRegionEnd(),
-                                  0,             # offset?
-                                  "<no-name>",   # name?
+                                  0,    # offset?
+                                  name if name is not None else '<none>',
                                   perms))
         return mmap

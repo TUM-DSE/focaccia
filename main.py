@@ -4,8 +4,10 @@ import argparse
 
 import arancini
 from arch import x86
-from compare import compare_simple
+from compare import compare_simple, compare_symbolic
+from gen_trace import record_trace
 from run import run_native_execution
+from symbolic import collect_symbolic_trace
 from utils import check_version, print_separator
 
 def parse_inputs(txl_path, ref_path, program):
@@ -49,11 +51,12 @@ def parse_arguments():
                         action='store_true',
                         default=True,
                         help='Path to oracle program')
-    parser.add_argument('--progressive',
+    parser.add_argument('--symbolic',
                         action='store_true',
                         default=False,
-                        help='Try to match exhaustively before declaring \
-                        mismatch')
+                        help='Use an advanced algorithm that uses symbolic'
+                             ' execution to determine accurate data'
+                             ' transformations')
     args = parser.parse_args()
     return args
 
@@ -66,13 +69,12 @@ def main():
 
     stats = args.stats
     verbose = args.verbose
-    progressive = args.progressive
 
     if verbose:
         print("Enabling verbose program output")
         print(f"Verbose: {verbose}")
         print(f"Statistics: {stats}")
-        print(f"Progressive: {progressive}")
+        print(f"Symbolic: {args.symbolic}")
 
     if program is None and reference_path is None:
         raise ValueError('Either program or path to native file must be'
@@ -85,7 +87,18 @@ def main():
             for snapshot in ref:
                 print(snapshot, file=w)
 
-    result = compare_simple(txl, ref)
+    if args.symbolic:
+        assert(program is not None)
+
+        full_trace = record_trace(program, args=[])
+        transforms = collect_symbolic_trace(program, full_trace)
+        # TODO: Transform the traces so that the states match
+        result = compare_symbolic(txl, transforms)
+
+        raise NotImplementedError('The symbolic comparison algorithm is not'
+                                  ' supported yet.')
+    else:
+        result = compare_simple(txl, ref)
 
     # Print results
     for res in result:
@@ -103,6 +116,12 @@ def main():
                   f' in the translation: {err["actual"]}.\n'
                   f'    (txl) {reg}: {hex(txl.regs[reg])}\n'
                   f'    (ref) {reg}: {hex(ref.regs[reg])}')
+
+    print()
+    print('#' * 60)
+    print(f'Found {sum(len(res["errors"]) for res in result)} errors.')
+    print('#' * 60)
+    print()
 
 if __name__ == "__main__":
     check_version('3.7')

@@ -9,7 +9,7 @@ from arch import x86
 from gen_trace import record_trace
 from interpreter import eval, SymbolResolver, SymbolResolveError
 from lldb_target import LLDBConcreteTarget
-from symbolic import symbolize_state, collect_symbolic_trace
+from symbolic import collect_symbolic_trace
 
 # Size of the memory region on the stack that is tracked symbolically
 # We track [rbp - STACK_SIZE, rbp).
@@ -95,12 +95,7 @@ def print_state(state: angr.SimState, file=sys.stdout, conc_state=None):
         print('<unable to read stack memory>', file=file)
     print('-' * 80, file=file)
 
-def parse_args():
-    prog = argparse.ArgumentParser()
-    prog.add_argument('binary', type=str)
-    return prog.parse_args()
-
-def collect_concrete_trace(binary: str) -> list[angr.SimState]:
+def collect_concrete_trace(binary: str, trace: list[int]) -> list[angr.SimState]:
     target = LLDBConcreteTarget(binary)
     proj = angr.Project(binary,
                         concrete_target=target,
@@ -110,29 +105,53 @@ def collect_concrete_trace(binary: str) -> list[angr.SimState]:
     state.options.add(angr.options.SYMBION_KEEP_STUBS_ON_SYNC)
     state.options.add(angr.options.SYMBION_SYNC_CLE)
 
+    # Remove first address from trace if it is the entry point.
+    # Symbion doesn't find an address if it's the current state.
+    if len(trace) > 0 and trace[0] == state.addr:
+        trace = trace[1:]
+
     result = []
 
-    trace = record_trace(binary)
     for inst in trace:
         symbion = proj.factory.simgr(state)
         symbion.use_technique(Symbion(find=[inst]))
 
-        conc_exploration = symbion.run()
+        try:
+            conc_exploration = symbion.run()
+        except angr.AngrError:
+            assert(target.is_exited())
+            break
         state = conc_exploration.found[0]
         result.append(state.copy())
 
     return result
 
+def parse_args():
+    prog = argparse.ArgumentParser()
+    prog.add_argument('binary', type=str)
+    prog.add_argument('--only-main', action='store_true', default=False)
+    return prog.parse_args()
+
 def main():
     args = parse_args()
     binary = args.binary
+    only_main = args.only_main
 
     # Generate a program trace from a real execution
-    concrete_trace = collect_concrete_trace(binary)
-    trace = [int(state.addr) for state in concrete_trace]
+    print('Collecting a program trace from a concrete execution...')
+    trace = record_trace(binary, [],
+                         func_name='main' if only_main else None)
     print(f'Found {len(trace)} trace points.')
 
-    symbolic_trace = collect_symbolic_trace(binary, trace)
+    print('Executing the trace to collect concrete program states...')
+    concrete_trace = collect_concrete_trace(binary, trace)
+
+    print('Re-tracing symbolically...')
+    try:
+        symbolic_trace = collect_symbolic_trace(binary, trace)
+    except KeyboardInterrupt:
+        print('Keyboard interrupt. Exiting.')
+        exit(0)
 
     with open('concrete.log', 'w') as conc_log:
         for state in concrete_trace:
@@ -140,6 +159,8 @@ def main():
     with open('symbolic.log', 'w') as symb_log:
         for conc, symb in zip(concrete_trace, symbolic_trace):
             print_state(symb.state, file=symb_log, conc_state=conc)
+
+    print('Written symbolic trace to "symbolic.log".')
 
 if __name__ == "__main__":
     main()

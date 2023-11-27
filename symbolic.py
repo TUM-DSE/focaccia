@@ -5,7 +5,7 @@ import claripy as cp
 from angr.exploration_techniques import Symbion
 
 from arch import Arch, x86
-from interpreter import SymbolResolver
+from interpreter import eval as eval_symbol, SymbolResolver
 from lldb_target import LLDBConcreteTarget
 
 def symbolize_state(state: angr.SimState,
@@ -28,7 +28,7 @@ def symbolize_state(state: angr.SimState,
 
     if stack_name not in _exclude:
         symb_stack = cp.BVS(stack_name, stack_size * 8, explicit_name=True)
-        state.memory.store(state.regs.rbp - stack_size, symb_stack)
+        state.memory.store(state.regs.rsp - stack_size, symb_stack)
 
     for reg in arch.regnames:
         if reg not in _exclude:
@@ -68,7 +68,15 @@ class SymbolicTransform:
         self.end_addr = end_inst
 
     def eval_register_transform(self, regname: str, resolver: SymbolResolver):
-        raise NotImplementedError('TODO')
+        """
+        :param regname:  Name of the register to evaluate.
+        :param resolver: A provider for the values to be plugged into the
+                         symbolic equation.
+
+        :raise angr.SimConcreteRegisterError: If the state contains no register
+                                              named `regname`.
+        """
+        return eval_symbol(resolver, self.state.regs.get(regname))
 
     def __repr__(self) -> str:
         return f'Symbolic state transformation: \
@@ -87,7 +95,7 @@ def collect_symbolic_trace(binary: str, trace: list[int]) \
                         concrete_target=target,
                         use_sim_procedures=False)
 
-    entry_state = proj.factory.entry_state()
+    entry_state = proj.factory.entry_state(addr=trace[0])
     entry_state.options.add(angr.options.SYMBION_KEEP_STUBS_ON_SYNC)
     entry_state.options.add(angr.options.SYMBION_SYNC_CLE)
 
@@ -105,13 +113,26 @@ def collect_symbolic_trace(binary: str, trace: list[int]) \
         symbion = proj.factory.simgr(entry_state)
         symbion.use_technique(Symbion(find=[cur_inst]))
 
-        conc_exploration = symbion.run()
+        try:
+            if cur_inst != entry_state.addr:
+                conc_exploration = symbion.run()
+            else:
+                symbion.move('active', 'found')
+                conc_exploration = symbion
+        except angr.AngrError as err:
+            print(f'Angr error: {err} Returning partial result.')
+            return result
         conc_state = conc_exploration.found[0]
+        entry_state = conc_state
 
         concrete_states[conc_state.addr] = conc_state.copy()
 
         # Start symbolic execution with the concrete ('truth') state and try
         # to reach the next instruction in the trace
+        #
+        # -- Notes --
+        # It does not even work when I feed the entirely concrete state
+        # `conc_state` that I receive from Symbion into the symbolic simgr.
         simgr = proj.factory.simgr(symbolize_state(conc_state))
         symb_exploration = simgr.explore(find=next_inst)
 
