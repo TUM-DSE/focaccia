@@ -31,56 +31,6 @@ def print_state(state: SymbolicState):
         print(f'{str(reg):10s} = {val}')
     print('=' * 80)
 
-def disasm_elf(addr, mdis: disasmEngine) -> AsmCFG:
-    """Try to disassemble all contents of an ELF file.
-
-    Based on the full-disassembly algorithm in
-    `https://github.com/cea-sec/miasm/blob/master/example/disasm/full.py`
-    (as of commit `a229f4e`).
-
-    :return: An asmcfg.
-    """
-    # Settings for the engine
-    mdis.follow_call = True
-
-    # Initial run
-    asmcfg = mdis.dis_multiblock(addr)
-
-    todo = [addr]
-    done = set()
-    done_interval = interval()
-
-    while todo:
-        while todo:
-            ad = todo.pop(0)
-            if ad in done:
-                continue
-            done.add(ad)
-            asmcfg = mdis.dis_multiblock(ad, asmcfg)
-
-            for block in asmcfg.blocks:
-                for l in block.lines:
-                    done_interval += interval([(l.offset, l.offset + l.l)])
-
-            # Process recursive functions
-            for block in asmcfg.blocks:
-                instr = block.get_subcall_instr()
-                if not instr:
-                    continue
-                for dest in instr.getdstflow(mdis.loc_db):
-                    if not dest.is_loc():
-                        continue
-                    offset = mdis.loc_db.get_location_offset(dest.loc_key)
-                    todo.append(offset)
-
-        # Disassemble all:
-        for _, b in done_interval.intervals:
-            if b in done:
-                continue
-            todo.append(b)
-
-    return asmcfg
-
 def create_state(target: LLDBConcreteTarget) -> ProgramState:
     def standardize_flag_name(regname: str) -> str:
         regname = regname.upper()
@@ -117,14 +67,16 @@ def create_state(target: LLDBConcreteTarget) -> ProgramState:
 
     return state
 
-def record_concrete_states(binary):
+def record_concrete_states(binary) -> list[tuple[int, ProgramState]]:
     """Record a trace of concrete program states by stepping through an
     executable.
     """
-    states: dict[int, ProgramState] = {}
+    addrs = set()
+    states = []
     target = LLDBConcreteTarget(binary)
     while not target.is_exited():
-        states[target.read_register('pc')] = create_state(target)
+        addrs.add(target.read_register('pc'))
+        states.append((target.read_register('pc'), create_state(target)))
         target.step()
     return states
 
@@ -139,7 +91,9 @@ pc = int(cont.entry_point)
 # Disassemble binary
 print(f'Disassembling "{binary}"...')
 mdis = machine.dis_engine(cont.bin_stream, loc_db=loc_db)
-asmcfg = disasm_elf(pc, mdis)
+mdis.follow_call = True
+asmcfg = mdis.dis_multiblock(pc)
+
 with open('full_disasm', 'w') as file:
     print(f'Entry point: {hex(pc)}\n', file=file)
     print_blocks(asmcfg, file)
@@ -159,9 +113,9 @@ print(f'--- Lifted disassembly to IR. Log written to "full_ir.log".')
 
 # Record concrete reference states to guide symbolic execution
 print(f'Recording concrete program trace...')
-conc_states = record_concrete_states(binary)
-conc_states = {a: MiasmConcreteState(s, loc_db) for a, s in conc_states.items()}
-print(f'Recorded {len(conc_states)} trace points.')
+conc_trace = record_concrete_states(binary)
+conc_trace = [(a, MiasmConcreteState(s, loc_db)) for a, s in conc_trace]
+print(f'Recorded {len(conc_trace)} trace points.')
 
 def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
     """Run a basic block.
@@ -189,10 +143,18 @@ def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
         # it based on the last recorded concrete state at the start of the
         # current basic block.
         pc = eval_expr(symbolic_pc, conc_state)
+
+        # Initial disassembly might not find all blocks in the binary.
+        # Disassemble code ad-hoc if the new PC has not yet been disassembled.
         if ircfg.get_block(pc) is None:
-            print(f'Unable to access IR block at PC {pc}'
-                  f' (evaluated from the expression PC = {symbolic_pc}).')
-            return None
+            addr = int(pc)
+            cfg = mdis.dis_multiblock(addr)
+            for block in cfg.blocks:
+                lifter.add_asmblock_to_ircfg(block, ircfg)
+            assert(ircfg.get_block(pc) is not None)
+
+            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(addr)}'
+                  f' (evaluated from symbolic PC {symbolic_pc}).')
 
         # If the resulting PC is an integer, i.e. a concrete address that can
         # be mapped to the assembly code, we return as we have reached the end
@@ -209,14 +171,28 @@ last_pc = None  # Debugging info
 # Run until no more states can be reached
 print(f'Re-tracing symbolically...')
 while pc is not None:
+    def step_trace(trace, pc: int):
+        for i, (addr, _) in enumerate(trace):
+            if addr == pc:
+                return trace[i:]
+        return []
+
     assert(type(pc) is int)
-    if pc not in conc_states:
+
+    # Find next trace point (the concrete trace may have stopped at more
+    # states than the symbolic trace does)
+    conc_trace = step_trace(conc_trace, pc)
+    if not conc_trace:
         print(f'Next PC {hex(pc)} is not contained in the concrete program'
               f' trace. Last valid PC: {hex(last_pc)}')
         break
     last_pc = pc
 
-    initial_state = conc_states[pc]
+    addr, initial_state = conc_trace[0]
+    assert(addr == pc)
+    conc_trace.pop(0)
+
+    # Run symbolic execution
     pc = run_block(pc, initial_state)
 
 print(f'--- No new PC found. Exiting.')
