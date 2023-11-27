@@ -15,7 +15,8 @@ from miasm.analysis.dse import DSEEngine
 from lldb_target import LLDBConcreteTarget, SimConcreteMemoryError, \
                         SimConcreteRegisterError
 from arch import x86
-from miasm_util import MiasmProgramState, eval_expr
+from miasm_util import MiasmConcreteState, eval_expr
+from snapshot import ProgramState
 
 def print_blocks(asmcfg, file=sys.stdout):
     print('=' * 80, file=file)
@@ -29,18 +30,6 @@ def print_state(state: SymbolicState):
     for reg, val in state.iteritems():
         print(f'{str(reg):10s} = {val}')
     print('=' * 80)
-
-def flag_names_to_miasm(regs: dict[str, Any]) -> dict:
-    """Convert standard flag names to Miasm's names.
-
-    :param regs: Modified in-place.
-    :return: Returns `regs`.
-    """
-    regs['NF']     = regs.pop('SF')
-    regs['I_F']    = regs.pop('IF')
-    regs['IOPL_F'] = regs.pop('IOPL')
-    regs['I_D']    = regs.pop('ID')
-    return regs
 
 def disasm_elf(addr, mdis: disasmEngine) -> AsmCFG:
     """Try to disassemble all contents of an ELF file.
@@ -92,33 +81,52 @@ def disasm_elf(addr, mdis: disasmEngine) -> AsmCFG:
 
     return asmcfg
 
-def create_state(target: LLDBConcreteTarget) -> MiasmProgramState:
-    regs: dict[ExprId, ExprInt] = {}
-    mem = []
+def create_state(target: LLDBConcreteTarget) -> ProgramState:
+    def standardize_flag_name(regname: str) -> str:
+        regname = regname.upper()
+        if regname in MiasmConcreteState.miasm_flag_aliases:
+            return MiasmConcreteState.miasm_flag_aliases[regname]
+        return regname
+
+    state = ProgramState(x86.ArchX86())
 
     # Query and store register state
-    rflags = target.read_register('rflags')
-    rflags = flag_names_to_miasm(x86.decompose_rflags(rflags))
+    rflags = x86.decompose_rflags(target.read_register('rflags'))
     for reg in machine.mn.regs.all_regs_ids_no_alias:
-        regname = reg.name.upper()  # Make flag names upper case, too
+        regname = reg.name
         try:
             conc_val = target.read_register(regname)
-            regs[reg] = ExprInt(conc_val, reg.size)
+            state.set(regname, conc_val)
+        except KeyError:
+            pass
         except SimConcreteRegisterError:
+            regname = standardize_flag_name(regname)
             if regname in rflags:
-                regs[reg] = ExprInt(rflags[regname], reg.size)
+                state.set(regname, rflags[regname])
 
     # Query and store memory state
     for mapping in target.get_mappings():
         assert(mapping.end_address > mapping.start_address)
         size = mapping.end_address - mapping.start_address
         try:
-            mem_state = target.read_memory(mapping.start_address, size)
+            data = target.read_memory(mapping.start_address, size)
+            state.write_memory(mapping.start_address, data)
         except SimConcreteMemoryError:
-            mem_state = f'<unable to access "{mapping.name}">'
-        mem.append((mapping, mem_state))
+            # Unable to read memory from mapping
+            pass
 
-    return MiasmProgramState(regs, mem)
+    return state
+
+def record_concrete_states(binary):
+    """Record a trace of concrete program states by stepping through an
+    executable.
+    """
+    states: dict[int, ProgramState] = {}
+    target = LLDBConcreteTarget(binary)
+    while not target.is_exited():
+        states[target.read_register('pc')] = create_state(target)
+        target.step()
+    return states
 
 binary = 'test_program'
 
@@ -149,19 +157,13 @@ with open('full_ir', 'w') as file:
     print('=' * 80, file=file)
 print(f'--- Lifted disassembly to IR. Log written to "full_ir.log".')
 
-def record_concrete_states(binary):
-    states = {}
-    target = LLDBConcreteTarget(binary)
-    while not target.is_exited():
-        states[target.read_register('pc')] = create_state(target)
-        target.step()
-    return states
-
+# Record concrete reference states to guide symbolic execution
 print(f'Recording concrete program trace...')
 conc_states = record_concrete_states(binary)
+conc_states = {a: MiasmConcreteState(s, loc_db) for a, s in conc_states.items()}
 print(f'Recorded {len(conc_states)} trace points.')
 
-def run_block(pc: int, conc_state: MiasmProgramState) -> int | None:
+def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
     """Run a basic block.
 
     Tries to run IR blocks until the end of an ASM block/basic block is
@@ -186,7 +188,7 @@ def run_block(pc: int, conc_state: MiasmProgramState) -> int | None:
         # The new program counter might be a symbolic value. Try to evaluate
         # it based on the last recorded concrete state at the start of the
         # current basic block.
-        pc = eval_expr(symbolic_pc, conc_state, loc_db)
+        pc = eval_expr(symbolic_pc, conc_state)
         if ircfg.get_block(pc) is None:
             print(f'Unable to access IR block at PC {pc}'
                   f' (evaluated from the expression PC = {symbolic_pc}).')
