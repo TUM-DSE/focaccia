@@ -1,20 +1,14 @@
 import sys
-from typing import Any
 
 from miasm.arch.x86.sem import Lifter_X86_64
 from miasm.analysis.machine import Machine
-from miasm.analysis.binary import Container, ContainerELF
-from miasm.core.asmblock import disasmEngine, AsmCFG
-from miasm.core.interval import interval
+from miasm.analysis.binary import ContainerELF
 from miasm.core.locationdb import LocationDB
-from miasm.expression.expression import ExprId, ExprInt, ExprLoc
 from miasm.ir.symbexec import SymbolicExecutionEngine, SymbolicState
-from miasm.ir.ir import IRBlock, AsmBlock
-from miasm.analysis.dse import DSEEngine
 
+from arch import x86
 from lldb_target import LLDBConcreteTarget, SimConcreteMemoryError, \
                         SimConcreteRegisterError
-from arch import x86
 from miasm_util import MiasmConcreteState, eval_expr
 from snapshot import ProgramState
 
