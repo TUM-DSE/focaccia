@@ -1,4 +1,5 @@
 import sys
+import time
 
 from miasm.arch.x86.sem import Lifter_X86_64
 from miasm.analysis.machine import Machine
@@ -71,6 +72,13 @@ def create_state(target: LLDBConcreteTarget) -> ProgramState:
 
     return state
 
+symb_exec_time = 0
+conc_exec_time = 0
+record_conc_trace_time = 0
+disasm_time = 0
+
+total_time_start = time.perf_counter_ns()
+
 binary = sys.argv[1]
 
 loc_db = LocationDB()
@@ -99,7 +107,9 @@ ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
 
 # Record concrete reference states to guide symbolic execution
 print(f'Recording concrete program trace...')
+conc_trace_time_start = time.perf_counter_ns()
 conc_trace = record_trace(binary, func_name=None)
+record_conc_trace_time = time.perf_counter_ns() - conc_trace_time_start
 print(f'Recorded {len(conc_trace)} trace points.')
 assert(conc_trace[0] == pc)
 
@@ -120,6 +130,9 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
              found. This happens when an error occurs or when the program
              exits.
     """
+    global disasm_time
+    global symb_exec_time
+
     # Start with a clean, purely symbolic state
     engine = SymbolicExecutionEngine(lifter)
 
@@ -133,15 +146,17 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
         # Disassemble code ad-hoc if the current PC has not yet been
         # disassembled.
         if irblock is None:
-            addr = int(pc)
-            cfg = mdis.dis_multiblock(addr)
+            disasm_time_start = time.perf_counter_ns()
+            cfg = mdis.dis_multiblock(pc)
             for irblock in cfg.blocks:
                 lifter.add_asmblock_to_ircfg(irblock, ircfg)
-            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(addr)}.')
+            disasm_time += time.perf_counter_ns() - disasm_time_start
+            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(int(pc))}.')
 
             irblock = ircfg.get_block(pc)
             assert(irblock is not None)
 
+        symb_exec_time_start = time.perf_counter_ns()
         for assignblk in irblock:
             modified = engine.eval_assignblk(assignblk)
             symb_trace.append((assignblk.instr.offset, modified))
@@ -150,6 +165,8 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
             engine.eval_updt_assignblk(assignblk)
 
         symbolic_pc = engine.eval_expr(engine.lifter.IRDst)
+
+        symb_exec_time += time.perf_counter_ns() - symb_exec_time_start
 
         # If the resulting PC is an integer, i.e. a concrete address that can
         # be mapped to the assembly code, we return as we have reached the end
@@ -166,8 +183,10 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
 
 symb_trace = [] # The list of generated symbolic transforms per instruction
 
+conc_exec_time_start = time.perf_counter_ns()
 target = LLDBConcreteTarget(binary)
 initial_state = create_state(target)
+conc_exec_time += time.perf_counter_ns() - conc_exec_time_start
 
 # Run until no more states can be reached
 print(f'Re-tracing symbolically...')
@@ -194,13 +213,24 @@ while pc is not None:
         print(f'Next PC {hex(pc)} is not contained in the concrete trace.')
         break
 
+    conc_exec_time_start = time.perf_counter_ns()
     step_through_trace(target, conc_trace[:pc_index])
     conc_trace = conc_trace[pc_index:]
     initial_state = create_state(target)
+    conc_exec_time += time.perf_counter_ns() - conc_exec_time_start
 
     # Sometimes, miasm generates ghost instructions at the end of basic blocks.
     # Don't include them in the symbolic trace.
     symb_trace.extend(strace[:pc_index])
 
+total_time = time.perf_counter_ns() - total_time_start
+other_time = total_time - record_conc_trace_time - symb_exec_time - conc_exec_time
+
 print(f'--- {len(symb_trace)} instructions traced.')
 print(f'--- No new PC found. Exiting.')
+print()
+print(f' Total time:              {total_time * 1e-6:10.3f} ms')
+print(f' Concrete trace time:     {record_conc_trace_time * 1e-6:10.3f} ms')
+print(f' Symbolic execution time: {symb_exec_time * 1e-6:10.3f} ms')
+print(f' Concrete execution time: {conc_exec_time * 1e-6:10.3f} ms')
+print(f' Other:                   {other_time * 1e-6:10.3f} ms')
