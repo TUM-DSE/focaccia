@@ -8,6 +8,7 @@ from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine, SymbolicState
 
 from arch import x86
+from gen_trace import record_trace
 from lldb_target import LLDBConcreteTarget, SimConcreteMemoryError, \
                         SimConcreteRegisterError
 from miasm_util import MiasmConcreteState, eval_expr
@@ -25,6 +26,14 @@ def print_state(state: SymbolicState):
     for reg, val in state.iteritems():
         print(f'{str(reg):10s} = {val}')
     print('=' * 80)
+
+def step_through_trace(target: LLDBConcreteTarget, trace: list[int]):
+    """Step a concrete target forward by some instructions."""
+    assert(not trace or trace[0] == target.read_register('pc'))
+    for i in range(len(trace)):
+        assert(not target.is_exited())
+        assert(target.read_register('pc') == trace[i])
+        target.step()
 
 def create_state(target: LLDBConcreteTarget) -> ProgramState:
     def standardize_flag_name(regname: str) -> str:
@@ -62,19 +71,6 @@ def create_state(target: LLDBConcreteTarget) -> ProgramState:
 
     return state
 
-def record_concrete_states(binary) -> list[tuple[int, ProgramState]]:
-    """Record a trace of concrete program states by stepping through an
-    executable.
-    """
-    addrs = set()
-    states = []
-    target = LLDBConcreteTarget(binary)
-    while not target.is_exited():
-        addrs.add(target.read_register('pc'))
-        states.append((target.read_register('pc'), create_state(target)))
-        target.step()
-    return states
-
 binary = sys.argv[1]
 
 loc_db = LocationDB()
@@ -103,9 +99,9 @@ ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
 
 # Record concrete reference states to guide symbolic execution
 print(f'Recording concrete program trace...')
-conc_trace = record_concrete_states(binary)
-conc_trace = [(a, MiasmConcreteState(s, loc_db)) for a, s in conc_trace]
+conc_trace = record_trace(binary, func_name=None)
 print(f'Recorded {len(conc_trace)} trace points.')
+assert(conc_trace[0] == pc)
 
 def run_block(pc: int, conc_state: MiasmConcreteState) \
         -> tuple[int | None, list]:
@@ -168,36 +164,43 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
             # current basic block.
             pc = eval_expr(symbolic_pc, conc_state)
 
-last_pc = None  # Debugging info
 symb_trace = [] # The list of generated symbolic transforms per instruction
+
+target = LLDBConcreteTarget(binary)
+initial_state = create_state(target)
 
 # Run until no more states can be reached
 print(f'Re-tracing symbolically...')
 while pc is not None:
-    def step_trace(trace, pc: int):
-        for i, (addr, _) in enumerate(trace):
-            if addr == pc:
-                return trace[i:]
-        return []
-
-    assert(type(pc) is int)
-
-    # Find next trace point (the concrete trace may have stopped at more
-    # states than the symbolic trace does)
-    conc_trace = step_trace(conc_trace, pc)
-    if not conc_trace:
-        print(f'Next PC {hex(pc)} is not contained in the concrete program'
-              f' trace. Last valid PC: {hex(last_pc)}')
-        break
-    last_pc = pc
-
-    addr, initial_state = conc_trace[0]
-    assert(addr == pc)
-    conc_trace.pop(0)
-
     # Run symbolic execution
-    pc, trace = run_block(pc, initial_state)
-    symb_trace.extend(trace)
+    pc, strace = run_block(pc, MiasmConcreteState(initial_state, loc_db))
 
-print(f'--- {len(symb_trace)} instructions traced ({len(conc_trace)} concrete instr).')
+    if pc is None:
+        break
+
+    # Step concrete target forward.
+    #
+    # The concrete target now lags behind the symbolic execution by exactly
+    # one basic block: the one that we just executed. Find the next program
+    # counter in the concrete trace and run the target up to it.
+    try:
+        # Find number of instructions in the executed basic block.
+        # Start at index 1 in case the next program counter is the same as the
+        # current one.
+        pc_index = conc_trace.index(pc, 1)
+    except ValueError:
+        # End of concrete trace has been reached.
+        symb_trace.extend(strace[:len(conc_trace)])
+        print(f'Next PC {hex(pc)} is not contained in the concrete trace.')
+        break
+
+    step_through_trace(target, conc_trace[:pc_index])
+    conc_trace = conc_trace[pc_index:]
+    initial_state = create_state(target)
+
+    # Sometimes, miasm generates ghost instructions at the end of basic blocks.
+    # Don't include them in the symbolic trace.
+    symb_trace.extend(strace[:pc_index])
+
+print(f'--- {len(symb_trace)} instructions traced.')
 print(f'--- No new PC found. Exiting.')
