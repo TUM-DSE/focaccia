@@ -3,6 +3,7 @@ import sys
 from miasm.arch.x86.sem import Lifter_X86_64
 from miasm.analysis.machine import Machine
 from miasm.analysis.binary import ContainerELF
+from miasm.core.asmblock import AsmCFG
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine, SymbolicState
 
@@ -74,7 +75,7 @@ def record_concrete_states(binary) -> list[tuple[int, ProgramState]]:
         target.step()
     return states
 
-binary = 'test_program'
+binary = sys.argv[1]
 
 loc_db = LocationDB()
 cont = ContainerELF.from_stream(open(binary, 'rb'), loc_db)
@@ -86,24 +87,19 @@ pc = int(cont.entry_point)
 print(f'Disassembling "{binary}"...')
 mdis = machine.dis_engine(cont.bin_stream, loc_db=loc_db)
 mdis.follow_call = True
-asmcfg = mdis.dis_multiblock(pc)
-
-with open('full_disasm', 'w') as file:
-    print(f'Entry point: {hex(pc)}\n', file=file)
-    print_blocks(asmcfg, file)
-print(f'--- Disassembled "{binary}". Log written to "full_disasm.log".')
+asmcfg = AsmCFG(loc_db)
 
 # Lift disassembly to IR
 print(f'Lifting disassembly to IR...')
 lifter: Lifter_X86_64 = machine.lifter(loc_db)
 ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
-with open('full_ir', 'w') as file:
-    print('=' * 80, file=file)
-    for block in ircfg.blocks.values():
-        print(block, file=file)
-        print('-' * 60, file=file)
-    print('=' * 80, file=file)
-print(f'--- Lifted disassembly to IR. Log written to "full_ir.log".')
+
+# TODO: To implement support for unimplemented instructions, add their
+# ASM->IR implementations to the `mnemo_func` array in
+# `miasm/arch/x86/sem.py:5142`.
+#
+# For XGETBV, I might have to add the extended control register XCR0 first.
+# This might be a nontrivial patch to Miasm.
 
 # Record concrete reference states to guide symbolic execution
 print(f'Recording concrete program trace...')
@@ -111,7 +107,8 @@ conc_trace = record_concrete_states(binary)
 conc_trace = [(a, MiasmConcreteState(s, loc_db)) for a, s in conc_trace]
 print(f'Recorded {len(conc_trace)} trace points.')
 
-def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
+def run_block(pc: int, conc_state: MiasmConcreteState) \
+        -> tuple[int | None, list]:
     """Run a basic block.
 
     Tries to run IR blocks until the end of an ASM block/basic block is
@@ -130,25 +127,33 @@ def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
     # Start with a clean, purely symbolic state
     engine = SymbolicExecutionEngine(lifter)
 
-    while True:
-        symbolic_pc = engine.run_block_at(ircfg, pc)
+    # A list of symbolic transformation for each single instruction
+    symb_trace = []
 
-        # The new program counter might be a symbolic value. Try to evaluate
-        # it based on the last recorded concrete state at the start of the
-        # current basic block.
-        pc = eval_expr(symbolic_pc, conc_state)
+    while True:
+        irblock = ircfg.get_block(pc)
 
         # Initial disassembly might not find all blocks in the binary.
-        # Disassemble code ad-hoc if the new PC has not yet been disassembled.
-        if ircfg.get_block(pc) is None:
+        # Disassemble code ad-hoc if the current PC has not yet been
+        # disassembled.
+        if irblock is None:
             addr = int(pc)
             cfg = mdis.dis_multiblock(addr)
-            for block in cfg.blocks:
-                lifter.add_asmblock_to_ircfg(block, ircfg)
-            assert(ircfg.get_block(pc) is not None)
+            for irblock in cfg.blocks:
+                lifter.add_asmblock_to_ircfg(irblock, ircfg)
+            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(addr)}.')
 
-            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(addr)}'
-                  f' (evaluated from symbolic PC {symbolic_pc}).')
+            irblock = ircfg.get_block(pc)
+            assert(irblock is not None)
+
+        for assignblk in irblock:
+            modified = engine.eval_assignblk(assignblk)
+            symb_trace.append((assignblk.instr.offset, modified))
+
+            # Run a single instruction
+            engine.eval_updt_assignblk(assignblk)
+
+        symbolic_pc = engine.eval_expr(engine.lifter.IRDst)
 
         # If the resulting PC is an integer, i.e. a concrete address that can
         # be mapped to the assembly code, we return as we have reached the end
@@ -156,11 +161,15 @@ def run_block(pc: int, conc_state: MiasmConcreteState) -> int | None:
         # block, in which case we keep executing until we reach the end of an
         # ASM block.
         try:
-            return int(symbolic_pc)
+            return int(symbolic_pc), symb_trace
         except:
-            pass
+            # The new program counter might be a symbolic value. Try to evaluate
+            # it based on the last recorded concrete state at the start of the
+            # current basic block.
+            pc = eval_expr(symbolic_pc, conc_state)
 
 last_pc = None  # Debugging info
+symb_trace = [] # The list of generated symbolic transforms per instruction
 
 # Run until no more states can be reached
 print(f'Re-tracing symbolically...')
@@ -187,6 +196,8 @@ while pc is not None:
     conc_trace.pop(0)
 
     # Run symbolic execution
-    pc = run_block(pc, initial_state)
+    pc, trace = run_block(pc, initial_state)
+    symb_trace.extend(trace)
 
+print(f'--- {len(symb_trace)} instructions traced ({len(conc_trace)} concrete instr).')
 print(f'--- No new PC found. Exiting.')
