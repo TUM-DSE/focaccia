@@ -3,6 +3,24 @@
 This repository contains initial code for comprehensive testing of binary
 translators.
 
+## Requirements
+
+We require at least LLDB version 17 for `fs_base`/`gs_base` register support.
+
+I had to compile LLDB myself; these are the steps I had to take (you also need swig version >= 4):
+
+```
+git clone https://github.com/llvm/llvm-project <llvm-path>
+cd <llvm-path>
+cmake -S llvm -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;lldb" -DLLDB_ENABLE_PYTHON=TRUE -DLLDB_ENABLE_SWIG=TRUE
+cmake --build build/ --parallel $(nproc)
+
+# Add the built LLDB python bindings to your PYTHONPATH:
+PYTHONPATH="$PYTHONPATH:$(./build/bin/lldb -P)"
+```
+
+It will take a while to compile.
+
 ## Snapshot-comparison framework
 
 The following files belong to a rough framework for the snapshot comparison engine:
