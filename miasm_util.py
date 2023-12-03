@@ -6,6 +6,27 @@ from miasm.expression.simplifications import expr_simp_explicit
 
 from snapshot import ProgramState
 
+def simp_segm(expr_simp, expr: ExprOp):
+    """Simplify a segmentation expression to an addition of the segment
+    register's base value and the address argument.
+    """
+    import miasm.arch.x86.regs as regs
+
+    base_regs = {
+        regs.FS: ExprId('fs_base', 64),
+        regs.GS: ExprId('gs_base', 64),
+    }
+
+    if expr.op == 'segm':
+        segm, addr = expr.args
+        assert(segm == regs.FS or segm == regs.GS)
+        return expr_simp(base_regs[segm] + addr)
+    return expr
+
+# The expression simplifier used in this module
+expr_simp = expr_simp_explicit
+expr_simp.enable_passes({ExprOp: [simp_segm]})
+
 class MiasmConcreteState:
     miasm_flag_aliases = {
         'NF':     'SF',
@@ -49,7 +70,7 @@ def eval_expr(expr: Expr, conc_state: MiasmConcreteState) -> int:
         raise TypeError("Unknown expr type")
 
     ret = visitor(expr, conc_state)
-    ret = expr_simp_explicit(ret)
+    ret = expr_simp(ret)
     assert(ret is not None)
 
     return ret

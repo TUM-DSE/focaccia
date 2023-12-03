@@ -1,9 +1,9 @@
 import sys
 import time
 
-from miasm.arch.x86.sem import Lifter_X86_64
-from miasm.analysis.machine import Machine
 from miasm.analysis.binary import ContainerELF
+from miasm.analysis.machine import Machine
+from miasm.arch.x86.sem import Lifter_X86_64
 from miasm.core.asmblock import AsmCFG
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine, SymbolicState
@@ -47,8 +47,7 @@ def create_state(target: LLDBConcreteTarget) -> ProgramState:
 
     # Query and store register state
     rflags = x86.decompose_rflags(target.read_register('rflags'))
-    for reg in machine.mn.regs.all_regs_ids_no_alias:
-        regname = reg.name
+    for regname in x86.regnames:
         try:
             conc_val = target.read_register(regname)
             state.set(regname, conc_val)
