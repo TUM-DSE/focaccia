@@ -24,6 +24,7 @@ regnames = [
     'RFLAGS',
     # Segment registers
     'CS', 'DS', 'SS', 'ES', 'FS', 'GS',
+    'FS_BASE', 'GS_BASE',
     # FLAGS
     'CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',
     # EFLAGS
