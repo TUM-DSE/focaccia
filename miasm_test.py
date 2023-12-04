@@ -9,7 +9,6 @@ from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine, SymbolicState
 
 from arch import x86
-from gen_trace import record_trace
 from lldb_target import LLDBConcreteTarget, SimConcreteMemoryError, \
                         SimConcreteRegisterError
 from miasm_util import MiasmConcreteState, eval_expr
@@ -28,13 +27,16 @@ def print_state(state: SymbolicState):
         print(f'{str(reg):10s} = {val}')
     print('=' * 80)
 
-def step_through_trace(target: LLDBConcreteTarget, trace: list[int]):
-    """Step a concrete target forward by some instructions."""
-    assert(not trace or trace[0] == target.read_register('pc'))
-    for i in range(len(trace)):
-        assert(not target.is_exited())
-        assert(target.read_register('pc') == trace[i])
+def step_until(target: LLDBConcreteTarget, addr: int) -> list[int]:
+    """Step a concrete target to a specific instruction.
+    :return: Trace of all instructions executed.
+    """
+    trace = [target.read_register('pc')]
+    target.step()
+    while not target.is_exited() and target.read_register('pc') != addr:
+        trace.append(target.read_register('pc'))
         target.step()
+    return trace
 
 def create_state(target: LLDBConcreteTarget) -> ProgramState:
     def standardize_flag_name(regname: str) -> str:
@@ -73,7 +75,6 @@ def create_state(target: LLDBConcreteTarget) -> ProgramState:
 
 symb_exec_time = 0
 conc_exec_time = 0
-record_conc_trace_time = 0
 disasm_time = 0
 
 total_time_start = time.perf_counter_ns()
@@ -85,15 +86,14 @@ cont = ContainerELF.from_stream(open(binary, 'rb'), loc_db)
 machine = Machine(cont.arch)
 
 pc = int(cont.entry_point)
+if len(sys.argv) > 2:
+    pc = int(sys.argv[2], 16)
 
-# Disassemble binary
-print(f'Disassembling "{binary}"...')
+# Create disassembly/lifting context
 mdis = machine.dis_engine(cont.bin_stream, loc_db=loc_db)
 mdis.follow_call = True
 asmcfg = AsmCFG(loc_db)
 
-# Lift disassembly to IR
-print(f'Lifting disassembly to IR...')
 lifter: Lifter_X86_64 = machine.lifter(loc_db)
 ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
 
@@ -103,14 +103,6 @@ ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
 #
 # For XGETBV, I might have to add the extended control register XCR0 first.
 # This might be a nontrivial patch to Miasm.
-
-# Record concrete reference states to guide symbolic execution
-print(f'Recording concrete program trace...')
-conc_trace_time_start = time.perf_counter_ns()
-conc_trace = record_trace(binary, func_name=None)
-record_conc_trace_time = time.perf_counter_ns() - conc_trace_time_start
-print(f'Recorded {len(conc_trace)} trace points.')
-assert(conc_trace[0] == pc)
 
 def run_block(pc: int, conc_state: MiasmConcreteState) \
         -> tuple[int | None, list]:
@@ -155,6 +147,8 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
             irblock = ircfg.get_block(pc)
             assert(irblock is not None)
 
+        # Execute each instruction in the current basic block and record the
+        # resulting change in program state.
         symb_exec_time_start = time.perf_counter_ns()
         for assignblk in irblock:
             modified = engine.eval_assignblk(assignblk)
@@ -163,7 +157,13 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
             # Run a single instruction
             engine.eval_updt_assignblk(assignblk)
 
+        # Obtain the next program counter after the basic block.
         symbolic_pc = engine.eval_expr(engine.lifter.IRDst)
+
+        # The new program counter might be a symbolic value. Try to evaluate
+        # it based on the last recorded concrete state at the start of the
+        # current basic block.
+        pc = eval_expr(symbolic_pc, conc_state)
 
         symb_exec_time += time.perf_counter_ns() - symb_exec_time_start
 
@@ -172,13 +172,16 @@ def run_block(pc: int, conc_state: MiasmConcreteState) \
         # of a basic block. Otherwise we might have reached the end of an IR
         # block, in which case we keep executing until we reach the end of an
         # ASM block.
+        #
+        # Example: This happens for the REP STOS instruction, for which Miasm
+        # generates multiple IR blocks.
         try:
-            return int(symbolic_pc), symb_trace
+            return int(pc), symb_trace
         except:
-            # The new program counter might be a symbolic value. Try to evaluate
-            # it based on the last recorded concrete state at the start of the
-            # current basic block.
-            pc = eval_expr(symbolic_pc, conc_state)
+            # We reach this point when the program counter is an IR block
+            # location (not an integer). That happens when single ASM
+            # instructions are translated to multiple IR instructions.
+            pass
 
 symb_trace = [] # The list of generated symbolic transforms per instruction
 
@@ -187,10 +190,19 @@ target = LLDBConcreteTarget(binary)
 initial_state = create_state(target)
 conc_exec_time += time.perf_counter_ns() - conc_exec_time_start
 
+if target.read_register('pc') != pc:
+    target.set_breakpoint(pc)
+    target.run()
+    target.remove_breakpoint(pc)
+
 # Run until no more states can be reached
 print(f'Re-tracing symbolically...')
 while pc is not None:
+    assert(target.read_register('pc') == pc)
+
     # Run symbolic execution
+    # It uses the concrete state to resolve symbolic program counters to
+    # concrete values.
     pc, strace = run_block(pc, MiasmConcreteState(initial_state, loc_db))
 
     if pc is None:
@@ -199,37 +211,40 @@ while pc is not None:
     # Step concrete target forward.
     #
     # The concrete target now lags behind the symbolic execution by exactly
-    # one basic block: the one that we just executed. Find the next program
-    # counter in the concrete trace and run the target up to it.
-    try:
-        # Find number of instructions in the executed basic block.
-        # Start at index 1 in case the next program counter is the same as the
-        # current one.
-        pc_index = conc_trace.index(pc, 1)
-    except ValueError:
-        # End of concrete trace has been reached.
-        symb_trace.extend(strace[:len(conc_trace)])
-        print(f'Next PC {hex(pc)} is not contained in the concrete trace.')
-        break
-
+    # one basic block: the one that we just executed. Run the concrete
+    # execution until it reaches the new PC.
     conc_exec_time_start = time.perf_counter_ns()
-    step_through_trace(target, conc_trace[:pc_index])
-    conc_trace = conc_trace[pc_index:]
-    initial_state = create_state(target)
+    ctrace = step_until(target, pc)
     conc_exec_time += time.perf_counter_ns() - conc_exec_time_start
 
     # Sometimes, miasm generates ghost instructions at the end of basic blocks.
     # Don't include them in the symbolic trace.
-    symb_trace.extend(strace[:pc_index])
+    strace = strace[:len(ctrace)]
+    symb_trace.extend(strace)
+
+    # Use this for extensive trace debugging
+    if [a for a, _ in strace] != ctrace:
+        print(f'[WARNING] Symbolic trace and concrete trace are not equal!'
+              f'\n    symbolic: {[hex(a) for a, _ in strace]}'
+              f'\n    concrete: {[hex(a) for a in ctrace]}')
+
+    if target.is_exited():
+        print(f'Next PC {hex(pc)} is not contained in the concrete trace.')
+        break
+
+    # Query the new reference state for symbolic execution
+    conc_exec_time_start = time.perf_counter_ns()
+    initial_state = create_state(target)
+    conc_exec_time += time.perf_counter_ns() - conc_exec_time_start
 
 total_time = time.perf_counter_ns() - total_time_start
-other_time = total_time - record_conc_trace_time - symb_exec_time - conc_exec_time
+other_time = total_time - symb_exec_time - conc_exec_time - disasm_time
 
 print(f'--- {len(symb_trace)} instructions traced.')
 print(f'--- No new PC found. Exiting.')
 print()
 print(f' Total time:              {total_time * 1e-6:10.3f} ms')
-print(f' Concrete trace time:     {record_conc_trace_time * 1e-6:10.3f} ms')
+print(f' Disassembly time:        {disasm_time * 1e-6:10.3f} ms')
 print(f' Symbolic execution time: {symb_exec_time * 1e-6:10.3f} ms')
 print(f' Concrete execution time: {conc_exec_time * 1e-6:10.3f} ms')
 print(f' Other:                   {other_time * 1e-6:10.3f} ms')
