@@ -81,6 +81,8 @@ class ArchX86(Arch):
         Applies certain register name aliases.
         """
         reg = super().to_regname(name)
-        if reg in regname_aliases:
-            return regname_aliases[reg]
-        return reg
+        if reg is not None:
+            return reg
+
+        # Apply custom register alias rules
+        return regname_aliases.get(name.upper(), None)
