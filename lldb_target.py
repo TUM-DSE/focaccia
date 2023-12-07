@@ -5,11 +5,18 @@ from angr.errors import SimConcreteMemoryError, \
 from angr_targets.concrete import ConcreteTarget
 from angr_targets.memory_map import MemoryMap
 
-class LLDBConcreteTarget(ConcreteTarget):
-    def __init__(self, executable: str, args: list[str] = []):
-        # Prepend the executable's path to argv, as is convention
-        args.insert(0, executable)
+from arch import x86
+from snapshot import ProgramState
 
+class LLDBConcreteTarget(ConcreteTarget):
+    def __init__(self, executable: str, argv: list[str] = []):
+        """Construct an LLDB concrete target. Stop at entry.
+
+        :param argv: The full argv array, including the executable's path as
+                     the first argument (as is convention).
+
+        :raises RuntimeError: If the process is unable to launch.
+        """
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(False)
         self.target = self.debugger.CreateTargetWithFileAndArch(executable,
@@ -21,7 +28,7 @@ class LLDBConcreteTarget(ConcreteTarget):
         self.error = lldb.SBError()
         self.listener = self.debugger.GetListener()
         self.process = self.target.Launch(self.listener,
-                                          args, None, None,
+                                          argv, None, None,
                                           None, None, None, 0,
                                           True, self.error)
         if not self.process.IsValid():
@@ -143,3 +150,36 @@ class LLDBConcreteTarget(ConcreteTarget):
                                   name if name is not None else '<none>',
                                   perms))
         return mmap
+
+def record_snapshot(target: LLDBConcreteTarget) -> ProgramState:
+    """Record a concrete target's state in a ProgramState object.
+
+    :param target: The target from which to query state. Currently assumes an
+                   X86 target.
+    """
+    state = ProgramState(x86.ArchX86())
+
+    # Query and store register state
+    rflags = x86.decompose_rflags(target.read_register('rflags'))
+    for regname in x86.regnames:
+        try:
+            conc_val = target.read_register(regname)
+            state.set(regname, conc_val)
+        except KeyError:
+            pass
+        except SimConcreteRegisterError:
+            if regname in rflags:
+                state.set(regname, rflags[regname])
+
+    # Query and store memory state
+    for mapping in target.get_mappings():
+        assert(mapping.end_address > mapping.start_address)
+        size = mapping.end_address - mapping.start_address
+        try:
+            data = target.read_memory(mapping.start_address, size)
+            state.write_memory(mapping.start_address, data)
+        except SimConcreteMemoryError:
+            # Unable to read memory from mapping
+            pass
+
+    return state

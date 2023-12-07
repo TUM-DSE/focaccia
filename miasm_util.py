@@ -1,3 +1,5 @@
+from typing import Callable
+
 from miasm.core.locationdb import LocationDB, LocKey
 from miasm.expression.expression import Expr, ExprOp, ExprId, ExprLoc, \
                                         ExprInt, ExprMem, ExprCompose, \
@@ -51,10 +53,21 @@ class MiasmConcreteState:
     def resolve_location(self, loc: LocKey) -> int | None:
         return self.loc_db.get_location_offset(loc)
 
-def eval_expr(expr: Expr, conc_state: MiasmConcreteState) -> int:
+def eval_expr(expr: Expr, conc_state: MiasmConcreteState):
+    """Evaluate a symbolic expression with regard to a concrete reference
+    state.
+
+    :param expr:       An expression to evaluate.
+    :param conc_state: The concrete reference state from which symbolic
+                       register and memory state is resolved.
+
+    :return: The most simplified and concrete representation of `expr` that
+             is possibly producible. May be either an `ExprInt` or an
+             `ExprLoc`.
+    """
     # Most of these implementation are just copy-pasted members of
     # `SymbolicExecutionEngine`.
-    expr_to_visitor = {
+    expr_to_visitor: dict[type[Expr], Callable] = {
         ExprInt:     _eval_exprint,
         ExprId:      _eval_exprid,
         ExprLoc:     _eval_exprloc,
@@ -105,7 +118,8 @@ def _eval_exprmem(expr: ExprMem, state: MiasmConcreteState):
     addr = eval_expr(expr.ptr, state)
     ret = state.resolve_memory(int(addr), int(expr.size / 8))
     assert(len(ret) * 8 == expr.size)
-    return ExprInt(int.from_bytes(ret, byteorder='little'), expr.size)
+    ival = ExprInt(int.from_bytes(ret, byteorder='little'), expr.size)
+    return ExprSlice(ival, 0, len(ret) * 8)
 
 def _eval_exprcond(expr, state: MiasmConcreteState):
     """Evaluate an ExprCond using the current state"""
