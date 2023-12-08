@@ -1,5 +1,4 @@
 from arch.arch import Arch
-from interpreter import SymbolResolver, SymbolResolveError
 
 class MemoryAccessError(Exception):
     def __init__(self, msg: str):
@@ -112,12 +111,3 @@ class ProgramState:
 
     def __repr__(self):
         return repr(self.regs)
-
-class SnapshotSymbolResolver(SymbolResolver):
-    def __init__(self, snapshot: ProgramState):
-        self._state = snapshot
-
-    def resolve(self, symbol: str):
-        if symbol not in self._state.arch.regnames:
-            raise SymbolResolveError(symbol, 'Symbol is not a register name.')
-        return self._state.read(symbol)

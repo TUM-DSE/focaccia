@@ -45,7 +45,7 @@ def parse(lines: list[str], arch: Arch) -> list[ProgramState]:
     snapshots = []
     for line in lines:
         if 'Backwards' in line and len(snapshots) > 0:
-            snapshots[-1].set_backwards()
+            # snapshots[-1].set_backwards()
             continue
 
         match = try_parse_line(line)
@@ -85,10 +85,10 @@ def get_labels():
               'R13':     ('R13',     split_first),
               'R14':     ('R14',     split_first),
               'R15':     ('R15',     split_first),
-              'flag ZF': ('flag ZF', split_second),
-              'flag CF': ('flag CF', split_second),
-              'flag OF': ('flag OF', split_second),
-              'flag SF': ('flag SF', split_second),
-              'flag PF': ('flag PF', split_second),
-              'flag DF': ('flag DF', split_second)}
+              'flag ZF': ('ZF', split_second),
+              'flag CF': ('CF', split_second),
+              'flag OF': ('OF', split_second),
+              'flag SF': ('SF', split_second),
+              'flag PF': ('PF', split_second),
+              'flag DF': ('DF', split_second)}
     return labels

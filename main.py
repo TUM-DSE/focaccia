@@ -1,14 +1,40 @@
 #! /bin/python3
 
 import argparse
+import platform
+from typing import Iterable
 
 import arancini
 from arch import x86
 from compare import compare_simple, compare_symbolic
-from gen_trace import record_trace
-from run import run_native_execution
+from lldb_target import LLDBConcreteTarget, record_snapshot
 from symbolic import collect_symbolic_trace
 from utils import check_version, print_separator
+
+def run_native_execution(oracle_program: str, breakpoints: Iterable[int]):
+    """Gather snapshots from a native execution via an external debugger.
+
+    :param oracle_program: Program to execute.
+    :param breakpoints: List of addresses at which to break and record the
+                        program's state.
+
+    :return: A list of snapshots gathered from the execution.
+    """
+    assert(platform.machine() == "x86_64")
+
+    target = LLDBConcreteTarget(oracle_program)
+
+    # Set breakpoints
+    for address in breakpoints:
+        target.set_breakpoint(address)
+
+    # Execute the native program
+    snapshots = []
+    while not target.is_exited():
+        snapshots.append(record_snapshot(target))
+        target.run()
+
+    return snapshots
 
 def parse_inputs(txl_path, ref_path, program):
     # Our architecture
@@ -90,8 +116,15 @@ def main():
     if args.symbolic:
         assert(program is not None)
 
-        full_trace = record_trace(program, args=[])
-        transforms = collect_symbolic_trace(program, full_trace)
+        transforms = collect_symbolic_trace(program, [program])
+
+        new = transforms[0] \
+            .concat(transforms[1]) \
+            .concat(transforms[2]) \
+            .concat(transforms[3]) \
+            .concat(transforms[4])
+        print(f'New transform: {new}')
+        exit(0)
         # TODO: Transform the traces so that the states match
         result = compare_symbolic(txl, transforms)
 
@@ -114,8 +147,8 @@ def main():
             print(f'Content of register {reg} is possibly false.'
                   f' Expected difference: {err["expected"]}, actual difference'
                   f' in the translation: {err["actual"]}.\n'
-                  f'    (txl) {reg}: {hex(txl.regs[reg])}\n'
-                  f'    (ref) {reg}: {hex(ref.regs[reg])}')
+                  f'    (txl) {reg}: {hex(txl.read(reg))}\n'
+                  f'    (ref) {reg}: {hex(ref.read(reg))}')
 
     print()
     print('#' * 60)

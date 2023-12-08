@@ -41,13 +41,13 @@ class MiasmConcreteState:
         self.state = state
         self.loc_db = loc_db
 
-    def resolve_register(self, regname: str) -> int:
+    def resolve_register(self, regname: str) -> int | None:
         regname = regname.upper()
         if regname in self.miasm_flag_aliases:
             regname = self.miasm_flag_aliases[regname]
         return self.state.read(regname)
 
-    def resolve_memory(self, addr: int, size: int) -> bytes:
+    def resolve_memory(self, addr: int, size: int) -> bytes | None:
         return self.state.read_memory(addr, size)
 
     def resolve_location(self, loc: LocKey) -> int | None:
@@ -95,14 +95,18 @@ def _eval_exprint(expr: ExprInt, _):
 def _eval_exprid(expr: ExprId, state: MiasmConcreteState):
     """Evaluate an ExprId using the current state"""
     val = state.resolve_register(expr.name)
-    return ExprInt(val, expr.size)
+    if val is None:
+        return expr
+    if isinstance(val, int):
+        return ExprInt(val, expr.size)
+    return val
 
 def _eval_exprloc(expr: ExprLoc, state: MiasmConcreteState):
     """Evaluate an ExprLoc using the current state"""
     offset = state.resolve_location(expr.loc_key)
-    if offset is not None:
-        return ExprInt(offset, expr.size)
-    return expr
+    if offset is None:
+        return expr
+    return ExprInt(offset, expr.size)
 
 def _eval_exprmem(expr: ExprMem, state: MiasmConcreteState):
     """Evaluate an ExprMem using the current state.
@@ -116,10 +120,15 @@ def _eval_exprmem(expr: ExprMem, state: MiasmConcreteState):
     assert(expr.size % 8 == 0)
 
     addr = eval_expr(expr.ptr, state)
-    ret = state.resolve_memory(int(addr), int(expr.size / 8))
-    assert(len(ret) * 8 == expr.size)
-    ival = ExprInt(int.from_bytes(ret, byteorder='little'), expr.size)
-    return ExprSlice(ival, 0, len(ret) * 8)
+    if not addr.is_int():
+        return expr
+
+    mem = state.resolve_memory(int(addr), int(expr.size / 8))
+    if mem is None:
+        return expr
+
+    assert(len(mem) * 8 == expr.size)
+    return ExprInt(int.from_bytes(mem, byteorder='little'), expr.size)
 
 def _eval_exprcond(expr, state: MiasmConcreteState):
     """Evaluate an ExprCond using the current state"""

@@ -1,11 +1,14 @@
 """Tools and utilities for symbolic execution with Miasm."""
 
+from __future__ import annotations
+from typing import Self
+
 from miasm.analysis.binary import ContainerELF
 from miasm.analysis.machine import Machine
 from miasm.core.asmblock import AsmCFG
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine
-from miasm.expression.expression import Expr, ExprId, ExprMem
+from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 
 from lldb_target import LLDBConcreteTarget, record_snapshot
 from miasm_util import MiasmConcreteState, eval_expr
@@ -15,6 +18,14 @@ class SymbolicTransform:
     def __init__(self, from_addr: int, to_addr: int):
         self.addr = from_addr
         self.range = (from_addr, to_addr)
+
+    def concat(self, other: Self) -> Self:
+        """Concatenate another transform to this transform.
+
+        The symbolic transform on which `concat` is called is the transform
+        that is applied first, meaning: `(a.concat(b))(state) == b(a(state))`.
+        """
+        raise NotImplementedError('concat is abstract.')
 
     def calc_register_transform(self, conc_state: ProgramState) \
             -> dict[str, int]:
@@ -41,14 +52,56 @@ class MiasmSymbolicTransform(SymbolicTransform):
 
         self.regs_diff: dict[str, Expr] = {}
         self.mem_diff: dict[ExprMem, Expr] = {}
-        for id, expr in transform.items():
-            if isinstance(id, ExprMem):
-                self.mem_diff[id.ptr] = expr
-            elif id.name != 'IRDst':
-                assert(isinstance(id, ExprId))
-                self.regs_diff[id.name] = expr
+        for dst, expr in transform.items():
+            if isinstance(dst, ExprMem):
+                self.mem_diff[dst] = expr
+            elif dst.name != 'IRDst':
+                assert(isinstance(dst, ExprId))
+                self.regs_diff[dst.name] = expr
 
         self.loc_db = loc_db
+
+    def concat(self, other: MiasmSymbolicTransform) -> Self:
+        class MiasmSymbolicState:
+            """Drop-in replacement for MiasmConcreteState in eval_expr that
+            returns the current transform's symbolic equations instead of
+            symbolic values. Calling eval_expr with this effectively nests the
+            transformation into the concatenated transformation.
+            """
+            def __init__(self, transform: MiasmSymbolicTransform):
+                self.transform = transform
+
+            def resolve_register(self, regname: str):
+                return self.transform.regs_diff.get(regname, None)
+
+            def resolve_memory(self, addr: int, size: int):
+                mem = ExprMem(ExprInt(addr, 64), size)
+                return self.transform.mem_diff.get(mem, None)
+
+            def resolve_location(self, _):
+                return None
+
+        if self.range[1] != other.range[0]:
+            raise ValueError(f'The concatenated transformations must span a'
+                             f' contiguous range of instructions.')
+
+        ref_state = MiasmSymbolicState(self)
+        for reg, expr in other.regs_diff.items():
+            if reg not in self.regs_diff:
+                self.regs_diff[reg] = expr
+            else:
+                self.regs_diff[reg] = eval_expr(expr, ref_state)
+
+        for dst, expr in other.mem_diff.items():
+            dst = eval_expr(dst, ref_state)
+            if dst not in self.mem_diff:
+                self.mem_diff[dst] = expr
+            else:
+                self.mem_diff[dst] = eval_expr(expr, ref_state)
+
+        self.range = (self.range[0], other.range[1])
+
+        return self
 
     def calc_register_transform(self, conc_state: ProgramState) \
             -> dict[str, int]:
@@ -56,7 +109,7 @@ class MiasmSymbolicTransform(SymbolicTransform):
 
         res = {}
         for regname, expr in self.regs_diff.items():
-            res[regname] = eval_expr(expr, ref_state)
+            res[regname] = int(eval_expr(expr, ref_state))
         return res
 
     def calc_memory_transform(self, conc_state: ProgramState) \
@@ -71,8 +124,14 @@ class MiasmSymbolicTransform(SymbolicTransform):
         return res
 
     def __repr__(self) -> str:
-        return f'Symbolic state transformation for instruction \
-                 {hex(self.addr)}.'
+        start, end = self.range
+        res = f'Symbolic state transformation {hex(start)} -> {hex(end)}:\n'
+        for reg, expr in self.regs_diff.items():
+            res += f'   {reg:6s} = {expr}\n'
+        for mem, expr in self.mem_diff.items():
+            res += f'   {mem} = {expr}\n'
+
+        return res
 
 def _step_until(target: LLDBConcreteTarget, addr: int) -> list[int]:
     """Step a concrete target to a specific instruction.
