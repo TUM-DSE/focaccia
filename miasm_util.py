@@ -142,12 +142,34 @@ def _eval_exprslice(expr, state: MiasmConcreteState):
     arg = eval_expr(expr.arg, state)
     return ExprSlice(arg, expr.start, expr.stop)
 
+def _eval_cpuid(rax: ExprInt, out_reg: ExprInt):
+    """Evaluate the `x86_cpuid` operator by performing a real invocation of
+    the CPUID instruction.
+
+    :param rax:     The current value of RAX. Must be concrete.
+    :param out_reg: An index in `[0, 4)` signaling which register's value
+                    shall be returned. Must be concrete.
+    """
+    from cpuid import cpuid
+
+    regs = cpuid.CPUID()(int(rax))
+
+    if int(out_reg) >= len(regs):
+        raise ValueError(f'Output register may not be {out_reg}.')
+    return ExprInt(regs[int(out_reg)], out_reg.size)
+
 def _eval_exprop(expr, state: MiasmConcreteState):
     """Evaluate an ExprOp using the current state"""
     args = []
     for oarg in expr.args:
         arg = eval_expr(oarg, state)
         args.append(arg)
+
+    if expr.op == 'x86_cpuid':
+        # Can't do this in an expression simplifier plugin because the
+        # arguments must be concrete.
+        assert(len(expr.args) == 2)
+        return _eval_cpuid(args[0], args[1])
     return ExprOp(expr.op, *args)
 
 def _eval_exprcompose(expr, state: MiasmConcreteState):

@@ -1,0 +1,3 @@
+[submodule "cpuid"]
+	path = cpuid
+	url = https://github.com/flababah/cpuid.py.git
