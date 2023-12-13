@@ -34,6 +34,7 @@ regnames = [
 # A dictionary mapping aliases to standard register names.
 regname_aliases = {
     'PC': 'RIP',
+    'NF': 'SF',   # negative flag == sign flag in Miasm?
 }
 
 def decompose_rflags(rflags: int) -> dict[str, int]:

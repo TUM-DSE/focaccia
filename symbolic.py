@@ -13,6 +13,7 @@ from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 from lldb_target import LLDBConcreteTarget, record_snapshot
 from miasm_util import MiasmConcreteState, eval_expr
 from snapshot import ProgramState
+from arch import Arch, supported_architectures
 
 class SymbolicTransform:
     def __init__(self, from_addr: int, to_addr: int):
@@ -38,6 +39,7 @@ class SymbolicTransform:
 class MiasmSymbolicTransform(SymbolicTransform):
     def __init__(self,
                  transform: dict[ExprId, Expr],
+                 arch: Arch,
                  loc_db: LocationDB,
                  start_addr: int,
                  end_addr: int):
@@ -55,10 +57,13 @@ class MiasmSymbolicTransform(SymbolicTransform):
         for dst, expr in transform.items():
             if isinstance(dst, ExprMem):
                 self.mem_diff[dst] = expr
-            elif dst.name != 'IRDst':
+            else:
                 assert(isinstance(dst, ExprId))
-                self.regs_diff[dst.name] = expr
+                regname = arch.to_regname(dst.name)
+                if regname is not None:
+                    self.regs_diff[regname] = expr
 
+        self.arch = arch
         self.loc_db = loc_db
 
     def concat(self, other: MiasmSymbolicTransform) -> Self:
@@ -240,6 +245,12 @@ def collect_symbolic_trace(binary: str,
         cont = ContainerELF.from_stream(bin_file, loc_db)
     machine = Machine(cont.arch)
 
+    # Find corresponding architecture
+    if machine.name not in supported_architectures:
+        print(f'[ERROR] {machine.name} is not supported. Returning.')
+        return []
+    arch = supported_architectures[machine.name]
+
     # Create disassembly/lifting context
     mdis = machine.dis_engine(cont.bin_stream, loc_db=loc_db)
     mdis.follow_call = True
@@ -302,8 +313,8 @@ def collect_symbolic_trace(binary: str,
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):
-        res.append(MiasmSymbolicTransform(diff, loc_db, start, end))
+        res.append(MiasmSymbolicTransform(diff, arch, loc_db, start, end))
     start, diff = symb_trace[-1]
-    res.append(MiasmSymbolicTransform(diff, loc_db, start, start))
+    res.append(MiasmSymbolicTransform(diff, arch, loc_db, start, start))
 
     return res
