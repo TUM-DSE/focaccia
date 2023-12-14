@@ -8,6 +8,7 @@ from miasm.analysis.machine import Machine
 from miasm.core.asmblock import AsmCFG
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine
+from miasm.ir.ir import IRBlock
 from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 
 from lldb_target import LLDBConcreteTarget, record_snapshot
@@ -35,6 +36,10 @@ class SymbolicTransform:
     def calc_memory_transform(self, conc_state: ProgramState) \
             -> dict[int, bytes]:
         raise NotImplementedError('calc_memory_transform is abstract.')
+
+    def __repr__(self) -> str:
+        start, end = self.range
+        return f'Symbolic state transformation {hex(start)} -> {hex(end)}'
 
 class MiasmSymbolicTransform(SymbolicTransform):
     def __init__(self,
@@ -149,7 +154,57 @@ def _step_until(target: LLDBConcreteTarget, addr: int) -> list[int]:
         target.step()
     return trace
 
-def _run_block(pc: int, conc_state: MiasmConcreteState, lifter, ircfg, mdis) \
+class DisassemblyContext:
+    def __init__(self, binary):
+        self.loc_db = LocationDB()
+
+        # Load the binary
+        with open(binary, 'rb') as bin_file:
+            cont = ContainerELF.from_stream(bin_file, self.loc_db)
+
+        self.machine = Machine(cont.arch)
+        self.entry_point = cont.entry_point
+
+        # Create disassembly/lifting context
+        self.lifter = self.machine.lifter(self.loc_db)
+        self.mdis = self.machine.dis_engine(cont.bin_stream, loc_db=self.loc_db)
+        self.mdis.follow_call = True
+        self.asmcfg = AsmCFG(self.loc_db)
+        self.ircfg = self.lifter.new_ircfg_from_asmcfg(self.asmcfg)
+
+    def get_irblock(self, addr: int) -> IRBlock | None:
+        irblock = self.ircfg.get_block(addr)
+
+        # Initial disassembly might not find all blocks in the binary.
+        # Disassemble code ad-hoc if the current address has not yet been
+        # disassembled.
+        if irblock is None:
+            cfg = self.mdis.dis_multiblock(addr)
+            for asmblock in cfg.blocks:
+                try:
+                    self.lifter.add_asmblock_to_ircfg(asmblock, self.ircfg)
+                except NotImplementedError as err:
+                    print(f'[WARNING] Unable to disassemble block at'
+                          f' {hex(asmblock.get_range()[0])}:'
+                          f' [Not implemented] {err}')
+                    pass
+            print(f'Disassembled {len(cfg.blocks):5} new blocks at {hex(int(addr))}.')
+            irblock = self.ircfg.get_block(addr)
+
+        # Might still be None if disassembly/lifting failed for the block
+        # at `addr`.
+        return irblock
+
+class DisassemblyError(Exception):
+    def __init__(self,
+                 partial_trace: list[tuple[int, MiasmSymbolicTransform]],
+                 faulty_pc: int,
+                 err_msg: str):
+        self.partial_trace = partial_trace
+        self.faulty_pc = faulty_pc
+        self.err_msg = err_msg
+
+def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext) \
         -> tuple[int | None, list]:
     """Run a basic block.
 
@@ -166,37 +221,20 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, lifter, ircfg, mdis) \
              found. This happens when an error occurs or when the program
              exits.
     """
-    global disasm_time
-    global symb_exec_time
-
     # Start with a clean, purely symbolic state
-    engine = SymbolicExecutionEngine(lifter)
+    engine = SymbolicExecutionEngine(ctx.lifter)
 
     # A list of symbolic transformation for each single instruction
     symb_trace = []
 
     while True:
-        irblock = ircfg.get_block(pc)
-
-        # Initial disassembly might not find all blocks in the binary.
-        # Disassemble code ad-hoc if the current PC has not yet been
-        # disassembled.
+        irblock = ctx.get_irblock(pc)
         if irblock is None:
-            cfg = mdis.dis_multiblock(pc)
-            for asmblock in cfg.blocks:
-                try:
-                    lifter.add_asmblock_to_ircfg(asmblock, ircfg)
-                except NotImplementedError as err:
-                    print(f'[ERROR] Unable to disassemble block at'
-                          f' {hex(asmblock.get_range()[0])}:'
-                          f' [Not implemented] {err}')
-                    pass
-
-            irblock = ircfg.get_block(pc)
-            if irblock is None:
-                print(f'[ERROR] Unable to disassemble block(s) at {hex(pc)}.')
-                raise RuntimeError()
-            print(f'Disassembled {len(cfg.blocks):4} new blocks at {hex(int(pc))}.')
+            raise DisassemblyError(
+                symb_trace,
+                pc,
+                f'[ERROR] Unable to disassemble block at {hex(pc)}.'
+            )
 
         # Execute each instruction in the current basic block and record the
         # resulting change in program state.
@@ -240,27 +278,17 @@ def collect_symbolic_trace(binary: str,
 
     :param binary: The binary to trace.
     """
-    loc_db = LocationDB()
-    with open(binary, 'rb') as bin_file:
-        cont = ContainerELF.from_stream(bin_file, loc_db)
-    machine = Machine(cont.arch)
+    ctx = DisassemblyContext(binary)
 
     # Find corresponding architecture
-    if machine.name not in supported_architectures:
-        print(f'[ERROR] {machine.name} is not supported. Returning.')
+    mach_name = ctx.machine.name
+    if mach_name not in supported_architectures:
+        print(f'[ERROR] {mach_name} is not supported. Returning.')
         return []
-    arch = supported_architectures[machine.name]
-
-    # Create disassembly/lifting context
-    mdis = machine.dis_engine(cont.bin_stream, loc_db=loc_db)
-    mdis.follow_call = True
-    asmcfg = AsmCFG(loc_db)
-
-    lifter = machine.lifter(loc_db)
-    ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
+    arch = supported_architectures[mach_name]
 
     if start_addr is None:
-        pc = cont.entry_point
+        pc = ctx.entry_point
     else:
         pc = start_addr
 
@@ -280,9 +308,33 @@ def collect_symbolic_trace(binary: str,
         # Run symbolic execution
         # It uses the concrete state to resolve symbolic program counters to
         # concrete values.
-        pc, strace = _run_block(
-            pc, MiasmConcreteState(initial_state, loc_db),
-            lifter, ircfg, mdis)
+        try:
+            pc, strace = _run_block(
+                pc,
+                MiasmConcreteState(initial_state, ctx.loc_db),
+                ctx
+            )
+        except DisassemblyError as err:
+            # This happens if we encounter an instruction that is not
+            # implemented by Miasm. Try to skip that instruction and continue
+            # at the next one.
+            print(f'[WARNING] Skipping instruction at {hex(err.faulty_pc)}...')
+
+            # First, catch up to symbolic trace if required
+            if err.faulty_pc != pc:
+                ctrace = _step_until(target, err.faulty_pc)
+                symb_trace.extend(err.partial_trace)
+                assert(len(ctrace) - 1 == len(err.partial_trace))  # no ghost instr
+
+            # Now step one more time to skip the faulty instruction
+            target.step()
+            if target.is_exited():
+                break
+
+            symb_trace.append((err.faulty_pc, {}))  # Generate empty transform
+            pc = target.read_register('pc')
+            initial_state = record_snapshot(target)
+            continue
 
         if pc is None:
             break
@@ -313,8 +365,8 @@ def collect_symbolic_trace(binary: str,
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):
-        res.append(MiasmSymbolicTransform(diff, arch, loc_db, start, end))
+        res.append(MiasmSymbolicTransform(diff, arch, ctx.loc_db, start, end))
     start, diff = symb_trace[-1]
-    res.append(MiasmSymbolicTransform(diff, arch, loc_db, start, start))
+    res.append(MiasmSymbolicTransform(diff, arch, ctx.loc_db, start, start))
 
     return res
