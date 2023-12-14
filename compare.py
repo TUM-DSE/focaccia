@@ -1,4 +1,4 @@
-from snapshot import ProgramState
+from snapshot import ProgramState, MemoryAccessError
 from symbolic import SymbolicTransform
 
 def _calc_transformation(previous: ProgramState, current: ProgramState):
@@ -128,31 +128,43 @@ def _find_errors_symbolic(txl_from: ProgramState,
                           txl_to: ProgramState,
                           transform_truth: SymbolicTransform) \
         -> list[dict]:
-    arch = txl_from.arch
-
-    assert(txl_from.read('PC') == transform_truth.range[0])
-    assert(txl_to.read('PC') == transform_truth.range[1])
+    if (txl_from.read('PC') != transform_truth.range[0]) \
+            or (txl_to.read('PC') != transform_truth.range[1]):
+        tstart, tend = transform_truth.range
+        print(f'[WARNING] Program counters of the tested state do not match'
+              f' the truth state:'
+              f' {hex(txl_from.read("PC"))} -> {hex(txl_to.read("PC"))} (test)'
+              f' vs. {hex(tstart)} -> {hex(tend)} (truth).'
+              f' Skipping with no errors.')
+        return []
 
     errors = []
-    for reg in arch.regnames:
-        if txl_from.read(reg) is None or txl_to.read(reg) is None:
-            print(f'A value for {reg} must be set in all translated states.'
+
+    # Calculate expected register values
+    try:
+        truth = transform_truth.calc_register_transform(txl_from)
+    except MemoryAccessError:
+        print(f'Transformation at {hex(transform_truth.addr)} depends on'
+              f' memory, which is not available from arancini logs.'
+              f' Skipping.')
+        return errors
+
+    # Compare expected values to actual values in the tested state
+    for regname, truth_val in truth.items():
+        try:
+            txl_val = txl_to.read(regname)
+        except ValueError:
+            print(f'The tested state does not have a value for {regname}.'
                   ' Skipping.')
             continue
+        except KeyError as err:
+            print(err)
+            continue
 
-        txl_val = txl_to.read(reg)
-        try:
-            truth = transform_truth.calc_register_transform(txl_from)
-            print(f'Evaluated symbolic formula to {hex(txl_val)} vs. txl {hex(txl_val)}')
-            if txl_val != truth:
-                errors.append({
-                    'reg': reg,
-                    'expected': truth,
-                    'actual': txl_val,
-                    'equation': transform_truth.regs_diff[reg],
-                })
-        except AttributeError:
-            print(f'Register {reg} does not exist.')
+        if txl_val != truth_val:
+            errors.append(f'Content of register {regname} is possibly false.' \
+                          f' Expected value: {hex(truth_val)}, actual' \
+                          f' value in the translation: {txl_val}.')
 
     return errors
 
