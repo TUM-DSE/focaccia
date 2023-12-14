@@ -3,6 +3,7 @@ build*
 *.md
 *.out
 *.txt
+!requirements.txt
 *.bin
 *.dot
 build*/

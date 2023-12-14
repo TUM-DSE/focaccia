@@ -1,11 +1,12 @@
-# DBT Testing
+# Focaccia
 
 This repository contains initial code for comprehensive testing of binary
 translators.
 
 ## Requirements
 
-We require at least LLDB version 17 for `fs_base`/`gs_base` register support.
+For Python dependencies, see the `requirements.txt`. We also require at least LLDB version 17 for `fs_base`/`gs_base`
+register support.
 
 I had to compile LLDB myself; these are the steps I had to take (you also need swig version >= 4):
 
@@ -25,50 +26,33 @@ It will take a while to compile.
 
 The following files belong to a rough framework for the snapshot comparison engine:
 
- - `main.py`: Entry point to the tool. Handling of command line arguments, pre-processing of input
-logs, etc.
+ - `main.py`: Entry point to the tool. Handling of command line arguments, pre-processing of input logs, etc.
 
- - `snapshot.py`: Internal structures used to work with snapshots. Contains the previous
-`ContextBlock` class, which has been renamed to `ProgramState` to make its purpose as a snapshot of
-the program state clearer.
+ - `snapshot.py`: Structures used to work with snapshots. The `ProgramState` class is our primary representation of
+program snapshots.
 
  - `compare.py`: The central algorithms that work on snapshots.
 
- - `run.py`: Tools to execute native programs and capture their state via an external debugger.
+ - `arancini.py`: Functionality specific to working with arancini. Parsing of arancini's logs into our snapshot
+structures.
 
- - `arancini.py`: Functionality specific to working with arancini. Parsing of arancini's logs into our
-snapshot structures.
+ - `arch/`: Abstractions over different processor architectures. Will be used to integrate support for more
+architectures later. Currently, we only have X86.
 
- - `arch/`: Abstractions over different processor architectures. Will be used to integrate support for
-more architectures later. Currently, we only have X86.
-
-## Symbolic execution
+## Concolic execution
 
 The following files belong to a prototype of a data-dependency generator based on symbolic
 execution:
 
- - `symbolic.py`: Algorithms and data structures to compute and manipulate symbolic program
-transformations.
+ - `symbolic.py`: Algorithms and data structures to compute and manipulate symbolic program transformations. This
+handles the symbolic part of "concolic" execution.
 
- - `gen_trace.py`: An invokable tool that generates an instruction trace for an executable's native
-execution. Is imported into `trace_symbols.py`, which uses the core function that records a trace.
+ - `lldb_target.py`: Tools for executing a program concretely and tracking its execution using
+[LLDB](https://lldb.llvm.org/). This handles the concrete part of "concolic" execution.
 
- - `trace_symbols.py`: A simple proof of concept for symbolic data-dependency tracking. Takes an
-executable as an argument and does the following:
-
-    1. Executes the program natively (starting at `main`) and records a trace of every instruction
-executed, stopping when exiting `main`.
-
-    2. Tries to follow this trace of instructions concolically (keeps a concrete program state from
-a native execution in parallel to a symbolic program state), recording after each instruction the
-changes it has made to the program state before that instruction.
-
-    3. Writes the program state at each instruction to log files; writes the concrete state of the
-real execution to 'concrete.log' and the symbolic difference to 'symbolic.log'.
-
- - `interpreter.py`: Contains an algorithm that evaluates a symbolic expression to a concrete value,
-using a reference state as input.
+ - `miasm_util.py`: Tools to evaluate Miasm's symbolic expressions based on a concrete state. Ties the symbolic and
+concrete parts together into "concolic" execution.
 
 ## Helpers
 
- - `lldb_target.py`: Implements angr's `ConcreteTarget` interface for [LLDB](https://lldb.llvm.org/).
+ - `miasm_test.py`: A test script that traces a program concolically.
