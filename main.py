@@ -7,7 +7,7 @@ from typing import Iterable
 import arancini
 from arch import x86
 from compare import compare_simple, compare_symbolic
-from lldb_target import LLDBConcreteTarget, record_snapshot
+from lldb_target import LLDBConcreteTarget
 from snapshot import ProgramState
 from symbolic import SymbolicTransform, collect_symbolic_trace
 from utils import check_version, print_separator
@@ -32,7 +32,7 @@ def run_native_execution(oracle_program: str, breakpoints: Iterable[int]):
     # Execute the native program
     snapshots = []
     while not target.is_exited():
-        snapshots.append(record_snapshot(target))
+        snapshots.append(target.record_snapshot())
         target.run()
 
     return snapshots

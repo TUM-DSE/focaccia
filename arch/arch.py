@@ -3,7 +3,7 @@ from typing import Iterable
 class Arch():
     def __init__(self, archname: str, regnames: Iterable[str]):
         self.archname = archname
-        self.regnames = set(regnames)
+        self.regnames = set(name.upper() for name in regnames)
 
     def to_regname(self, name: str) -> str | None:
         """Transform a string into a standard register name.
@@ -20,4 +20,7 @@ class Arch():
         return None
 
     def __eq__(self, other):
-        return self.regnames == other.regnames
+        return self.archname == other.archname
+
+    def __repr__(self) -> str:
+        return self.archname

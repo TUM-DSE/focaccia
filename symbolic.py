@@ -11,7 +11,7 @@ from miasm.ir.symbexec import SymbolicExecutionEngine
 from miasm.ir.ir import IRBlock
 from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 
-from lldb_target import LLDBConcreteTarget, record_snapshot
+from lldb_target import LLDBConcreteTarget
 from miasm_util import MiasmConcreteState, eval_expr
 from snapshot import ProgramState
 from arch import Arch, supported_architectures
@@ -308,7 +308,7 @@ def collect_symbolic_trace(binary: str,
     symb_trace = [] # The resulting list of symbolic transforms per instruction
 
     # Run until no more states can be reached
-    initial_state = record_snapshot(target)
+    initial_state = target.record_snapshot()
     while pc is not None:
         assert(target.read_register('pc') == pc)
 
@@ -340,7 +340,7 @@ def collect_symbolic_trace(binary: str,
 
             symb_trace.append((err.faulty_pc, {}))  # Generate empty transform
             pc = target.read_register('pc')
-            initial_state = record_snapshot(target)
+            initial_state = target.record_snapshot()
             continue
 
         if pc is None:
@@ -368,7 +368,7 @@ def collect_symbolic_trace(binary: str,
             break
 
         # Query the new reference state for symbolic execution
-        initial_state = record_snapshot(target)
+        initial_state = target.record_snapshot()
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):

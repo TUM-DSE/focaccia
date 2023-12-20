@@ -1,8 +1,10 @@
-"""Architexture-specific configuration."""
+"""Architecture-specific configuration."""
 
 from .arch import Arch
 
-# Names of registers in the architexture
+archname = 'x86_64'
+
+# Names of registers in the architecture
 regnames = [
     'RIP',
     'RAX',
@@ -25,8 +27,10 @@ regnames = [
     # Segment registers
     'CS', 'DS', 'SS', 'ES', 'FS', 'GS',
     'FS_BASE', 'GS_BASE',
+
     # FLAGS
     'CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',
+
     # EFLAGS
     'RF', 'VM', 'AC', 'VIF', 'VIP', 'ID',
 ]
@@ -74,7 +78,7 @@ def decompose_rflags(rflags: int) -> dict[str, int]:
 
 class ArchX86(Arch):
     def __init__(self):
-        super().__init__("X86", regnames)
+        super().__init__(archname, regnames)
 
     def to_regname(self, name: str) -> str | None:
         """The X86 override of the standard register name lookup.
