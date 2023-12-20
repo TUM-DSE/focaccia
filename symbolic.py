@@ -43,9 +43,8 @@ class SymbolicTransform:
 
 class MiasmSymbolicTransform(SymbolicTransform):
     def __init__(self,
-                 transform: dict[ExprId, Expr],
+                 transform: dict[Expr, Expr],
                  arch: Arch,
-                 loc_db: LocationDB,
                  start_addr: int,
                  end_addr: int):
         """
@@ -60,6 +59,8 @@ class MiasmSymbolicTransform(SymbolicTransform):
         self.regs_diff: dict[str, Expr] = {}
         self.mem_diff: dict[ExprMem, Expr] = {}
         for dst, expr in transform.items():
+            assert(isinstance(dst, ExprMem) or isinstance(dst, ExprId))
+
             if isinstance(dst, ExprMem):
                 self.mem_diff[dst] = expr
             else:
@@ -69,14 +70,16 @@ class MiasmSymbolicTransform(SymbolicTransform):
                     self.regs_diff[regname] = expr
 
         self.arch = arch
-        self.loc_db = loc_db
 
     def concat(self, other: MiasmSymbolicTransform) -> Self:
-        class MiasmSymbolicState:
+        class MiasmSymbolicState(MiasmConcreteState):
             """Drop-in replacement for MiasmConcreteState in eval_expr that
             returns the current transform's symbolic equations instead of
             symbolic values. Calling eval_expr with this effectively nests the
             transformation into the concatenated transformation.
+
+            We inherit from `MiasmSymbolicTransform` only for the purpose of
+            correct type checking.
             """
             def __init__(self, transform: MiasmSymbolicTransform):
                 self.transform = transform
@@ -115,7 +118,9 @@ class MiasmSymbolicTransform(SymbolicTransform):
 
     def calc_register_transform(self, conc_state: ProgramState) \
             -> dict[str, int]:
-        ref_state = MiasmConcreteState(conc_state, self.loc_db)
+        # Construct a dummy location DB. At this point, expressions should
+        # never contain IR locations.
+        ref_state = MiasmConcreteState(conc_state, LocationDB())
 
         res = {}
         for regname, expr in self.regs_diff.items():
@@ -124,7 +129,9 @@ class MiasmSymbolicTransform(SymbolicTransform):
 
     def calc_memory_transform(self, conc_state: ProgramState) \
             -> dict[int, bytes]:
-        ref_state = MiasmConcreteState(conc_state, self.loc_db)
+        # Construct a dummy location DB. At this point, expressions should
+        # never contain IR locations.
+        ref_state = MiasmConcreteState(conc_state, LocationDB())
 
         res = {}
         for addr, expr in self.mem_diff.items():
@@ -205,7 +212,7 @@ class DisassemblyError(Exception):
         self.err_msg = err_msg
 
 def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext) \
-        -> tuple[int | None, list]:
+        -> tuple[int | None, list[dict]]:
     """Run a basic block.
 
     Tries to run IR blocks until the end of an ASM block/basic block is
@@ -365,8 +372,8 @@ def collect_symbolic_trace(binary: str,
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):
-        res.append(MiasmSymbolicTransform(diff, arch, ctx.loc_db, start, end))
+        res.append(MiasmSymbolicTransform(diff, arch, start, end))
     start, diff = symb_trace[-1]
-    res.append(MiasmSymbolicTransform(diff, arch, ctx.loc_db, start, start))
+    res.append(MiasmSymbolicTransform(diff, arch, start, start))
 
     return res

@@ -169,9 +169,9 @@ def main():
 
         ref = res['ref']
         for err in res['errors']:
-            print(err)
+            print(f' - {err}')
         if res['errors']:
-            print(f'Expected to satisfy the transformation:\n{ref}')
+            print(ref)
         else:
             print('No errors found.')
 

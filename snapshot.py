@@ -104,9 +104,24 @@ class ProgramState:
         self.regs[regname] = value
 
     def read_memory(self, addr: int, size: int) -> bytes:
+        """Read a number of bytes from memory.
+
+        :param addr: The address from which to read data.
+        :param data: Number of bytes to read, starting at `addr`. Must be
+                     at least zero.
+
+        :raise MemoryAccessError: If `[addr, addr + size)` is not entirely
+                                  contained in the set of stored bytes.
+        :raise ValueError: If `size < 0`.
+        """
         return self.mem.read(addr, size)
 
     def write_memory(self, addr: int, data: bytes):
+        """Write a number of bytes to memory.
+
+        :param addr: The address at which to store the data.
+        :param data: The data to store at `addr`.
+        """
         self.mem.write(addr, data)
 
     def __repr__(self):

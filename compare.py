@@ -124,47 +124,112 @@ def compare_simple(test_states: list[ProgramState],
 
     return result
 
+def _find_register_errors(txl_from: ProgramState,
+                          txl_to: ProgramState,
+                          transform_truth: SymbolicTransform) \
+        -> list[str]:
+    """Find errors in register values.
+
+    Errors might be:
+     - A register value was modified, but the tested state contains no
+       reference value for that register.
+     - The tested destination state's value for a register does not match
+       the value expected by the symbolic transformation.
+    """
+    # Calculate expected register values
+    try:
+        truth = transform_truth.calc_register_transform(txl_from)
+    except MemoryAccessError:
+        print(f'Transformation at {hex(transform_truth.addr)} depends on'
+              f' memory that is not set in the tested state. Skipping.')
+        return []
+
+    # Compare expected values to actual values in the tested state
+    errors = []
+    for regname, truth_val in truth.items():
+        try:
+            txl_val = txl_to.read(regname)
+        except ValueError:
+            errors.append(f'Value of register {regname} has changed, but is'
+                          f' not set in the tested state. Skipping.')
+            continue
+        except KeyError as err:
+            print(f'[WARNING] {err}')
+            continue
+
+        if txl_val != truth_val:
+            errors.append(f'Content of register {regname} is possibly false.'
+                          f' Expected value: {hex(truth_val)}, actual'
+                          f' value in the translation: {hex(txl_val)}.')
+    return errors
+
+def _find_memory_errors(txl_from: ProgramState,
+                        txl_to: ProgramState,
+                        transform_truth: SymbolicTransform) \
+        -> list[str]:
+    """Find errors in memory values.
+
+    Errors might be:
+     - A range of memory was written, but the tested state contains no
+       reference value for that range.
+     - The tested destination state's content for the tested range does not
+       match the value expected by the symbolic transformation.
+    """
+    # Calculate expected register values
+    try:
+        truth = transform_truth.calc_memory_transform(txl_from)
+    except MemoryAccessError:
+        print(f'Transformation at {hex(transform_truth.addr)} depends on'
+              f' memory that is not set in the tested state. Skipping.')
+        return []
+
+    # Compare expected values to actual values in the tested state
+    errors = []
+    for addr, truth_bytes in truth.items():
+        try:
+            txl_bytes = txl_to.read_memory(addr, len(truth_bytes))
+        except MemoryAccessError:
+            errors.append(f'Memory range [{addr}, {addr + len(truth_bytes)})'
+                          f' is not set in the test-result state. Skipping.')
+            continue
+
+        if txl_bytes != truth_bytes:
+            errors.append(f'Content of memory at {addr} is possibly false.'
+                          f' Expected content: {truth_bytes.hex()}, actual'
+                          f' content in the translation: {txl_bytes.hex()}.')
+    return errors
+
 def _find_errors_symbolic(txl_from: ProgramState,
                           txl_to: ProgramState,
                           transform_truth: SymbolicTransform) \
-        -> list[dict]:
+        -> list[str]:
+    """Tries to find errors in transformations between tested states.
+
+    Applies a transformation to a source state and tests whether the result
+    matches a given destination state.
+
+    :param txl_from:        Source state. This is a state from the tested
+                            program, and is assumed as the starting point for
+                            the transformation.
+    :param txl_to:          Destination state. This is a possibly faulty state
+                            from the tested program, and is tested for
+                            correctness with respect to the source state.
+    :param transform_truth: The symbolic transformation that maps the source
+                            state to the destination state.
+    """
     if (txl_from.read('PC') != transform_truth.range[0]) \
             or (txl_to.read('PC') != transform_truth.range[1]):
         tstart, tend = transform_truth.range
-        print(f'[WARNING] Program counters of the tested state do not match'
-              f' the truth state:'
+        print(f'[WARNING] Program counters of the tested transformation do not'
+              f' match the truth transformation:'
               f' {hex(txl_from.read("PC"))} -> {hex(txl_to.read("PC"))} (test)'
               f' vs. {hex(tstart)} -> {hex(tend)} (truth).'
               f' Skipping with no errors.')
         return []
 
     errors = []
-
-    # Calculate expected register values
-    try:
-        truth = transform_truth.calc_register_transform(txl_from)
-    except MemoryAccessError:
-        print(f'Transformation at {hex(transform_truth.addr)} depends on'
-              f' memory, which is not available from arancini logs.'
-              f' Skipping.')
-        return errors
-
-    # Compare expected values to actual values in the tested state
-    for regname, truth_val in truth.items():
-        try:
-            txl_val = txl_to.read(regname)
-        except ValueError:
-            print(f'The tested state does not have a value for {regname}.'
-                  ' Skipping.')
-            continue
-        except KeyError as err:
-            print(err)
-            continue
-
-        if txl_val != truth_val:
-            errors.append(f'Content of register {regname} is possibly false.' \
-                          f' Expected value: {hex(truth_val)}, actual' \
-                          f' value in the translation: {txl_val}.')
+    errors.extend(_find_register_errors(txl_from, txl_to, transform_truth))
+    errors.extend(_find_memory_errors(txl_from, txl_to, transform_truth))
 
     return errors
 
