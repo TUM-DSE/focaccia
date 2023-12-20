@@ -74,23 +74,16 @@ def match_traces(test: list[ProgramState], truth: list[SymbolicTransform]):
 
     return test, truth
 
-def parse_inputs(txl_path, ref_path, program):
+def parse_inputs(txl_path, program):
     # Our architecture
     arch = x86.ArchX86()
 
-    txl = []
     with open(txl_path, "r") as txl_file:
         txl = arancini.parse(txl_file.readlines(), arch)
 
-    ref = []
-    if program is not None:
-        with open(txl_path, "r") as txl_file:
-            breakpoints = arancini.parse_break_addresses(txl_file.readlines())
+    with open(txl_path, "r") as txl_file:
+        breakpoints = arancini.parse_break_addresses(txl_file.readlines())
         ref = run_native_execution(program, breakpoints)
-    else:
-        assert(ref_path is not None)
-        with open(ref_path, "r") as native_file:
-            ref = arancini.parse(native_file.readlines(), arch)
 
     return txl, ref
 
@@ -98,23 +91,18 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Comparator for emulator logs to reference')
     parser.add_argument('-p', '--program',
                         type=str,
-                        help='Path to oracle program')
-    parser.add_argument('-r', '--ref',
-                        type=str,
                         required=True,
-                        help='Path to the reference log (gathered with run.sh)')
+                        help='Path to oracle program')
+    parser.add_argument('-a', '--program-arg',
+                        type=str,
+                        required=False,
+                        default=[],
+                        action='append',
+                        help='Arguments to the program specified with --program.')
     parser.add_argument('-t', '--txl',
                         type=str,
                         required=True,
                         help='Path to the translation log (gathered via Arancini)')
-    parser.add_argument('-s', '--stats',
-                        action='store_true',
-                        default=False,
-                        help='Run statistics on comparisons')
-    parser.add_argument('-v', '--verbose',
-                        action='store_true',
-                        default=True,
-                        help='Path to oracle program')
     parser.add_argument('--symbolic',
                         action='store_true',
                         default=False,
@@ -128,33 +116,15 @@ def main():
     args = parse_arguments()
 
     txl_path = args.txl
-    reference_path = args.ref
     program = args.program
-
-    stats = args.stats
-    verbose = args.verbose
-
-    if verbose:
-        print("Enabling verbose program output")
-        print(f"Verbose: {verbose}")
-        print(f"Statistics: {stats}")
-        print(f"Symbolic: {args.symbolic}")
-
-    if program is None and reference_path is None:
-        raise ValueError('Either program or path to native file must be'
-                         'provided')
-
-    txl, ref = parse_inputs(txl_path, reference_path, program)
-
-    if program != None and reference_path != None:
-        with open(reference_path, 'w') as w:
-            for snapshot in ref:
-                print(snapshot, file=w)
+    prog_args = args.program_arg
+    txl, ref = parse_inputs(txl_path, program)
 
     if args.symbolic:
         assert(program is not None)
 
-        transforms = collect_symbolic_trace(program, [program])
+        print(f'Tracing {program} with arguments {prog_args}...')
+        transforms = collect_symbolic_trace(program, [program, *prog_args])
         txl, transforms = match_traces(txl, transforms)
         result = compare_symbolic(txl, transforms)
     else:
