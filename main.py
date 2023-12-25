@@ -4,10 +4,10 @@ import argparse
 import platform
 from typing import Iterable
 
-import arancini
 from arch import x86
 from compare import compare_simple, compare_symbolic
 from lldb_target import LLDBConcreteTarget
+from parser import parse_arancini
 from snapshot import ProgramState
 from symbolic import SymbolicTransform, collect_symbolic_trace
 from utils import check_version, print_separator
@@ -79,10 +79,10 @@ def parse_inputs(txl_path, program):
     arch = x86.ArchX86()
 
     with open(txl_path, "r") as txl_file:
-        txl = arancini.parse(txl_file.readlines(), arch)
+        txl = parse_arancini(txl_file, arch)
 
     with open(txl_path, "r") as txl_file:
-        breakpoints = arancini.parse_break_addresses(txl_file.readlines())
+        breakpoints = [state.read('PC') for state in txl]
         ref = run_native_execution(program, breakpoints)
 
     return txl, ref

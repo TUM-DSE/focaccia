@@ -33,8 +33,8 @@ program snapshots.
 
  - `compare.py`: The central algorithms that work on snapshots.
 
- - `arancini.py`: Functionality specific to working with arancini. Parsing of arancini's logs into our snapshot
-structures.
+ - `parser.py`: Utilities for parsing logs from Arancini and QEMU, as well as serializing/deserializing to/from our own
+log format.
 
  - `arch/`: Abstractions over different processor architectures. Will be used to integrate support for more
 architectures later. Currently, we only have X86.
