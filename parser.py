@@ -1,5 +1,6 @@
 """Parsing of JSON files containing snapshot data."""
 
+import base64
 import json
 import re
 from typing import TextIO
@@ -29,7 +30,7 @@ def parse_snapshots(json_stream: TextIO) -> list[ProgramState]:
             state.set(reg, val)
         for mem in _get_or_throw(snapshot, 'memory'):
             start, end = _get_or_throw(mem, 'range')
-            data = _get_or_throw(mem, 'data').encode()
+            data = base64.b64decode(_get_or_throw(mem, 'data'))
             assert(len(data) == end - start)
             state.write_memory(start, data)
 
@@ -51,7 +52,7 @@ def serialize_snapshots(snapshots: list[ProgramState], out_stream: TextIO):
         for addr, data in snapshot.mem._pages.items():
             mem.append({
                 'range': [addr, addr + len(data)],
-                'data': data.decode(),
+                'data': base64.b64encode(data).decode('ascii')
             })
         res['snapshots'].append({ 'registers': regs, 'memory': mem })
 
