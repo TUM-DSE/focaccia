@@ -10,7 +10,7 @@ class SparseMemory:
     Note that out-of-bound reads are possible when performed on unwritten
     sections of existing pages and that there is no safeguard check for them.
     """
-    def __init__(self, page_size=1024):
+    def __init__(self, page_size=4096):
         self.page_size = page_size
         self._pages: dict[int, bytes] = {}
 
@@ -51,20 +51,23 @@ class SparseMemory:
         :param addr: The address at which to store the data.
         :param data: The data to store at `addr`.
         """
-        while len(data) > 0:
+        offset = 0  # Current offset into `data`
+        while offset < len(data):
             page_addr, off = self._to_page_addr_and_offset(addr)
             if page_addr not in self._pages:
                 self._pages[page_addr] = bytes(self.page_size)
             page = self._pages[page_addr]
             assert(len(page) == self.page_size)
 
-            write_size = min(len(data), self.page_size - off)
-            new_page = page[:off] + data[:write_size] + page[off+write_size:]
+            write_size = min(len(data) - offset, self.page_size - off)
+            new_page = page[:off] + data[offset:offset + write_size] + page[off+write_size:]
             assert(len(new_page) == self.page_size)
             self._pages[page_addr] = new_page
 
-            data = data[write_size:]
+            offset += write_size
             addr += write_size
+
+        assert(len(data) == offset)  # Exactly all data was written
 
 class ProgramState:
     """A snapshot of the program's state."""
@@ -125,4 +128,5 @@ class ProgramState:
         self.mem.write(addr, data)
 
     def __repr__(self):
-        return repr(self.regs)
+        return f'Snapshot ({self.arch.archname}): ' \
+               + repr({r: hex(v) for r, v in self.regs.items() if v is not None})
