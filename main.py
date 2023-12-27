@@ -5,7 +5,8 @@ import platform
 from typing import Iterable
 
 from arch import x86
-from compare import compare_simple, compare_symbolic
+from compare import compare_simple, compare_symbolic, \
+                    ErrorSeverity, ErrorTypes
 from lldb_target import LLDBConcreteTarget
 from parser import parse_arancini
 from snapshot import ProgramState
@@ -108,11 +109,61 @@ def parse_arguments():
                         default=False,
                         help='Use an advanced algorithm that uses symbolic'
                              ' execution to determine accurate data'
-                             ' transformations')
+                             ' transformations. This improves the quality of'
+                             ' generated errors significantly, but may take'
+                             ' more time to run.')
+    parser.add_argument('--error-level',
+                        type=str,
+                        default='verbose',
+                        choices=['verbose', 'errors', 'restricted'],
+                        help='Verbosity of reported errors. \'errors\' reports'
+                             ' everything that might be an error in the'
+                             ' translation, while \'verbose\' may report'
+                             ' additional errors from incomplete input'
+                             ' data, etc. [Default: verbose]')
     args = parser.parse_args()
     return args
 
+def print_result(result, min_severity: ErrorSeverity):
+    shown = 0
+    suppressed = 0
+
+    for res in result:
+        pc = res['pc']
+        print_separator()
+        print(f'For PC={hex(pc)}')
+        print_separator()
+
+        # Filter errors by severity
+        errs = [e for e in res['errors'] if e.severity >= min_severity]
+        suppressed += len(res['errors']) - len(errs)
+        shown += len(errs)
+
+        # Print all non-suppressed errors
+        for n, err in enumerate(errs, start=1):
+            print(f' {n:2}. {err}')
+
+        if errs:
+            print()
+            print(f'Expected transformation: {res["ref"]}')
+            print(f'Actual transformation:   {res["txl"]}')
+        else:
+            print('No errors found.')
+
+    print()
+    print('#' * 60)
+    print(f'Found {shown} errors.')
+    print(f'Suppressed {suppressed} low-priority errors'
+          f' (showing {min_severity} and higher).')
+    print('#' * 60)
+    print()
+
 def main():
+    verbosity = {
+        'verbose': ErrorTypes.INFO,
+        'errors': ErrorTypes.POSSIBLE,
+        'restricted': ErrorTypes.CONFIRMED,
+    }
     args = parse_arguments()
 
     txl_path = args.txl
@@ -123,33 +174,14 @@ def main():
     if args.symbolic:
         assert(program is not None)
 
-        print(f'Tracing {program} with arguments {prog_args}...')
+        print(f'Tracing {program} symbolically with arguments {prog_args}...')
         transforms = collect_symbolic_trace(program, [program, *prog_args])
         txl, transforms = match_traces(txl, transforms)
         result = compare_symbolic(txl, transforms)
     else:
         result = compare_simple(txl, ref)
 
-    # Print results
-    for res in result:
-        pc = res['pc']
-        print_separator()
-        print(f'For PC={hex(pc)}')
-        print_separator()
-
-        ref = res['ref']
-        for err in res['errors']:
-            print(f' - {err}')
-        if res['errors']:
-            print(ref)
-        else:
-            print('No errors found.')
-
-    print()
-    print('#' * 60)
-    print(f'Found {sum(len(res["errors"]) for res in result)} errors.')
-    print('#' * 60)
-    print()
+    print_result(result, verbosity[args.error_level])
 
 if __name__ == "__main__":
     check_version('3.7')

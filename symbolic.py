@@ -147,8 +147,7 @@ class MiasmSymbolicTransform(SymbolicTransform):
             res += f'   {reg:6s} = {expr}\n'
         for mem, expr in self.mem_diff.items():
             res += f'   {mem} = {expr}\n'
-
-        return res
+        return res[:-2]  # Remove trailing newline
 
 def _step_until(target: LLDBConcreteTarget, addr: int) -> list[int]:
     """Step a concrete target to a specific instruction.

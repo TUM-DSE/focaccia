@@ -1,8 +1,10 @@
 from arch.arch import Arch
 
 class MemoryAccessError(Exception):
-    def __init__(self, msg: str):
+    def __init__(self, addr: int, size: int, msg: str):
         super().__init__(msg)
+        self.mem_addr = addr
+        self.mem_size = size
 
 class SparseMemory:
     """Sparse memory.
@@ -35,7 +37,8 @@ class SparseMemory:
         while size > 0:
             page_addr, off = self._to_page_addr_and_offset(addr)
             if page_addr not in self._pages:
-                raise MemoryAccessError(f'Address {addr} is not contained in'
+                raise MemoryAccessError(addr, size,
+                                        f'Address {addr} is not contained in'
                                         f' the sparse memory.')
             data = self._pages[page_addr]
             assert(len(data) == self.page_size)
