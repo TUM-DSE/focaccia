@@ -24,6 +24,15 @@ regnames = [
     'R14',
     'R15',
     'RFLAGS',
+
+    # x87 float registers
+    'ST0', 'ST1', 'ST2', 'ST3', 'ST4', 'ST5', 'ST6', 'ST7',
+
+    # Vector registers
+    'YMM0', 'YMM1', 'YMM2', 'YMM3', 'YMM4',
+    'YMM5', 'YMM6', 'YMM7', 'YMM8', 'YMM9',
+    'YMM10', 'YMM11', 'YMM12', 'YMM13', 'YMM14', 'YMM15',
+
     # Segment registers
     'CS', 'DS', 'SS', 'ES', 'FS', 'GS',
     'FS_BASE', 'GS_BASE',
