@@ -30,6 +30,8 @@ It will take a while to compile.
 
 The `tools/` directory contains additional utility scripts to work with focaccia.
 
+ - `convert.py`: Convert logs from QEMU or Arancini to focaccia's snapshot log format.
+
 ## Project Overview (for developers)
 
 ### Snapshot-comparison framework
