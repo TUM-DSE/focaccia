@@ -1,8 +1,8 @@
 from functools import total_ordering
 from typing import Self
 
-from snapshot import ProgramState, MemoryAccessError
-from symbolic import SymbolicTransform
+from .snapshot import ProgramState, MemoryAccessError
+from .symbolic import SymbolicTransform
 
 @total_ordering
 class ErrorSeverity:

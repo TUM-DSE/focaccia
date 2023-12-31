@@ -5,8 +5,8 @@ import json
 import re
 from typing import TextIO
 
-from arch import supported_architectures, Arch
-from snapshot import ProgramState
+from .arch import supported_architectures, Arch
+from .snapshot import ProgramState
 
 class ParseError(Exception):
     """A parse error."""

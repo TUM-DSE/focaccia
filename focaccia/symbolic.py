@@ -11,10 +11,10 @@ from miasm.ir.symbexec import SymbolicExecutionEngine
 from miasm.ir.ir import IRBlock
 from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 
-from lldb_target import LLDBConcreteTarget
-from miasm_util import MiasmConcreteState, eval_expr
-from snapshot import ProgramState
-from arch import Arch, supported_architectures
+from .arch import Arch, supported_architectures
+from .lldb_target import LLDBConcreteTarget
+from .miasm_util import MiasmConcreteState, eval_expr
+from .snapshot import ProgramState
 
 class SymbolicTransform:
     def __init__(self, from_addr: int, to_addr: int):

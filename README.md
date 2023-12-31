@@ -22,37 +22,45 @@ PYTHONPATH="$PYTHONPATH:$(./build/bin/lldb -P)"
 
 It will take a while to compile.
 
-## Snapshot-comparison framework
+## How To Use
+
+`focaccia.py` is the main executable. Invoke `focaccia.py --help` to see what you can do with it.
+
+## Tools
+
+The `tools/` directory contains additional utility scripts to work with focaccia.
+
+## Project Overview (for developers)
+
+### Snapshot-comparison framework
 
 The following files belong to a rough framework for the snapshot comparison engine:
 
- - `main.py`: Entry point to the tool. Handling of command line arguments, pre-processing of input logs, etc.
+ - `focaccia/snapshot.py`: Structures used to work with snapshots. The `ProgramState` class is our primary
+representation of program snapshots.
 
- - `snapshot.py`: Structures used to work with snapshots. The `ProgramState` class is our primary representation of
-program snapshots.
+ - `focaccia/compare.py`: The central algorithms that work on snapshots.
 
- - `compare.py`: The central algorithms that work on snapshots.
-
- - `parser.py`: Utilities for parsing logs from Arancini and QEMU, as well as serializing/deserializing to/from our own
-log format.
-
- - `arch/`: Abstractions over different processor architectures. Will be used to integrate support for more
+ - `focaccia/arch/`: Abstractions over different processor architectures. Will be used to integrate support for more
 architectures later. Currently, we only have X86.
 
-## Concolic execution
+### Concolic execution
 
 The following files belong to a prototype of a data-dependency generator based on symbolic
 execution:
 
- - `symbolic.py`: Algorithms and data structures to compute and manipulate symbolic program transformations. This
-handles the symbolic part of "concolic" execution.
+ - `focaccia/symbolic.py`: Algorithms and data structures to compute and manipulate symbolic program transformations.
+This handles the symbolic part of "concolic" execution.
 
- - `lldb_target.py`: Tools for executing a program concretely and tracking its execution using
+ - `focaccia/lldb_target.py`: Tools for executing a program concretely and tracking its execution using
 [LLDB](https://lldb.llvm.org/). This handles the concrete part of "concolic" execution.
 
- - `miasm_util.py`: Tools to evaluate Miasm's symbolic expressions based on a concrete state. Ties the symbolic and
-concrete parts together into "concolic" execution.
+ - `focaccia/miasm_util.py`: Tools to evaluate Miasm's symbolic expressions based on a concrete state. Ties the symbolic
+and concrete parts together into "concolic" execution.
 
-## Helpers
+### Helpers
+
+ - `focaccia/parser.py`: Utilities for parsing logs from Arancini and QEMU, as well as serializing/deserializing to/from
+our own log format.
 
  - `miasm_test.py`: A test script that traces a program concolically.

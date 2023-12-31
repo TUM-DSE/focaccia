@@ -6,7 +6,7 @@ from miasm.expression.expression import Expr, ExprOp, ExprId, ExprLoc, \
                                         ExprSlice, ExprCond
 from miasm.expression.simplifications import expr_simp_explicit
 
-from snapshot import ProgramState
+from .snapshot import ProgramState
 
 def simp_segm(expr_simp, expr: ExprOp):
     """Simplify a segmentation expression to an addition of the segment

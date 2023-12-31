@@ -9,10 +9,10 @@ import shlex
 import subprocess
 from typing import TextIO
 
-import parser
-from arch import x86
-from lldb_target import MemoryMap
-from snapshot import ProgramState
+import focaccia.parser as parser
+from focaccia.arch import x86
+from focaccia.lldb_target import MemoryMap
+from focaccia.snapshot import ProgramState
 
 def parse_memory_maps(stream: TextIO) -> tuple[list[MemoryMap], str]:
     """

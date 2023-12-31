@@ -1,6 +1,6 @@
 import unittest
 
-from snapshot import SparseMemory, MemoryAccessError
+from focaccia.snapshot import SparseMemory, MemoryAccessError
 
 class TestSparseMemory(unittest.TestCase):
     def test_oob_read(self):

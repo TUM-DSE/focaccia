@@ -4,14 +4,14 @@ import argparse
 import platform
 from typing import Iterable
 
-from arch import x86
-from compare import compare_simple, compare_symbolic, \
-                    ErrorSeverity, ErrorTypes
-from lldb_target import LLDBConcreteTarget
-from parser import parse_arancini
-from snapshot import ProgramState
-from symbolic import SymbolicTransform, collect_symbolic_trace
-from utils import check_version, print_separator
+from focaccia.arch import x86
+from focaccia.compare import compare_simple, compare_symbolic, \
+                             ErrorSeverity, ErrorTypes
+from focaccia.lldb_target import LLDBConcreteTarget
+from focaccia.parser import parse_arancini
+from focaccia.snapshot import ProgramState
+from focaccia.symbolic import SymbolicTransform, collect_symbolic_trace
+from focaccia.utils import print_separator
 
 def run_native_execution(oracle_program: str, breakpoints: Iterable[int]):
     """Gather snapshots from a native execution via an external debugger.
@@ -183,6 +183,5 @@ def main():
 
     print_result(result, verbosity[args.error_level])
 
-if __name__ == "__main__":
-    check_version('3.7')
+if __name__ == '__main__':
     main()

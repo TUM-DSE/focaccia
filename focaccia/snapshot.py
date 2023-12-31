@@ -1,4 +1,4 @@
-from arch.arch import Arch
+from .arch.arch import Arch
 
 class MemoryAccessError(Exception):
     def __init__(self, addr: int, size: int, msg: str):

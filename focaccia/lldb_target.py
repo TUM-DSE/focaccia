@@ -1,7 +1,7 @@
 import lldb
 
-from arch import supported_architectures, x86
-from snapshot import ProgramState
+from .arch import supported_architectures, x86
+from .snapshot import ProgramState
 
 class MemoryMap:
     """Description of a range of mapped memory.

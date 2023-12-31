@@ -1,6 +1,6 @@
 import argparse
 
-from symbolic import collect_symbolic_trace
+from focaccia.symbolic import collect_symbolic_trace
 
 def main():
     program = argparse.ArgumentParser()
