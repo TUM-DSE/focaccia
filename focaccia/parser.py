@@ -139,18 +139,3 @@ def parse_arancini(stream: TextIO, arch: Arch) -> list[ProgramState]:
                 states[-1].set(regname, int(value, 16))
 
     return states
-
-if __name__ == "__main__":
-    from arch import x86
-    with open('qemu.log', 'r') as file:
-        states = parse_qemu(file, x86.ArchX86())
-        print(f'Parsed {len(states)} states from QEMU log.')
-    with open('dump.qemu', 'w') as file:
-        serialize_snapshots(states, file)
-
-    with open('emulator-log.txt', 'r') as file:
-        states = parse_arancini(file, x86.ArchX86())
-        print(f'Parsed {len(states)} states from Arancini log.')
-    with open('dump.arancini', 'w') as file:
-        serialize_snapshots(states, file)
-    exit(0)
