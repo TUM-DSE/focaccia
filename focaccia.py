@@ -175,7 +175,7 @@ def main():
         assert(program is not None)
 
         print(f'Tracing {program} symbolically with arguments {prog_args}...')
-        transforms = collect_symbolic_trace(program, [program, *prog_args])
+        transforms = collect_symbolic_trace(program, prog_args)
         txl, transforms = match_traces(txl, transforms)
         result = compare_symbolic(txl, transforms)
     else:

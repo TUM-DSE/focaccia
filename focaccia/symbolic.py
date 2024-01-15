@@ -276,13 +276,14 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext)
             pass
 
 def collect_symbolic_trace(binary: str,
-                           argv: list[str],
+                           args: list[str],
                            start_addr: int | None = None
                            ) -> list[SymbolicTransform]:
     """Execute a program and compute state transformations between executed
     instructions.
 
     :param binary: The binary to trace.
+    :param args:   Arguments to the program.
     """
     ctx = DisassemblyContext(binary)
 
@@ -298,7 +299,7 @@ def collect_symbolic_trace(binary: str,
     else:
         pc = start_addr
 
-    target = LLDBConcreteTarget(binary, argv)
+    target = LLDBConcreteTarget(binary, args)
     if target.read_register('pc') != pc:
         target.set_breakpoint(pc)
         target.run()

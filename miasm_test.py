@@ -21,7 +21,7 @@ def main():
             print(f'Start address must be a hexadecimal number. Exiting.')
             exit(1)
 
-    strace = collect_symbolic_trace(binary, [binary, *argv], pc)
+    strace = collect_symbolic_trace(binary, argv, pc)
 
     print(f'--- {len(strace)} instructions traced.')
     print(f'--- No new PC found. Exiting.')
