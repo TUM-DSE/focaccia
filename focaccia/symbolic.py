@@ -12,7 +12,9 @@ from miasm.ir.ir import IRBlock
 from miasm.expression.expression import Expr, ExprId, ExprMem, ExprInt
 
 from .arch import Arch, supported_architectures
-from .lldb_target import LLDBConcreteTarget
+from .lldb_target import LLDBConcreteTarget, \
+                         ConcreteRegisterError, \
+                         ConcreteMemoryError
 from .miasm_util import MiasmConcreteState, eval_expr
 from .snapshot import ProgramState
 
@@ -75,7 +77,7 @@ class MiasmSymbolicTransform(SymbolicTransform):
         class MiasmSymbolicState(MiasmConcreteState):
             """Drop-in replacement for MiasmConcreteState in eval_expr that
             returns the current transform's symbolic equations instead of
-            symbolic values. Calling eval_expr with this effectively nests the
+            concrete values. Calling eval_expr with this effectively nests the
             transformation into the concatenated transformation.
 
             We inherit from `MiasmSymbolicTransform` only for the purpose of
@@ -275,6 +277,39 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext)
             # instructions are translated to multiple IR instructions.
             pass
 
+class LLDBConcreteState:
+    """A back-end replacement for the `ProgramState` object from which
+    `MiasmConcreteState` reads its values. This reads values directly from an
+    LLDB target instead. This saves us the trouble of recording a full program
+    state, and allows us instead to read values from LLDB on demand.
+    """
+    def __init__(self, target: LLDBConcreteTarget, arch: Arch):
+        self._target = target
+        self._arch = arch
+
+    def read(self, reg: str) -> int | None:
+        from focaccia.arch import x86
+
+        regname = self._arch.to_regname(reg)
+        if regname is None:
+            return None
+
+        try:
+            return self._target.read_register(regname)
+        except ConcreteRegisterError:
+            # Special case for X86
+            if self._arch.archname == x86.archname:
+                rflags = x86.decompose_rflags(self._target.read_register('rflags'))
+                if regname in rflags:
+                    return rflags[regname]
+            return None
+
+    def read_memory(self, addr: int, size: int):
+        try:
+            return self._target.read_memory(addr, size)
+        except ConcreteMemoryError:
+            return None
+
 def collect_symbolic_trace(binary: str,
                            args: list[str],
                            start_addr: int | None = None
@@ -304,11 +339,11 @@ def collect_symbolic_trace(binary: str,
         target.set_breakpoint(pc)
         target.run()
         target.remove_breakpoint(pc)
+    conc_state = LLDBConcreteState(target, arch)
 
     symb_trace = [] # The resulting list of symbolic transforms per instruction
 
     # Run until no more states can be reached
-    initial_state = target.record_snapshot()
     while pc is not None:
         assert(target.read_register('pc') == pc)
 
@@ -318,9 +353,8 @@ def collect_symbolic_trace(binary: str,
         try:
             pc, strace = _run_block(
                 pc,
-                MiasmConcreteState(initial_state, ctx.loc_db),
-                ctx
-            )
+                MiasmConcreteState(conc_state, ctx.loc_db),
+                ctx)
         except DisassemblyError as err:
             # This happens if we encounter an instruction that is not
             # implemented by Miasm. Try to skip that instruction and continue
@@ -340,7 +374,6 @@ def collect_symbolic_trace(binary: str,
 
             symb_trace.append((err.faulty_pc, {}))  # Generate empty transform
             pc = target.read_register('pc')
-            initial_state = target.record_snapshot()
             continue
 
         if pc is None:
@@ -359,16 +392,13 @@ def collect_symbolic_trace(binary: str,
         symb_trace.extend(strace)
 
         # Use this for extensive trace debugging
-        if [a for a, _ in strace] != ctrace:
-            print(f'[WARNING] Symbolic trace and concrete trace are not equal!'
-                  f'\n    symbolic: {[hex(a) for a, _ in strace]}'
-                  f'\n    concrete: {[hex(a) for a in ctrace]}')
+        #if [a for a, _ in strace] != ctrace:
+        #    print(f'[WARNING] Symbolic trace and concrete trace are not equal!'
+        #          f'\n    symbolic: {[hex(a) for a, _ in strace]}'
+        #          f'\n    concrete: {[hex(a) for a in ctrace]}')
 
         if target.is_exited():
             break
-
-        # Query the new reference state for symbolic execution
-        initial_state = target.record_snapshot()
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):

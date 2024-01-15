@@ -38,8 +38,8 @@ class SparseMemory:
             page_addr, off = self._to_page_addr_and_offset(addr)
             if page_addr not in self._pages:
                 raise MemoryAccessError(addr, size,
-                                        f'Address {addr} is not contained in'
-                                        f' the sparse memory.')
+                                        f'Address {hex(addr)} is not contained'
+                                        f' in the sparse memory.')
             data = self._pages[page_addr]
             assert(len(data) == self.page_size)
             read_size = min(size, self.page_size - off)
