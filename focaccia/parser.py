@@ -7,6 +7,7 @@ from typing import TextIO
 
 from .arch import supported_architectures, Arch
 from .snapshot import ProgramState
+from .symbolic import SymbolicTransform
 
 class ParseError(Exception):
     """A parse error."""
@@ -17,6 +18,20 @@ def _get_or_throw(obj: dict, key: str):
     if val is not None:
         return val
     raise ParseError(f'Expected value at key {key}, but found none.')
+
+def parse_transformations(json_stream: TextIO) -> list[SymbolicTransform]:
+    """Parse symbolic transformations from a text stream."""
+    from .symbolic import parse_symbolic_transform
+
+    json_data = json.load(json_stream)
+    return [parse_symbolic_transform(item) for item in json_data]
+
+def serialize_transformations(transforms: list[SymbolicTransform],
+                              out_stream: TextIO):
+    """Serialize symbolic transformations to a text stream."""
+    from .symbolic import serialize_symbolic_transform
+
+    json.dump([serialize_symbolic_transform(t) for t in transforms], out_stream)
 
 def parse_snapshots(json_stream: TextIO) -> list[ProgramState]:
     """Parse snapshots from our JSON format."""

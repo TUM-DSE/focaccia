@@ -201,6 +201,32 @@ class SymbolicTransform:
             res += f'   {mem} = {expr}\n'
         return res[:-2]  # Remove trailing newline
 
+def parse_symbolic_transform(string: str) -> SymbolicTransform:
+    """Parse a symbolic transformation from a string.
+    :raise KeyError: if a parse error occurs.
+    """
+    import json
+    from miasm.expression.parser import str_to_expr as parse
+
+    data = json.loads(string)
+
+    # We can use a None-arch because it's only used when the dict is not empty
+    t = SymbolicTransform({}, None, int(data['from_addr']), int(data['to_addr']))
+    t.changed_regs = { name: parse(val) for name, val in data['regs'].items() }
+    t.changed_mem = { parse(addr): parse(val) for addr, val in data['mem'].items() }
+
+    return t
+
+def serialize_symbolic_transform(t: SymbolicTransform) -> str:
+    """Serialize a symbolic transformation."""
+    import json
+    return json.dumps({
+        'from_addr': t.range[0],
+        'to_addr': t.range[1],
+        'regs': { name: repr(expr) for name, expr in t.changed_regs.items() },
+        'mem': { repr(addr): repr(val) for addr, val in t.changed_mem.items() },
+    })
+
 def _step_until(target: LLDBConcreteTarget, addr: int) -> list[int]:
     """Step a concrete target to a specific instruction.
     :return: Trace of all instructions executed.
