@@ -1,6 +1,7 @@
 from .arch.arch import Arch
 
 class MemoryAccessError(Exception):
+    """Raised when a memory access fails."""
     def __init__(self, addr: int, size: int, msg: str):
         super().__init__(msg)
         self.mem_addr = addr

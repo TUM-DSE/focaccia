@@ -30,6 +30,8 @@ expr_simp = expr_simp_explicit
 expr_simp.enable_passes({ExprOp: [simp_segm]})
 
 class MiasmConcreteState:
+    """Resolves atomic symbols to some state."""
+
     miasm_flag_aliases = {
         'NF':     'SF',
         'I_F':    'IF',
@@ -38,22 +40,22 @@ class MiasmConcreteState:
     }
 
     def __init__(self, state: ProgramState, loc_db: LocationDB):
-        self.state = state
-        self.loc_db = loc_db
+        self._state = state
+        self._loc_db = loc_db
 
     def resolve_register(self, regname: str) -> int | None:
         regname = regname.upper()
         if regname in self.miasm_flag_aliases:
             regname = self.miasm_flag_aliases[regname]
-        return self.state.read(regname)
+        return self._state.read(regname)
 
     def resolve_memory(self, addr: int, size: int) -> bytes | None:
-        return self.state.read_memory(addr, size)
+        return self._state.read_memory(addr, size)
 
     def resolve_location(self, loc: LocKey) -> int | None:
-        return self.loc_db.get_location_offset(loc)
+        return self._loc_db.get_location_offset(loc)
 
-def eval_expr(expr: Expr, conc_state: MiasmConcreteState):
+def eval_expr(expr: Expr, conc_state: MiasmConcreteState) -> Expr:
     """Evaluate a symbolic expression with regard to a concrete reference
     state.
 
@@ -62,8 +64,9 @@ def eval_expr(expr: Expr, conc_state: MiasmConcreteState):
                        register and memory state is resolved.
 
     :return: The most simplified and concrete representation of `expr` that
-             is possibly producible. May be either an `ExprInt` or an
-             `ExprLoc`.
+             is producible with the values from `conc_state`. Is guaranteed to
+             be either an `ExprInt` or an `ExprLoc` *if* `conc_state` only
+             returns concrete register- and memory values.
     """
     # Most of these implementation are just copy-pasted members of
     # `SymbolicExecutionEngine`.

@@ -1,7 +1,6 @@
 """Tools and utilities for symbolic execution with Miasm."""
 
 from __future__ import annotations
-from typing import Self
 
 from miasm.analysis.binary import ContainerELF
 from miasm.analysis.machine import Machine
@@ -18,37 +17,48 @@ from .lldb_target import LLDBConcreteTarget, \
 from .miasm_util import MiasmConcreteState, eval_expr
 from .snapshot import ProgramState
 
+def eval_symbol(symbol: Expr, conc_state: ProgramState) -> int:
+    """Evaluate a symbol based on a concrete reference state.
+
+    :param conc_state: A concrete state.
+    :return: The resolved value.
+
+    :raise ValueError: If the concrete state does not contain a register value
+                       that is referenced by the symbolic expression.
+    :raise MemoryAccessError: If the concrete state does not contain memory
+                              that is referenced by the symbolic expression.
+    """
+    class ConcreteStateWrapper(MiasmConcreteState):
+        """Extend the state resolver with assumptions about the expressions
+        that may be resolved with `eval_symbol`."""
+        def __init__(self, conc_state: ProgramState):
+            super().__init__(conc_state, LocationDB())
+
+        def resolve_register(self, regname: str) -> int:
+            regname = regname.upper()
+            regname = self.miasm_flag_aliases.get(regname, regname)
+            return self._state.read(regname)
+
+        def resolve_memory(self, addr: int, size: int) -> bytes:
+            return self._state.read_memory(addr, size)
+
+        def resolve_location(self, _):
+            raise ValueError(f'[In eval_symbol]: Unable to evaluate symbols'
+                             f' that contain IR location expressions.')
+
+    res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
+    assert(isinstance(res, ExprInt))  # Must be either ExprInt or ExprLoc,
+                                      # but ExprLocs are disallowed by the
+                                      # ConcreteStateWrapper
+    return int(res)
+
 class SymbolicTransform:
-    def __init__(self, from_addr: int, to_addr: int):
-        self.addr = from_addr
-        self.range = (from_addr, to_addr)
-
-    def concat(self, other: Self) -> Self:
-        """Concatenate another transform to this transform.
-
-        The symbolic transform on which `concat` is called is the transform
-        that is applied first, meaning: `(a.concat(b))(state) == b(a(state))`.
-        """
-        raise NotImplementedError('concat is abstract.')
-
-    def calc_register_transform(self, conc_state: ProgramState) \
-            -> dict[str, int]:
-        raise NotImplementedError('calc_register_transform is abstract.')
-
-    def calc_memory_transform(self, conc_state: ProgramState) \
-            -> dict[int, bytes]:
-        raise NotImplementedError('calc_memory_transform is abstract.')
-
-    def __repr__(self) -> str:
-        start, end = self.range
-        return f'Symbolic state transformation {hex(start)} -> {hex(end)}'
-
-class MiasmSymbolicTransform(SymbolicTransform):
+    """A symbolic transformation mapping one program state to another."""
     def __init__(self,
                  transform: dict[Expr, Expr],
                  arch: Arch,
-                 start_addr: int,
-                 end_addr: int):
+                 from_addr: int,
+                 to_addr: int):
         """
         :param state: The symbolic transformation in the form of a SimState
                       object.
@@ -56,98 +66,138 @@ class MiasmSymbolicTransform(SymbolicTransform):
                            represents the modifications to the program state
                            performed by this instruction.
         """
-        super().__init__(start_addr, end_addr)
+        self.addr = from_addr
+        """The instruction address of the program state on which the
+        transformation operates. Equivalent to `self.range[0]`."""
 
-        self.regs_diff: dict[str, Expr] = {}
-        self.mem_diff: dict[ExprMem, Expr] = {}
+        self.range = (from_addr, to_addr)
+        """The range of addresses that the transformation covers.
+        The transformation `t` maps the program state at instruction
+        `t.range[0]` to the program state at instruction `t.range[1]`."""
+
+        self.changed_regs: dict[str, Expr] = {}
+        """Maps register names to expressions for the register's content.
+
+        Contains only registers that are changed by the transformation.
+        Register names are already normalized to a respective architecture's
+        naming conventions."""
+
+        self.changed_mem: dict[ExprMem, Expr] = {}
+        """Maps memory addresses to memory content.
+
+        Memory addresses may depend on other symbolic values, such as register
+        content, and are therefore symbolic themselves.
+
+        Remember: The memory content expression's `size` attribute is in bits,
+        not bytes!"""
+
         for dst, expr in transform.items():
             assert(isinstance(dst, ExprMem) or isinstance(dst, ExprId))
 
             if isinstance(dst, ExprMem):
-                self.mem_diff[dst] = expr
+                self.changed_mem[dst] = expr
             else:
                 assert(isinstance(dst, ExprId))
                 regname = arch.to_regname(dst.name)
                 if regname is not None:
-                    self.regs_diff[regname] = expr
+                    self.changed_regs[regname] = expr
 
-        self.arch = arch
+    def concat(self, other: SymbolicTransform) -> SymbolicTransform:
+        """Concatenate two transformations.
 
-    def concat(self, other: MiasmSymbolicTransform) -> Self:
+        The symbolic transform on which `concat` is called is the transform
+        that is applied first, meaning: `(a.concat(b))(state) == b(a(state))`.
+        """
         class MiasmSymbolicState(MiasmConcreteState):
             """Drop-in replacement for MiasmConcreteState in eval_expr that
             returns the current transform's symbolic equations instead of
             concrete values. Calling eval_expr with this effectively nests the
             transformation into the concatenated transformation.
 
-            We inherit from `MiasmSymbolicTransform` only for the purpose of
+            We inherit from `MiasmConcreteState` only for the purpose of
             correct type checking.
             """
-            def __init__(self, transform: MiasmSymbolicTransform):
+            def __init__(self, transform: SymbolicTransform):
                 self.transform = transform
 
             def resolve_register(self, regname: str):
-                return self.transform.regs_diff.get(regname, None)
+                return self.transform.changed_regs.get(regname, None)
 
             def resolve_memory(self, addr: int, size: int):
                 mem = ExprMem(ExprInt(addr, 64), size)
-                return self.transform.mem_diff.get(mem, None)
+                return self.transform.changed_mem.get(mem, None)
 
             def resolve_location(self, _):
                 return None
 
         if self.range[1] != other.range[0]:
-            raise ValueError(f'The concatenated transformations must span a'
-                             f' contiguous range of instructions.')
+            repr_range = lambda r: f'[{hex(r[0])} -> {hex(r[1])}]'
+            raise ValueError(
+                f'Unable to concatenate transformation'
+                f' {repr_range(self.range)} with {repr_range(other.range)};'
+                f' the concatenated transformations must span a'
+                f' contiguous range of instructions.')
 
         ref_state = MiasmSymbolicState(self)
-        for reg, expr in other.regs_diff.items():
-            if reg not in self.regs_diff:
-                self.regs_diff[reg] = expr
-            else:
-                self.regs_diff[reg] = eval_expr(expr, ref_state)
 
-        for dst, expr in other.mem_diff.items():
-            dst = eval_expr(dst, ref_state)
-            if dst not in self.mem_diff:
-                self.mem_diff[dst] = expr
+        # Registers
+        for reg, expr in other.changed_regs.items():
+            if reg not in self.changed_regs:
+                self.changed_regs[reg] = expr
             else:
-                self.mem_diff[dst] = eval_expr(expr, ref_state)
+                self.changed_regs[reg] = eval_expr(expr, ref_state)
+
+        # Memory
+        for dst, expr in other.changed_mem.items():
+            dst = eval_expr(dst, ref_state)
+            assert(isinstance(dst, ExprMem))
+            if dst not in self.changed_mem:
+                self.changed_mem[dst] = expr
+            else:
+                self.changed_mem[dst] = eval_expr(expr, ref_state)
 
         self.range = (self.range[0], other.range[1])
 
         return self
 
-    def calc_register_transform(self, conc_state: ProgramState) \
+    def eval_register_transforms(self, conc_state: ProgramState) \
             -> dict[str, int]:
-        # Construct a dummy location DB. At this point, expressions should
-        # never contain IR locations.
-        ref_state = MiasmConcreteState(conc_state, LocationDB())
+        """Calculate register transformations when applied to a concrete state.
 
+        :param conc_state: A concrete program state that serves as the input
+                           state on which the transformation operates.
+
+        :return: A map from register names to the register values that were
+                 changed by the transformation.
+        """
         res = {}
-        for regname, expr in self.regs_diff.items():
-            res[regname] = int(eval_expr(expr, ref_state))
+        for regname, expr in self.changed_regs.items():
+            res[regname] = eval_symbol(expr, conc_state)
         return res
 
-    def calc_memory_transform(self, conc_state: ProgramState) \
+    def eval_memory_transforms(self, conc_state: ProgramState) \
             -> dict[int, bytes]:
-        # Construct a dummy location DB. At this point, expressions should
-        # never contain IR locations.
-        ref_state = MiasmConcreteState(conc_state, LocationDB())
+        """Calculate memory transformations when applied to a concrete state.
 
+        :param conc_state: A concrete program state that serves as the input
+                           state on which the transformation operates.
+
+        :return: A map from memory addresses to the bytes that were changed by
+                 the transformation.
+        """
         res = {}
-        for addr, expr in self.mem_diff.items():
-            addr = int(eval_expr(addr, ref_state))
+        for addr, expr in self.changed_mem.items():
+            addr = eval_symbol(addr, conc_state)
             length = int(expr.size / 8)
-            res[addr] = int(eval_expr(expr, ref_state)).to_bytes(length)
+            res[addr] = eval_symbol(expr, conc_state).to_bytes(length)
         return res
 
     def __repr__(self) -> str:
         start, end = self.range
         res = f'Symbolic state transformation {hex(start)} -> {hex(end)}:\n'
-        for reg, expr in self.regs_diff.items():
+        for reg, expr in self.changed_regs.items():
             res += f'   {reg:6s} = {expr}\n'
-        for mem, expr in self.mem_diff.items():
+        for mem, expr in self.changed_mem.items():
             res += f'   {mem} = {expr}\n'
         return res[:-2]  # Remove trailing newline
 
@@ -205,7 +255,7 @@ class DisassemblyContext:
 
 class DisassemblyError(Exception):
     def __init__(self,
-                 partial_trace: list[tuple[int, MiasmSymbolicTransform]],
+                 partial_trace: list[tuple[int, SymbolicTransform]],
                  faulty_pc: int,
                  err_msg: str):
         self.partial_trace = partial_trace
@@ -277,7 +327,7 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext)
             # instructions are translated to multiple IR instructions.
             pass
 
-class LLDBConcreteState:
+class _LLDBConcreteState:
     """A back-end replacement for the `ProgramState` object from which
     `MiasmConcreteState` reads its values. This reads values directly from an
     LLDB target instead. This saves us the trouble of recording a full program
@@ -339,7 +389,7 @@ def collect_symbolic_trace(binary: str,
         target.set_breakpoint(pc)
         target.run()
         target.remove_breakpoint(pc)
-    conc_state = LLDBConcreteState(target, arch)
+    conc_state = _LLDBConcreteState(target, arch)
 
     symb_trace = [] # The resulting list of symbolic transforms per instruction
 
@@ -402,8 +452,8 @@ def collect_symbolic_trace(binary: str,
 
     res = []
     for (start, diff), (end, _) in zip(symb_trace[:-1], symb_trace[1:]):
-        res.append(MiasmSymbolicTransform(diff, arch, start, end))
+        res.append(SymbolicTransform(diff, arch, start, end))
     start, diff = symb_trace[-1]
-    res.append(MiasmSymbolicTransform(diff, arch, start, start))
+    res.append(SymbolicTransform(diff, arch, start, start))
 
     return res

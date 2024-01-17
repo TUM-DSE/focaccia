@@ -171,7 +171,7 @@ def _find_register_errors(txl_from: ProgramState,
     """
     # Calculate expected register values
     try:
-        truth = transform_truth.calc_register_transform(txl_from)
+        truth = transform_truth.eval_register_transforms(txl_from)
     except MemoryAccessError as err:
         s, e = transform_truth.range
         return [Error(
@@ -217,7 +217,7 @@ def _find_memory_errors(txl_from: ProgramState,
     """
     # Calculate expected register values
     try:
-        truth = transform_truth.calc_memory_transform(txl_from)
+        truth = transform_truth.eval_memory_transforms(txl_from)
     except MemoryAccessError as err:
         s, e = transform_truth.range
         return [Error(ErrorTypes.INCOMPLETE,
