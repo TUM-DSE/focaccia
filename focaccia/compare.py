@@ -57,9 +57,9 @@ def _calc_transformation(previous: ProgramState, current: ProgramState):
     transformation = ProgramState(arch)
     for reg in arch.regnames:
         try:
-            prev_val, cur_val = previous.read(reg), current.read(reg)
+            prev_val, cur_val = previous.read_register(reg), current.read_register(reg)
             if prev_val is not None and cur_val is not None:
-                transformation.set(reg, cur_val - prev_val)
+                transformation.set_register(reg, cur_val - prev_val)
         except ValueError:
             # Register is not set in either state
             pass
@@ -86,8 +86,8 @@ def _find_errors(transform_txl: ProgramState, transform_truth: ProgramState) \
     errors = []
     for reg in transform_truth.arch.regnames:
         try:
-            diff_txl = transform_txl.read(reg)
-            diff_truth = transform_truth.read(reg)
+            diff_txl = transform_txl.read_register(reg)
+            diff_truth = transform_truth.read_register(reg)
         except ValueError:
             errors.append(Error(ErrorTypes.INFO,
                                 f'Value for register {reg} is not set in'
@@ -123,7 +123,7 @@ def compare_simple(test_states: list[ProgramState],
     # No errors in initial snapshot because we can't perform difference
     # calculations on it
     result = [{
-        'pc': test_states[0].read(PC_REGNAME),
+        'pc': test_states[0].read_register(PC_REGNAME),
         'txl': test_states[0], 'ref': truth_states[0],
         'errors': []
     }]
@@ -134,15 +134,15 @@ def compare_simple(test_states: list[ProgramState],
     for txl, truth in it_cur:
         prev_txl, prev_truth = next(it_prev)
 
-        pc_txl = txl.read(PC_REGNAME)
-        pc_truth = truth.read(PC_REGNAME)
+        pc_txl = txl.read_register(PC_REGNAME)
+        pc_truth = truth.read_register(PC_REGNAME)
 
         # The program counter should always be set on a snapshot
         assert(pc_truth is not None)
         assert(pc_txl is not None)
 
         if pc_txl != pc_truth:
-            print(f'Unmatched program counter {hex(txl.read(PC_REGNAME))}'
+            print(f'Unmatched program counter {hex(txl.read_register(PC_REGNAME))}'
                   f' in translated code!')
             continue
 
@@ -179,14 +179,14 @@ def _find_register_errors(txl_from: ProgramState,
             f'Register transformations {hex(s)} -> {hex(e)} depend on'
             f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
             f' that are not entirely present in the tested state'
-            f' {hex(txl_from.read("pc"))}. Skipping.',
+            f' {hex(txl_from.read_register("pc"))}. Skipping.',
         )]
 
     # Compare expected values to actual values in the tested state
     errors = []
     for regname, truth_val in truth.items():
         try:
-            txl_val = txl_to.read(regname)
+            txl_val = txl_to.read_register(regname)
         except ValueError:
             errors.append(Error(ErrorTypes.INCOMPLETE,
                                 f'Value of register {regname} has changed, but'
@@ -224,7 +224,7 @@ def _find_memory_errors(txl_from: ProgramState,
                       f'Memory transformations {hex(s)} -> {hex(e)} depend on'
                       f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
                       f' that are not entirely present in the tested state'
-                      f' {hex(txl_from.read("pc"))}. Skipping.')]
+                      f' {hex(txl_from.read_register("pc"))}. Skipping.')]
 
     # Compare expected values to actual values in the tested state
     errors = []
@@ -263,13 +263,13 @@ def _find_errors_symbolic(txl_from: ProgramState,
     :param transform_truth: The symbolic transformation that maps the source
                             state to the destination state.
     """
-    if (txl_from.read('PC') != transform_truth.range[0]) \
-            or (txl_to.read('PC') != transform_truth.range[1]):
+    if (txl_from.read_register('PC') != transform_truth.range[0]) \
+            or (txl_to.read_register('PC') != transform_truth.range[1]):
         tstart, tend = transform_truth.range
         return [Error(ErrorTypes.POSSIBLE,
                       f'Program counters of the tested transformation'
                       f' do not match the truth transformation:'
-                      f' {hex(txl_from.read("PC"))} -> {hex(txl_to.read("PC"))}'
+                      f' {hex(txl_from.read_register("PC"))} -> {hex(txl_to.read_register("PC"))}'
                       f' (test) vs. {hex(tstart)} -> {hex(tend)} (truth).'
                       f' Skipping with no errors.')]
 
@@ -285,7 +285,7 @@ def compare_symbolic(test_states: list[ProgramState],
     #assert(len(test_states) == len(transforms) - 1)
 
     result = [{
-        'pc': test_states[0].read('PC'),
+        'pc': test_states[0].read_register('PC'),
         'txl': test_states[0],
         'ref': transforms[0],
         'errors': []
@@ -293,8 +293,8 @@ def compare_symbolic(test_states: list[ProgramState],
 
     _list = zip(test_states[:-1], test_states[1:], transforms)
     for cur_state, next_state, transform in _list:
-        pc_cur = cur_state.read('PC')
-        pc_next = next_state.read('PC')
+        pc_cur = cur_state.read_register('PC')
+        pc_next = next_state.read_register('PC')
 
         start_addr, end_addr = transform.range
         if pc_cur != start_addr:

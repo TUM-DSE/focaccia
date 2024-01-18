@@ -42,7 +42,7 @@ def match_traces(test: list[ProgramState], truth: list[SymbolicTransform]):
     if not test or not truth:
         return [], []
 
-    assert(test[0].read('pc') == truth[0].addr)
+    assert(test[0].read_register('pc') == truth[0].addr)
 
     def index(seq, target, access=lambda el: el):
         for i, el in enumerate(seq):
@@ -52,7 +52,7 @@ def match_traces(test: list[ProgramState], truth: list[SymbolicTransform]):
 
     i = 0
     for next_state in test[1:]:
-        next_pc = next_state.read('pc')
+        next_pc = next_state.read_register('pc')
         index_in_truth = index(truth[i:], next_pc, lambda el: el.range[1])
 
         # If no next element (i.e. no foldable range) is found in the truth
@@ -83,7 +83,7 @@ def parse_inputs(txl_path, program):
         txl = parse_arancini(txl_file, arch)
 
     with open(txl_path, "r") as txl_file:
-        breakpoints = [state.read('PC') for state in txl]
+        breakpoints = [state.read_register('PC') for state in txl]
         ref = run_native_execution(program, breakpoints)
 
     return txl, ref

@@ -27,7 +27,7 @@ def parse_snapshots(json_stream: TextIO) -> list[ProgramState]:
     for snapshot in _get_or_throw(json_data, 'snapshots'):
         state = ProgramState(arch)
         for reg, val in _get_or_throw(snapshot, 'registers').items():
-            state.set(reg, val)
+            state.set_register(reg, val)
         for mem in _get_or_throw(snapshot, 'memory'):
             start, end = _get_or_throw(mem, 'range')
             data = base64.b64decode(_get_or_throw(mem, 'data'))
@@ -111,7 +111,7 @@ def _parse_qemu_line(line: str, cur_state: ProgramState):
             value = value.replace(' ', '')
             regname = cur_state.arch.to_regname(regname)
             if regname is not None:
-                cur_state.set(regname, int(value, 16))
+                cur_state.set_register(regname, int(value, 16))
 
 def parse_arancini(stream: TextIO, arch: Arch) -> list[ProgramState]:
     aliases = {
@@ -136,6 +136,6 @@ def parse_arancini(stream: TextIO, arch: Arch) -> list[ProgramState]:
             regname, value = split
             regname = arch.to_regname(aliases.get(regname, regname))
             if regname is not None:
-                states[-1].set(regname, int(value, 16))
+                states[-1].set_register(regname, int(value, 16))
 
     return states

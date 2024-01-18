@@ -47,7 +47,7 @@ class MiasmConcreteState:
         regname = regname.upper()
         if regname in self.miasm_flag_aliases:
             regname = self.miasm_flag_aliases[regname]
-        return self._state.read(regname)
+        return self._state.read_register(regname)
 
     def resolve_memory(self, addr: int, size: int) -> bytes | None:
         return self._state.read_memory(addr, size)

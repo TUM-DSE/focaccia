@@ -82,7 +82,7 @@ class ProgramState:
         self.regs: dict_t = { reg: None for reg in arch.regnames }
         self.mem = SparseMemory()
 
-    def read(self, reg: str) -> int:
+    def read_register(self, reg: str) -> int:
         """Read a register's value.
 
         :raise KeyError:   If `reg` is not a register name.
@@ -99,7 +99,7 @@ class ProgramState:
                              f' {regname}): The register contains no value.')
         return regval
 
-    def set(self, reg: str, value: int):
+    def set_register(self, reg: str, value: int):
         """Assign a value to a register.
 
         :raise KeyError: If `reg` is not a register name.

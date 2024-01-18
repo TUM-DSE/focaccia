@@ -90,7 +90,7 @@ class LLDBConcreteTarget:
         for regname in arch.regnames:
             try:
                 conc_val = self.read_register(regname)
-                state.set(regname, conc_val)
+                state.set_register(regname, conc_val)
             except KeyError:
                 pass
             except ConcreteRegisterError:
@@ -98,7 +98,7 @@ class LLDBConcreteTarget:
                 if arch.archname == x86.archname:
                     rflags = x86.decompose_rflags(self.read_register('rflags'))
                     if regname in rflags:
-                        state.set(regname, rflags[regname])
+                        state.set_register(regname, rflags[regname])
 
         # Query and store memory state
         for mapping in self.get_mappings():

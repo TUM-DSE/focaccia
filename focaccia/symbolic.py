@@ -37,7 +37,7 @@ def eval_symbol(symbol: Expr, conc_state: ProgramState) -> int:
         def resolve_register(self, regname: str) -> int:
             regname = regname.upper()
             regname = self.miasm_flag_aliases.get(regname, regname)
-            return self._state.read(regname)
+            return self._state.read_register(regname)
 
         def resolve_memory(self, addr: int, size: int) -> bytes:
             return self._state.read_memory(addr, size)
@@ -337,7 +337,7 @@ class _LLDBConcreteState:
         self._target = target
         self._arch = arch
 
-    def read(self, reg: str) -> int | None:
+    def read_register(self, reg: str) -> int | None:
         from focaccia.arch import x86
 
         regname = self._arch.to_regname(reg)
