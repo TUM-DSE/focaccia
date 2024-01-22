@@ -11,7 +11,7 @@ from focaccia.lldb_target import LLDBConcreteTarget
 from focaccia.parser import parse_arancini
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform, collect_symbolic_trace
-from focaccia.utils import print_separator
+from focaccia.utils import print_result
 
 def run_native_execution(oracle_program: str, breakpoints: Iterable[int]):
     """Gather snapshots from a native execution via an external debugger.
@@ -123,40 +123,6 @@ def parse_arguments():
                              ' data, etc. [Default: verbose]')
     args = parser.parse_args()
     return args
-
-def print_result(result, min_severity: ErrorSeverity):
-    shown = 0
-    suppressed = 0
-
-    for res in result:
-        pc = res['pc']
-        print_separator()
-        print(f'For PC={hex(pc)}')
-        print_separator()
-
-        # Filter errors by severity
-        errs = [e for e in res['errors'] if e.severity >= min_severity]
-        suppressed += len(res['errors']) - len(errs)
-        shown += len(errs)
-
-        # Print all non-suppressed errors
-        for n, err in enumerate(errs, start=1):
-            print(f' {n:2}. {err}')
-
-        if errs:
-            print()
-            print(f'Expected transformation: {res["ref"]}')
-            print(f'Actual transformation:   {res["txl"]}')
-        else:
-            print('No errors found.')
-
-    print()
-    print('#' * 60)
-    print(f'Found {shown} errors.')
-    print(f'Suppressed {suppressed} low-priority errors'
-          f' (showing {min_severity} and higher).')
-    print('#' * 60)
-    print()
 
 def main():
     verbosity = {
