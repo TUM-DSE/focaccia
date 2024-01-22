@@ -82,20 +82,20 @@ class SymbolicTransform:
         Register names are already normalized to a respective architecture's
         naming conventions."""
 
-        self.changed_mem: dict[ExprMem, Expr] = {}
+        self.changed_mem: dict[Expr, Expr] = {}
         """Maps memory addresses to memory content.
 
-        Memory addresses may depend on other symbolic values, such as register
-        content, and are therefore symbolic themselves.
-
-        Remember: The memory content expression's `size` attribute is in bits,
-        not bytes!"""
-
+        For a dict tuple `(addr, value)`, `value.size` is the number of *bits*
+        written to address `addr`. Memory addresses may depend on other
+        symbolic values, such as register content, and are therefore symbolic
+        themselves."""
         for dst, expr in transform.items():
             assert(isinstance(dst, ExprMem) or isinstance(dst, ExprId))
 
             if isinstance(dst, ExprMem):
-                self.changed_mem[dst] = expr
+                assert(dst.size == expr.size)
+                assert(expr.size % 8 == 0)
+                self.changed_mem[dst.ptr] = expr
             else:
                 assert(isinstance(dst, ExprId))
                 regname = arch.to_regname(dst.name)
@@ -107,28 +107,24 @@ class SymbolicTransform:
 
         The symbolic transform on which `concat` is called is the transform
         that is applied first, meaning: `(a.concat(b))(state) == b(a(state))`.
+
+        Note that if transformation are concatenated that write to the same
+        memory location when applied to a specific starting state, the
+        concatenation may not recognize equivalence of syntactically different
+        symbolic address expressions. In this case, if you calculate all memory
+        values and store them at their address, the final result will depend on
+        the random iteration order over the `changed_mem` dict.
+
+        :param other: The transformation to concatenate to `self`.
+
+        :return: Returns `self`. `self` is modified in-place.
+        :raise ValueError: If the two transformations don't span a contiguous
+                           range of instructions.
         """
-        class MiasmSymbolicState(MiasmConcreteState):
-            """Drop-in replacement for MiasmConcreteState in eval_expr that
-            returns the current transform's symbolic equations instead of
-            concrete values. Calling eval_expr with this effectively nests the
-            transformation into the concatenated transformation.
-
-            We inherit from `MiasmConcreteState` only for the purpose of
-            correct type checking.
-            """
-            def __init__(self, transform: SymbolicTransform):
-                self.transform = transform
-
-            def resolve_register(self, regname: str):
-                return self.transform.changed_regs.get(regname, None)
-
-            def resolve_memory(self, addr: int, size: int):
-                mem = ExprMem(ExprInt(addr, 64), size)
-                return self.transform.changed_mem.get(mem, None)
-
-            def resolve_location(self, _):
-                return None
+        from typing import Callable
+        from miasm.expression.expression import ExprLoc, ExprSlice, ExprCond, \
+                                                ExprOp, ExprCompose
+        from miasm.expression.simplifications import expr_simp_explicit
 
         if self.range[1] != other.range[0]:
             repr_range = lambda r: f'[{hex(r[0])} -> {hex(r[1])}]'
@@ -138,24 +134,51 @@ class SymbolicTransform:
                 f' the concatenated transformations must span a'
                 f' contiguous range of instructions.')
 
-        ref_state = MiasmSymbolicState(self)
+        def _eval_exprslice(expr: ExprSlice):
+            arg = _concat_to_self(expr.arg)
+            return ExprSlice(arg, expr.start, expr.stop)
 
-        # Registers
+        def _eval_exprcond(expr: ExprCond):
+            cond = _concat_to_self(expr.cond)
+            src1 = _concat_to_self(expr.src1)
+            src2 = _concat_to_self(expr.src2)
+            return ExprCond(cond, src1, src2)
+
+        def _eval_exprop(expr: ExprOp):
+            args = [_concat_to_self(arg) for arg in expr.args]
+            return ExprOp(expr.op, *args)
+
+        def _eval_exprcompose(expr: ExprCompose):
+            args = [_concat_to_self(arg) for arg in expr.args]
+            return ExprCompose(*args)
+
+        expr_to_visitor: dict[type[Expr], Callable] = {
+            ExprInt:     lambda e: e,
+            ExprId:      lambda e: self.changed_regs.get(e.name, e),
+            ExprLoc:     lambda e: e,
+            ExprMem:     lambda e: ExprMem(_concat_to_self(e.ptr), e.size),
+            ExprSlice:   _eval_exprslice,
+            ExprCond:    _eval_exprcond,
+            ExprOp:      _eval_exprop,
+            ExprCompose: _eval_exprcompose,
+        }
+
+        def _concat_to_self(expr: Expr):
+            visitor = expr_to_visitor[expr.__class__]
+            return expr_simp_explicit(visitor(expr))
+
+        new_regs = self.changed_regs.copy()
         for reg, expr in other.changed_regs.items():
-            if reg not in self.changed_regs:
-                self.changed_regs[reg] = expr
-            else:
-                self.changed_regs[reg] = eval_expr(expr, ref_state)
+            new_regs[reg] = _concat_to_self(expr)
 
-        # Memory
-        for dst, expr in other.changed_mem.items():
-            dst = eval_expr(dst, ref_state)
-            assert(isinstance(dst, ExprMem))
-            if dst not in self.changed_mem:
-                self.changed_mem[dst] = expr
-            else:
-                self.changed_mem[dst] = eval_expr(expr, ref_state)
+        new_mem = self.changed_mem.copy()
+        for addr, expr in other.changed_mem.items():
+            new_addr = _concat_to_self(addr)
+            new_expr = _concat_to_self(expr)
+            new_mem[new_addr] = new_expr
 
+        self.changed_regs = new_regs
+        self.changed_mem = new_mem
         self.range = (self.range[0], other.range[1])
 
         return self
@@ -179,7 +202,7 @@ class SymbolicTransform:
         for expr in self.changed_regs.values():
             eval_expr(expr, state)
         for addr_expr, mem_expr in self.changed_mem.items():
-            eval_expr(addr_expr.ptr, state)
+            eval_expr(addr_expr, state)
             eval_expr(mem_expr, state)
 
         return list(accessed_regs)
@@ -226,7 +249,7 @@ class SymbolicTransform:
         for expr in self.changed_regs.values():
             _eval(expr)
         for addr_expr, mem_expr in self.changed_mem.items():
-            _eval(addr_expr.ptr)
+            _eval(addr_expr)
             _eval(mem_expr)
 
         return list(accessed_mem)
@@ -240,6 +263,8 @@ class SymbolicTransform:
 
         :return: A map from register names to the register values that were
                  changed by the transformation.
+        :raise MemoryError:
+        :raise ValueError:
         """
         res = {}
         for regname, expr in self.changed_regs.items():
@@ -255,6 +280,8 @@ class SymbolicTransform:
 
         :return: A map from memory addresses to the bytes that were changed by
                  the transformation.
+        :raise MemoryError:
+        :raise ValueError:
         """
         res = {}
         for addr, expr in self.changed_mem.items():
@@ -268,9 +295,9 @@ class SymbolicTransform:
         res = f'Symbolic state transformation {hex(start)} -> {hex(end)}:\n'
         for reg, expr in self.changed_regs.items():
             res += f'   {reg:6s} = {expr}\n'
-        for mem, expr in self.changed_mem.items():
-            res += f'   {mem} = {expr}\n'
-        return res[:-2]  # Remove trailing newline
+        for addr, expr in self.changed_mem.items():
+            res += f'   {ExprMem(addr, expr.size)} = {expr}\n'
+        return res[:-1]  # Remove trailing newline
 
 def parse_symbolic_transform(string: str) -> SymbolicTransform:
     """Parse a symbolic transformation from a string.
