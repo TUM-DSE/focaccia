@@ -160,6 +160,77 @@ class SymbolicTransform:
 
         return self
 
+    def get_used_registers(self) -> list[str]:
+        """Find all registers used by the transformation as input.
+
+        :return: A list of register names.
+        """
+        accessed_regs = set[str]()
+
+        class ConcreteStateWrapper(MiasmConcreteState):
+            def __init__(self): pass
+            def resolve_register(self, regname: str) -> int | None:
+                accessed_regs.add(regname)
+                return None
+            def resolve_memory(self, addr: int, size: int): assert(False)
+            def resolve_location(self, _): assert(False)
+
+        state = ConcreteStateWrapper()
+        for expr in self.changed_regs.values():
+            eval_expr(expr, state)
+        for addr_expr, mem_expr in self.changed_mem.items():
+            eval_expr(addr_expr.ptr, state)
+            eval_expr(mem_expr, state)
+
+        return list(accessed_regs)
+
+    def get_used_memory_addresses(self) -> list[ExprMem]:
+        """Find all memory addresses used by the transformation as input.
+
+        :return: A list of memory access expressions.
+        """
+        from typing import Callable
+        from miasm.expression.expression import ExprLoc, ExprSlice, ExprCond, \
+                                                ExprOp, ExprCompose
+
+        accessed_mem = set[ExprMem]()
+
+        def _eval(expr: Expr):
+            def _eval_exprmem(expr: ExprMem):
+                accessed_mem.add(expr)  # <-- this is the only important line!
+                _eval(expr.ptr)
+            def _eval_exprcond(expr: ExprCond):
+                _eval(expr.cond)
+                _eval(expr.src1)
+                _eval(expr.src2)
+            def _eval_exprop(expr: ExprOp):
+                for arg in expr.args:
+                    _eval(arg)
+            def _eval_exprcompose(expr: ExprCompose):
+                for arg in expr.args:
+                    _eval(arg)
+
+            expr_to_visitor: dict[type[Expr], Callable] = {
+                ExprInt:     lambda e: e,
+                ExprId:      lambda e: e,
+                ExprLoc:     lambda e: e,
+                ExprMem:     _eval_exprmem,
+                ExprSlice:   lambda e: _eval(e.arg),
+                ExprCond:    _eval_exprcond,
+                ExprOp:      _eval_exprop,
+                ExprCompose: _eval_exprcompose,
+            }
+            visitor = expr_to_visitor[expr.__class__]
+            visitor(expr)
+
+        for expr in self.changed_regs.values():
+            _eval(expr)
+        for addr_expr, mem_expr in self.changed_mem.items():
+            _eval(addr_expr.ptr)
+            _eval(mem_expr)
+
+        return list(accessed_mem)
+
     def eval_register_transforms(self, conc_state: ProgramState) \
             -> dict[str, int]:
         """Calculate register transformations when applied to a concrete state.
