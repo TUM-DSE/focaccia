@@ -1,5 +1,5 @@
 from functools import total_ordering
-from typing import Self
+from typing import Iterable, Self
 
 from .snapshot import ProgramState, MemoryAccessError, RegisterAccessError
 from .symbolic import SymbolicTransform
@@ -296,41 +296,48 @@ def _find_errors_symbolic(txl_from: ProgramState,
 
     return errors
 
-def compare_symbolic(test_states: list[ProgramState],
-                     transforms: list[SymbolicTransform]) \
+def compare_symbolic(test_states: Iterable[ProgramState],
+                     transforms: Iterable[SymbolicTransform]) \
         -> list[dict]:
-    #assert(len(test_states) == len(transforms) - 1)
+    test_states = iter(test_states)
+    transforms = iter(transforms)
 
-    result = [{
-        'pc': test_states[0].read_register('PC'),
-        'txl': test_states[0],
-        'ref': transforms[0],
-        'errors': []
-    }]
+    result = []
+    cur_state = next(test_states)   # The state before the transformation
+    transform = next(transforms)    # Operates on `cur_state`
 
-    _list = zip(test_states[:-1], test_states[1:], transforms)
-    for cur_state, next_state, transform in _list:
-        pc_cur = cur_state.read_register('PC')
-        pc_next = next_state.read_register('PC')
+    while True:
+        try:
+            next_state = next(test_states) # The state after the transformation
 
-        start_addr, end_addr = transform.range
-        if pc_cur != start_addr:
-            print(f'Program counter {hex(pc_cur)} in translated code has no'
-                  f' corresponding reference state! Skipping.'
-                  f' (reference: {hex(start_addr)})')
-            continue
-        if pc_next != end_addr:
-            print(f'Tested state transformation is {hex(pc_cur)} ->'
-                  f' {hex(pc_next)}, but reference transform is'
-                  f' {hex(start_addr)} -> {hex(end_addr)}!'
-                  f' Skipping.')
+            pc_cur = cur_state.read_register('PC')
+            pc_next = next_state.read_register('PC')
+            start_addr, end_addr = transform.range
+            if pc_cur != start_addr:
+                print(f'Program counter {hex(pc_cur)} in translated code has'
+                      f' no corresponding reference state! Skipping.'
+                      f' (reference: {hex(start_addr)})')
+                cur_state = next_state
+                transform = next(transforms)
+                continue
+            if pc_next != end_addr:
+                print(f'Tested state transformation is {hex(pc_cur)} ->'
+                      f' {hex(pc_next)}, but reference transform is'
+                      f' {hex(start_addr)} -> {hex(end_addr)}!'
+                      f' Skipping.')
 
-        errors = _find_errors_symbolic(cur_state, next_state, transform)
-        result.append({
-            'pc': pc_cur,
-            'txl': _calc_transformation(cur_state, next_state),
-            'ref': transform,
-            'errors': errors
-        })
+            errors = _find_errors_symbolic(cur_state, next_state, transform)
+            result.append({
+                'pc': pc_cur,
+                'txl': _calc_transformation(cur_state, next_state),
+                'ref': transform,
+                'errors': errors
+            })
+
+            # Step forward
+            cur_state = next_state
+            transform = next(transforms)
+        except StopIteration:
+            break
 
     return result
