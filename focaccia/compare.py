@@ -1,7 +1,7 @@
 from functools import total_ordering
 from typing import Self
 
-from .snapshot import ProgramState, MemoryAccessError
+from .snapshot import ProgramState, MemoryAccessError, RegisterAccessError
 from .symbolic import SymbolicTransform
 
 @total_ordering
@@ -60,7 +60,7 @@ def _calc_transformation(previous: ProgramState, current: ProgramState):
             prev_val, cur_val = previous.read_register(reg), current.read_register(reg)
             if prev_val is not None and cur_val is not None:
                 transformation.set_register(reg, cur_val - prev_val)
-        except ValueError:
+        except RegisterAccessError:
             # Register is not set in either state
             pass
 
@@ -88,9 +88,10 @@ def _find_errors(transform_txl: ProgramState, transform_truth: ProgramState) \
         try:
             diff_txl = transform_txl.read_register(reg)
             diff_truth = transform_truth.read_register(reg)
-        except ValueError:
+        except RegisterAccessError:
             errors.append(Error(ErrorTypes.INFO,
-                                f'Value for register {reg} is not set in'
+                                f'Unable to calculate difference:'
+                                f' Value for register {reg} is not set in'
                                 f' either the tested or the reference state.'))
             continue
 
@@ -179,18 +180,24 @@ def _find_register_errors(txl_from: ProgramState,
             f'Register transformations {hex(s)} -> {hex(e)} depend on'
             f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
             f' that are not entirely present in the tested state'
-            f' {hex(txl_from.read_register("pc"))}. Skipping.',
+            f' {hex(txl_from.read_register("pc"))}.',
         )]
+    except RegisterAccessError as err:
+        s, e = transform_truth.range
+        return [Error(ErrorTypes.INCOMPLETE,
+                      f'Register transformations {hex(s)} -> {hex(e)} depend'
+                      f' on the value of register {err.regname}, which is not'
+                      f' set in the tested state.')]
 
     # Compare expected values to actual values in the tested state
     errors = []
     for regname, truth_val in truth.items():
         try:
             txl_val = txl_to.read_register(regname)
-        except ValueError:
+        except RegisterAccessError:
             errors.append(Error(ErrorTypes.INCOMPLETE,
                                 f'Value of register {regname} has changed, but'
-                                f' is not set in the tested state. Skipping.'))
+                                f' is not set in the tested state.'))
             continue
         except KeyError as err:
             print(f'[WARNING] {err}')
@@ -223,8 +230,14 @@ def _find_memory_errors(txl_from: ProgramState,
         return [Error(ErrorTypes.INCOMPLETE,
                       f'Memory transformations {hex(s)} -> {hex(e)} depend on'
                       f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
-                      f' that are not entirely present in the tested state'
-                      f' {hex(txl_from.read_register("pc"))}. Skipping.')]
+                      f' that are not entirely present in the tested state at'
+                      f' {hex(txl_from.read_register("pc"))}.')]
+    except RegisterAccessError as err:
+        s, e = transform_truth.range
+        return [Error(ErrorTypes.INCOMPLETE,
+                      f'Memory transformations {hex(s)} -> {hex(e)} depend on'
+                      f' the value of register {err.regname}, which is not'
+                      f' set in the tested state.')]
 
     # Compare expected values to actual values in the tested state
     errors = []
@@ -234,8 +247,11 @@ def _find_memory_errors(txl_from: ProgramState,
             txl_bytes = txl_to.read_memory(addr, size)
         except MemoryAccessError:
             errors.append(Error(ErrorTypes.POSSIBLE,
-                                f'Memory range [{addr}, {addr + size}) is not'
-                                f' set in the tested result state. Skipping.'))
+                                f'Memory range [{hex(addr)}, {hex(addr + size)})'
+                                f' is not set in the tested result state at'
+                                f' {hex(txl_to.read_register("pc"))}. This is'
+                                f' either an error in the translation or'
+                                f' the recorded test state is missing data.'))
             continue
 
         if txl_bytes != truth_bytes:

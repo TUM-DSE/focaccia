@@ -1,5 +1,11 @@
 from .arch.arch import Arch
 
+class RegisterAccessError(Exception):
+    """Raised when a register access fails."""
+    def __init__(self, regname: str, msg: str):
+        super().__init__(msg)
+        self.regname = regname
+
 class MemoryAccessError(Exception):
     """Raised when a memory access fails."""
     def __init__(self, addr: int, size: int, msg: str):
@@ -85,8 +91,8 @@ class ProgramState:
     def read_register(self, reg: str) -> int:
         """Read a register's value.
 
-        :raise KeyError:   If `reg` is not a register name.
-        :raise ValueError: If the register has no value.
+        :raise KeyError:            If `reg` is not a register name.
+        :raise RegisterAccessError: If the register has no value.
         """
         regname = self.arch.to_regname(reg)
         if regname is None:
@@ -95,8 +101,11 @@ class ProgramState:
         assert(regname in self.regs)
         regval = self.regs[regname]
         if regval is None:
-            raise ValueError(f'Unable to read value of register {reg} (aka.'
-                             f' {regname}): The register contains no value.')
+            raise RegisterAccessError(
+                regname,
+                f'[In ProgramState.read_register]: Unable to read value of'
+                f' register {reg} (a.k.a. {regname}): The register is not set.'
+                f' Full state: {self}')
         return regval
 
     def set_register(self, reg: str, value: int):
