@@ -14,15 +14,16 @@ def print_result(result, min_severity: ErrorSeverity):
     suppressed = 0
 
     for res in result:
-        pc = res['pc']
-        print_separator()
-        print(f'For PC={hex(pc)}')
-        print_separator()
-
         # Filter errors by severity
         errs = [e for e in res['errors'] if e.severity >= min_severity]
         suppressed += len(res['errors']) - len(errs)
         shown += len(errs)
+
+        if errs:
+            pc = res['pc']
+            print_separator()
+            print(f'For PC={hex(pc)}')
+            print_separator()
 
         # Print all non-suppressed errors
         for n, err in enumerate(errs, start=1):
@@ -31,9 +32,7 @@ def print_result(result, min_severity: ErrorSeverity):
         if errs:
             print()
             print(f'Expected transformation: {res["ref"]}')
-            print(f'Actual transformation:   {res["txl"]}')
-        else:
-            print('No errors found.')
+            print(f'Actual difference:       {res["txl"]}')
 
     print()
     print('#' * 60)

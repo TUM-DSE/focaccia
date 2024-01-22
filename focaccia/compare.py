@@ -240,9 +240,10 @@ def _find_memory_errors(txl_from: ProgramState,
 
         if txl_bytes != truth_bytes:
             errors.append(Error(ErrorTypes.CONFIRMED,
-                                f'Content of memory at {addr} is false.'
-                                f' Expected content: {truth_bytes.hex()}, actual'
-                                f' content in the translation: {txl_bytes.hex()}.'))
+                                f'Content of memory at {hex(addr)} is false.'
+                                f' Expected content: {truth_bytes.hex()},'
+                                f' actual content in the translation:'
+                                f' {txl_bytes.hex()}.'))
     return errors
 
 def _find_errors_symbolic(txl_from: ProgramState,
