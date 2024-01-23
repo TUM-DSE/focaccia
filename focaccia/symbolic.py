@@ -421,7 +421,11 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext)
         # Execute each instruction in the current basic block and record the
         # resulting change in program state.
         for assignblk in irblock:
-            modified = engine.eval_assignblk(assignblk)
+            # A clean engine for the single-instruction diff, otherwise
+            # it concatenates the current instruction to the previous ones in
+            # the block.
+            _engine = SymbolicExecutionEngine(ctx.lifter)
+            modified = _engine.eval_assignblk(assignblk)
             symb_trace.append((assignblk.instr.offset, modified))
 
             # Run a single instruction
