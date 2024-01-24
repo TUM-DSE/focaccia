@@ -195,8 +195,10 @@ class SymbolicTransform:
             def resolve_register(self, regname: str) -> int | None:
                 accessed_regs.add(regname)
                 return None
-            def resolve_memory(self, addr: int, size: int): assert(False)
-            def resolve_location(self, _): assert(False)
+            def resolve_memory(self, addr: int, size: int):
+                pass
+            def resolve_location(self, _):
+                assert(False)
 
         state = ConcreteStateWrapper()
         for expr in self.changed_regs.values():
