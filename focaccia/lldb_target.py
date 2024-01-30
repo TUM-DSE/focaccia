@@ -178,7 +178,7 @@ class LLDBConcreteTarget:
         if not err.success:
             raise ConcreteMemoryError(f'Error when reading {size} bytes at'
                                       f' address {hex(addr)}: {err}')
-        return content
+        return bytes(reversed(content))  # Convert to big endian
 
     def write_memory(self, addr, value: bytes):
         """Write bytes to memory.

@@ -131,7 +131,7 @@ def _eval_exprmem(expr: ExprMem, state: MiasmConcreteState):
         return expr
 
     assert(len(mem) * 8 == expr.size)
-    return ExprInt(int.from_bytes(mem, byteorder='little'), expr.size)
+    return ExprInt(int.from_bytes(mem), expr.size)
 
 def _eval_exprcond(expr, state: MiasmConcreteState):
     """Evaluate an ExprCond using the current state"""
