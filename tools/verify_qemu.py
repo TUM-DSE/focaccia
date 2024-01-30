@@ -17,15 +17,39 @@ import os
 import subprocess
 import sys
 
+from focaccia.compare import ErrorTypes
+
+verbosity = {
+    'info':    ErrorTypes.INFO,
+    'warning': ErrorTypes.POSSIBLE,
+    'error':   ErrorTypes.CONFIRMED,
+}
+
 def make_argparser():
     """This is also used by the GDB-invoked script to parse its args."""
     prog = argparse.ArgumentParser()
+    prog.description = """Use Focaccia to test QEMU.
+
+Uses QEMU's GDB-server feature to read QEMU's emulated state and test its
+transformation during emulation against a symbolic truth.
+
+In fact, this tool could be used to test any emulator that provides a
+GDB-server interface. The server must support reading registers, reading
+memory, and stepping forward by single instructions.
+
+The GDB server is assumed to be at 'localhost'.
+"""
+    prog.add_argument('port',
+                      type=int,
+                      help='The port at which QEMU\'s GDB server resides.')
     prog.add_argument('--symb-trace',
                       required=True,
-                      help='A symbolic transformation trace to be used for' \
-                           ' verification.')
-    prog.add_argument('--output', '-o', help='Name of output file.')
-    prog.add_argument('gdbserver_port', type=int)
+                      help='A pre-computed symbolic transformation trace to' \
+                           ' be used for verification. Generate this with' \
+                           ' the `tools/capture_transforms.py` tool.')
+    prog.add_argument('--error-level',
+                      default='warning',
+                      choices=list(verbosity.keys()))
     return prog
 
 def quoted(s: str) -> str:
@@ -46,7 +70,7 @@ if __name__ == "__main__":
     args = prog.parse_args()
 
     filepath = os.path.realpath(__file__)
-    qemu_tool_path = os.path.join(os.path.dirname(filepath), 'qemu_tool.py')
+    qemu_tool_path = os.path.join(os.path.dirname(filepath), '_qemu_tool.py')
 
     # We have to remove all arguments we don't want to pass to the qemu tool
     # manually here. Not nice, but what can you do..
