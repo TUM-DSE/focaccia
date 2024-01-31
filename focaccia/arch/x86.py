@@ -85,6 +85,41 @@ def decompose_rflags(rflags: int) -> dict[str, int]:
         'ID':     (rflags & 0x00200000) != 0,
     }
 
+def compose_rflags(rflags: dict[str, int]) -> int:
+    """Compose separate flags into RFLAGS register's value.
+
+    Uses flag name abbreviation conventions from
+    `https://en.wikipedia.org/wiki/FLAGS_register`.
+
+    :param rflags: A dictionary mapping Miasm's flag names to their alues.
+    :return: The RFLAGS register value.
+    """
+    return (
+        # FLAGS
+        (0x0001 if rflags['CF']   else 0) |
+                        # 0x0002   reserved
+        (0x0004 if rflags['PF']   else 0) |
+                        # 0x0008   reserved
+        (0x0010 if rflags['AF']   else 0) |
+                        # 0x0020   reserved
+        (0x0040 if rflags['ZF']   else 0) |
+        (0x0080 if rflags['SF']   else 0) |
+        (0x0100 if rflags['TF']   else 0) |
+        (0x0200 if rflags['IF']   else 0) |
+        (0x0400 if rflags['DF']   else 0) |
+        (0x0800 if rflags['OF']   else 0) |
+        (0x3000 if rflags['IOPL'] else 0) |
+        (0x4000 if rflags['NT']   else 0) |
+
+        # EFLAGS
+        (0x00010000 if rflags['RF']  else 0) |
+        (0x00020000 if rflags['VM']  else 0) |
+        (0x00040000 if rflags['AC']  else 0) |
+        (0x00080000 if rflags['VIF'] else 0) |
+        (0x00100000 if rflags['VIP'] else 0) |
+        (0x00200000 if rflags['ID']  else 0)
+    )
+
 class ArchX86(Arch):
     def __init__(self):
         super().__init__(archname, regnames)
