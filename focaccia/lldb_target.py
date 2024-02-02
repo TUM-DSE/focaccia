@@ -82,7 +82,7 @@ class LLDBConcreteTarget:
         """Continue execution until the address is arrived, ignores other breakpoints"""
         bp = self.target.BreakpointCreateByAddress(address)
         while self.read_register("pc") != address:
-            self.target.run()
+            self.run()
         self.target.BreakpointDelete(bp.GetID())
 
 
