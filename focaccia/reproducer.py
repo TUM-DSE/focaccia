@@ -6,7 +6,7 @@ import lldb
 from .lldb_target import LLDBConcreteTarget
 from .symbolic import SymbolicTransform, collect_symbolic_trace, eval_symbol
 from .compare import _find_errors_symbolic
-from .parser import parse_arancini
+from .parser import parse_arancini, parse_arancini3
 from .arch import x86
 
 
@@ -18,13 +18,13 @@ class Reproducer():
         self.argv = argv
         self.emu = emu
 
-        #self.nbb = len(self.get_breakpoints())
+        self.nbb = len(self.get_breakpoints())
 
-        self.log = {"concrete": self.record_concrete(),
-                    "emulator": self.record_emulator(),
-                    "symbolic": self.record_symbolic(),
-                    "combined": [],}
-        self.log["combined"] = self.combine_logs()
+        #self.log = {"concrete": self.record_concrete(),
+        #            "emulator": self.record_emulator(),
+        #            "symbolic": self.record_symbolic(),
+        #            "combined": [],}
+        #self.log["combined"] = self.combine_logs()
         
                 
         
@@ -35,6 +35,13 @@ class Reproducer():
 
 
     def bp(self):
+
+        x1 = [i["pc"] for i in self.record_concrete()]
+        x2 = self.get_breakpoints()
+        x3 = self.record_emulator()
+        #x3 = parse_arancini3()
+
+
         breakpoint()
         k1 = [i["pc"] for i in self.log["emulator"]]
         k2 = [i["pc"] for i in self.log["concrete"]]
@@ -52,7 +59,48 @@ class Reproducer():
             res2 = [a1[i] == a2[i] or a1[i] == None for i in a1.keys()]
             # registers are same or none except RSP
             # I assume it is because of different stack addresses
-            breakpoint()
+            #breakpoint()
+
+    
+    def record_concrete(self) -> list[dict]:
+        target = LLDBConcreteTarget(self.oracle, self.argv)
+
+        concrete_log = [{
+            "pc": target.read_register("pc"), 
+            "snap": target.record_snapshot(),
+            "bb": self.get_basic_block(target, target.read_register("pc"))
+        }]
+        for address in self.get_breakpoints()[1:]:
+            target.run_until(address)
+            concrete_log.append({
+                "pc":   target.read_register("pc"),
+                "snap": target.record_snapshot(),
+                "bb":   target.get_basic_block(address),
+            })
+
+        return concrete_log
+
+    def record_emulator(self) -> list:
+        with open(self.emu, "r") as emu_trace:
+            emulator_log = parse_arancini3(emu_trace, x86.ArchX86())       
+            return emulator_log
+
+
+    def record_emulator1(self) -> list:
+        with open(self.emu, "r") as emu_trace:
+            emulator_log = parse_arancini(emu_trace, x86.ArchX86())
+
+            #filtered_emulator_log = [emulator_log[0]]
+            #for i in emulator_log[1:]:
+            #    if i.read_register("pc") != filtered_emulator_log[-1].read_register("pc"):
+            #        filtered_emulator_log.append(i)
+                    
+            return [{"pc": i.read_register("pc"), "snap": i} for i in emulator_log]
+
+
+
+
+
 
 
     def compare_logs(self):
@@ -93,16 +141,6 @@ class Reproducer():
     def get_breakpoints(self) -> list[int]:
         return [i["pc"] for i in self.record_emulator()]
 
-    def record_emulator(self) -> list:
-        with open(self.emu, "r") as emu_trace:
-            emulator_log = parse_arancini(emu_trace, x86.ArchX86())
-
-            filtered_emulator_log = [emulator_log[0]]
-            for i in emulator_log[1:]:
-                if i.read_register("pc") != filtered_emulator_log[-1].read_register("pc"):
-                    filtered_emulator_log.append(i)
-                    
-            return [{"pc": i.read_register("pc"), "snap": i} for i in filtered_emulator_log]
 
     def record_symbolic(self) -> list:
         symbolic_trace = collect_symbolic_trace(self.oracle, self.argv)
@@ -115,21 +153,7 @@ class Reproducer():
 
         return [{"pc": s.addr, "sym": s} for s in symbolic_log]
     
-    def record_concrete(self) -> list:
-        target = LLDBConcreteTarget(self.oracle, self.argv)
 
-        concrete_log = [{"pc": target.read_register("pc"), 
-                         "snap": target.record_snapshot(),
-                         "bb": self.get_basic_block(target, target.read_register("pc"))}]
-        for address in self.get_breakpoints()[1:]:
-            self.run_until(target, address)
-            snapshot = {}
-            snapshot["pc"] = target.read_register("pc")
-            snapshot["snap"] = target.record_snapshot()
-            snapshot["bb"] = self.get_basic_block(target, address)
-            concrete_log.append(snapshot)
-
-        return concrete_log
     
     def run_until(self, target: LLDBConcreteTarget, address: int) -> None:
         bp = target.target.BreakpointCreateByAddress(address) #target.set_breakpoint(address)
