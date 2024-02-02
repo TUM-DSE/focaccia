@@ -14,10 +14,11 @@ from .arch import Arch, supported_architectures
 from .lldb_target import LLDBConcreteTarget, \
                          ConcreteRegisterError, \
                          ConcreteMemoryError
-from .miasm_util import MiasmConcreteState, eval_expr
-from .snapshot import ProgramState
+from .miasm_util import MiasmSymbolResolver, eval_expr
+from .snapshot import ProgramState, ReadableProgramState, \
+                      RegisterAccessError, MemoryAccessError
 
-def eval_symbol(symbol: Expr, conc_state: ProgramState) -> int:
+def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     """Evaluate a symbol based on a concrete reference state.
 
     :param conc_state: A concrete state.
@@ -28,21 +29,19 @@ def eval_symbol(symbol: Expr, conc_state: ProgramState) -> int:
     :raise MemoryAccessError: If the concrete state does not contain memory
                               that is referenced by the symbolic expression.
     """
-    class ConcreteStateWrapper(MiasmConcreteState):
+    class ConcreteStateWrapper(MiasmSymbolResolver):
         """Extend the state resolver with assumptions about the expressions
         that may be resolved with `eval_symbol`."""
-        def __init__(self, conc_state: ProgramState):
+        def __init__(self, conc_state: ReadableProgramState):
             super().__init__(conc_state, LocationDB())
 
         def resolve_register(self, regname: str) -> int:
-            regname = regname.upper()
-            regname = self.miasm_flag_aliases.get(regname, regname)
-            return self._state.read_register(regname)
+            return self._state.read_register(self._miasm_to_regname(regname))
 
         def resolve_memory(self, addr: int, size: int) -> bytes:
             return self._state.read_memory(addr, size)
 
-        def resolve_location(self, _):
+        def resolve_location(self, loc):
             raise ValueError(f'[In eval_symbol]: Unable to evaluate symbols'
                              f' that contain IR location expressions.')
 
@@ -190,22 +189,20 @@ class SymbolicTransform:
         """
         accessed_regs = set[str]()
 
-        class ConcreteStateWrapper(MiasmConcreteState):
+        class RegisterCollector(MiasmSymbolResolver):
             def __init__(self): pass
             def resolve_register(self, regname: str) -> int | None:
-                accessed_regs.add(regname)
+                accessed_regs.add(self._miasm_to_regname(regname))
                 return None
-            def resolve_memory(self, addr: int, size: int):
-                pass
-            def resolve_location(self, _):
-                assert(False)
+            def resolve_memory(self, addr: int, size: int): pass
+            def resolve_location(self, loc): assert(False)
 
-        state = ConcreteStateWrapper()
+        resolver = RegisterCollector()
         for expr in self.changed_regs.values():
-            eval_expr(expr, state)
+            eval_expr(expr, resolver)
         for addr_expr, mem_expr in self.changed_mem.items():
-            eval_expr(addr_expr, state)
-            eval_expr(mem_expr, state)
+            eval_expr(addr_expr, resolver)
+            eval_expr(mem_expr, resolver)
 
         return list(accessed_regs)
 
@@ -388,7 +385,7 @@ class DisassemblyError(Exception):
         self.faulty_pc = faulty_pc
         self.err_msg = err_msg
 
-def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext) \
+def _run_block(pc: int, conc_state: MiasmSymbolResolver, ctx: DisassemblyContext) \
         -> tuple[int | None, list[dict]]:
     """Run a basic block.
 
@@ -457,22 +454,22 @@ def _run_block(pc: int, conc_state: MiasmConcreteState, ctx: DisassemblyContext)
             # instructions are translated to multiple IR instructions.
             pass
 
-class _LLDBConcreteState:
-    """A back-end replacement for the `ProgramState` object from which
-    `MiasmConcreteState` reads its values. This reads values directly from an
-    LLDB target instead. This saves us the trouble of recording a full program
-    state, and allows us instead to read values from LLDB on demand.
+class _LLDBConcreteState(ReadableProgramState):
+    """A wrapper around `LLDBConcreteTarget` that provides access via a
+    `ReadableProgramState` interface. Reads values directly from an LLDB
+    target. This saves us the trouble of recording a full program state, and
+    allows us instead to read values from LLDB on demand.
     """
     def __init__(self, target: LLDBConcreteTarget, arch: Arch):
         self._target = target
         self._arch = arch
 
-    def read_register(self, reg: str) -> int | None:
+    def read_register(self, reg: str) -> int:
         from focaccia.arch import x86
 
         regname = self._arch.to_regname(reg)
         if regname is None:
-            return None
+            raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
         try:
             return self._target.read_register(regname)
@@ -482,13 +479,13 @@ class _LLDBConcreteState:
                 rflags = x86.decompose_rflags(self._target.read_register('rflags'))
                 if regname in rflags:
                     return rflags[regname]
-            return None
+            raise RegisterAccessError(regname, '')
 
-    def read_memory(self, addr: int, size: int):
+    def read_memory(self, addr: int, size: int) -> bytes:
         try:
             return self._target.read_memory(addr, size)
         except ConcreteMemoryError:
-            return None
+            raise MemoryAccessError(addr, size, 'Unable to read memory from LLDB.')
 
 def collect_symbolic_trace(binary: str,
                            args: list[str],
@@ -533,7 +530,7 @@ def collect_symbolic_trace(binary: str,
         try:
             pc, strace = _run_block(
                 pc,
-                MiasmConcreteState(conc_state, ctx.loc_db),
+                MiasmSymbolResolver(conc_state, ctx.loc_db),
                 ctx)
         except DisassemblyError as err:
             # This happens if we encounter an instruction that is not

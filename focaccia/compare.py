@@ -21,7 +21,9 @@ class ErrorSeverity:
     def __repr__(self) -> str:
         return f'[{self.name}]'
 
-    def __eq__(self, other: Self) -> bool:
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Self):
+            return False
         return self._numeral == other._numeral
 
     def __lt__(self, other: Self) -> bool:
@@ -195,9 +197,6 @@ def _find_register_errors(txl_from: ProgramState,
                                 f'Value of register {regname} has changed, but'
                                 f' is not set in the tested state.'))
             continue
-        except KeyError as err:
-            print(f'[WARNING] {err}')
-            continue
 
         if txl_val != truth_val:
             errors.append(Error(ErrorTypes.CONFIRMED,
@@ -293,28 +292,24 @@ def compare_symbolic(test_states: Iterable[ProgramState],
     transforms = iter(transforms)
 
     result = []
-    cur_state = next(test_states)   # The state before the transformation
-    transform = next(transforms)    # Operates on `cur_state`
 
+    cur_state = next(test_states)   # The state before the transformation
+    transform = next(transforms)    # Transform that operates on `cur_state`
     while True:
         try:
             next_state = next(test_states) # The state after the transformation
 
             pc_cur = cur_state.read_register('PC')
             pc_next = next_state.read_register('PC')
-            start_addr, end_addr = transform.range
-            if pc_cur != start_addr:
-                print(f'Program counter {hex(pc_cur)} in translated code has'
-                      f' no corresponding reference state! Skipping.'
-                      f' (reference: {hex(start_addr)})')
+            if (pc_cur, pc_next) != transform.range:
+                repr_range = lambda r: f'[{hex(r[0])} -> {hex(r[1])}]'
+                print(f'[WARNING] Test states {repr_range((pc_cur, pc_next))}'
+                      f' do not match the symbolic transformation'
+                      f' {repr_range(transform.range)} against which they are'
+                      f' tested! Skipping.')
                 cur_state = next_state
                 transform = next(transforms)
                 continue
-            if pc_next != end_addr:
-                print(f'Tested state transformation is {hex(pc_cur)} ->'
-                      f' {hex(pc_next)}, but reference transform is'
-                      f' {hex(start_addr)} -> {hex(end_addr)}!'
-                      f' Skipping.')
 
             errors = _find_errors_symbolic(cur_state, next_state, transform)
             result.append({

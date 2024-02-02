@@ -79,24 +79,47 @@ class SparseMemory:
 
         assert(len(data) == offset)  # Exactly all data was written
 
-class ProgramState:
+class ReadableProgramState:
+    """Interface for read-only program states. Used for typing purposes."""
+
+    def read_register(self, reg: str) -> int:
+        """Read a register's value.
+
+        :raise RegisterAccessError: If `reg` is not a register name, or if the
+                                    register has no value.
+        """
+        raise NotImplementedError('ReadableProgramState.read_register is abstract.')
+
+    def read_memory(self, addr: int, size: int) -> bytes:
+        """Read a number of bytes from memory.
+
+        :param addr: The address from which to read data.
+        :param data: Number of bytes to read, starting at `addr`. Must be
+                     at least zero.
+
+        :raise MemoryAccessError: If `[addr, addr + size)` is not entirely
+                                  contained in the set of stored bytes.
+        :raise ValueError: If `size < 0`.
+        """
+        raise NotImplementedError('ReadableProgramState.read_memory is abstract.')
+
+class ProgramState(ReadableProgramState):
     """A snapshot of the program's state."""
     def __init__(self, arch: Arch):
         self.arch = arch
 
-        dict_t = dict[str, int | None]
-        self.regs: dict_t = { reg: None for reg in arch.regnames }
+        self.regs: dict[str, int | None] = {reg: None for reg in arch.regnames}
         self.mem = SparseMemory()
 
     def read_register(self, reg: str) -> int:
         """Read a register's value.
 
-        :raise KeyError:            If `reg` is not a register name.
-        :raise RegisterAccessError: If the register has no value.
+        :raise RegisterAccessError: If `reg` is not a register name, or if the
+                                    register has no value.
         """
         regname = self.arch.to_regname(reg)
         if regname is None:
-            raise KeyError(f'Not a register name: {reg}')
+            raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
         assert(regname in self.regs)
         regval = self.regs[regname]
@@ -111,11 +134,11 @@ class ProgramState:
     def set_register(self, reg: str, value: int):
         """Assign a value to a register.
 
-        :raise KeyError: If `reg` is not a register name.
+        :raise RegisterAccessError: If `reg` is not a register name.
         """
         regname = self.arch.to_regname(reg)
         if regname is None:
-            raise KeyError(f'Not a register name: {reg}')
+            raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
         self.regs[regname] = value
 
