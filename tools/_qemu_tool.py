@@ -236,8 +236,14 @@ def main():
         symb_transforms)
 
     # Verify and print result
-    res = compare_symbolic(conc_states, matched_transforms)
-    print_result(res, verbosity[args.error_level])
+    if not args.quiet:
+        res = compare_symbolic(conc_states, matched_transforms)
+        print_result(res, verbosity[args.error_level])
+
+    if args.output:
+        from focaccia.parser import serialize_snapshots
+        with open(args.output, 'w') as file:
+            serialize_snapshots(conc_states, file)
 
 if __name__ == "__main__":
     main()

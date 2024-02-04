@@ -47,6 +47,13 @@ The GDB server is assumed to be at 'localhost'.
                       help='A pre-computed symbolic transformation trace to' \
                            ' be used for verification. Generate this with' \
                            ' the `tools/capture_transforms.py` tool.')
+    prog.add_argument('-q', '--quiet',
+                      default=False,
+                      action='store_true',
+                      help='Don\'t print a verification result.')
+    prog.add_argument('-o', '--output',
+                      help='If specified with a file name, the recorded trace'
+                           ' of QEMU states will be written to that file.')
     prog.add_argument('--error-level',
                       default='warning',
                       choices=list(verbosity.keys()))
@@ -65,8 +72,6 @@ if __name__ == "__main__":
     prog = make_argparser()
     prog.add_argument('--gdb', default='/bin/gdb',
                       help='GDB binary to invoke')
-    prog.add_argument('--quiet', '-q', action='store_true',
-                      help='Suppress all output')
     args = prog.parse_args()
 
     filepath = os.path.realpath(__file__)
@@ -77,8 +82,6 @@ if __name__ == "__main__":
     argv = sys.argv
     try_remove(argv, '--gdb')
     try_remove(argv, args.gdb)
-    try_remove(argv, '--quiet')
-    try_remove(argv, '-q')
 
     # Assemble the argv array passed to the qemu tool. GDB does not have a
     # mechanism to pass arguments to a script that it executes, so we
@@ -89,7 +92,7 @@ if __name__ == "__main__":
     gdb_cmd = [
         args.gdb,
         '-nx',  # Don't parse any .gdbinits
-        '--batch-silent' if args.quiet else '--batch',
+        '--batch',
         '-ex', f'py import sys',
         '-ex', f'py sys.argv = {argv_str}',
         '-ex', f'py sys.path = {path_str}',
