@@ -220,7 +220,7 @@ class LLDBConcreteTarget:
         result = lldb.SBCommandReturnObject()
         self.interpreter.HandleCommand(command, result)
     
-    def get_basic_block(self, addr: int) -> [lldb.SBInstruction]:
+    def get_basic_block(self, addr: int) -> list[lldb.SBInstruction]:
         """Returns a basic block pointed by addr
         a code section is considered a basic block only if
         the last instruction is a brach, e.g. JUMP, CALL, RET
@@ -233,11 +233,30 @@ class LLDBConcreteTarget:
 
         return block
     
+    def get_basic_block_inst(self, addr: int) -> list[str]:
+        inst = []
+        for bb in self.get_basic_block(addr):
+            inst.append(f'{bb.GetMnemonic(self.target)} {bb.GetOperands(self.target)}')
+        return inst
+    
+    def get_next_basic_block(self) -> list[lldb.SBInstruction]:
+        return self.get_basic_block(self.read_register("pc"))
+    
     def get_symbol(self, addr: int) -> lldb.SBSymbol:
         """Returns the symbol that belongs to the addr"""
-        for s in self.target.module.symbols:
+        for s in self.module.symbols:
             if (s.GetType() == lldb.eSymbolTypeCode 
             and s.GetStartAddress().GetLoadAddress(self.target) <= addr 
             and addr < s.GetEndAddress().GetLoadAddress(self.target)):
                 return s
         raise ConcreteSectionError(f'Error getting the symbol to which address {hex(addr)} belongs to')
+
+    def get_symbol_limit(self) -> int:
+        """Returns the address after all the symbols"""
+        addr = 0
+        for s in self.module.symbols:
+            if s.GetStartAddress().IsValid():
+                if s.GetStartAddress().GetLoadAddress(self.target) > addr:
+                    addr = s.GetEndAddress().GetLoadAddress(self.target)
+        return addr
+    

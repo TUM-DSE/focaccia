@@ -316,7 +316,8 @@ def compare_symbolic(test_states: Iterable[ProgramState],
                 'pc': pc_cur,
                 'txl': _calc_transformation(cur_state, next_state),
                 'ref': transform,
-                'errors': errors
+                'errors': errors,
+                'snap': cur_state,
             })
 
             # Step forward

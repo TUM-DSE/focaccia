@@ -1,17 +1,21 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 
 import argparse
 import platform
-from typing import Iterable
+from typing import Iterable, Tuple
 
 from focaccia.arch import supported_architectures
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
 from focaccia.lldb_target import LLDBConcreteTarget
 from focaccia.match import fold_traces
-from focaccia.parser import parse_arancini
+from focaccia.parser import parse_arancini, parse_snapshots
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import collect_symbolic_trace
 from focaccia.utils import print_result
+from focaccia.reproducer import Reproducer
+from focaccia.compare import ErrorSeverity
+
+
 
 verbosity = {
     'info':    ErrorTypes.INFO,
@@ -20,7 +24,7 @@ verbosity = {
 }
 
 def collect_concrete_trace(oracle_program: str, breakpoints: Iterable[int]) \
-        -> list[ProgramState]:
+        -> Tuple[list[ProgramState], list]:
     """Gather snapshots from a native execution via an external debugger.
 
     :param oracle_program: Program to execute.
@@ -37,11 +41,13 @@ def collect_concrete_trace(oracle_program: str, breakpoints: Iterable[int]) \
 
     # Execute the native program
     snapshots = []
+    basic_blocks = []
     while not target.is_exited():
         snapshots.append(target.record_snapshot())
+        basic_blocks.append(target.get_next_basic_block())
         target.run()
 
-    return snapshots
+    return snapshots, basic_blocks
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Comparator for emulator logs to reference')
@@ -77,8 +83,31 @@ def parse_arguments():
                              ' may as well stem from incomplete input data.'
                              ' \'info\' will report absolutely everything.'
                              ' [Default: warning]')
+    parser.add_argument('-r', '--reproducer',
+                        action='store_true',
+                        default=False,
+                        help='Enable reproducer to get assembly code'
+                             ' which should replicate the first error.')
+    parser.add_argument('--trace-type',
+                        type=str,
+                        default='qemu',
+                        choices=['qemu', 'arancini'],
+                        help='Trace type of the emulator.'
+                             ' Currently only Qemu and Arancini traces are accepted.'
+                             ' Use \'qemu\' for Qemu and \'arancini\' for Arancini.'
+                             ' [Default: qemu]')
     args = parser.parse_args()
     return args
+
+def print_reproducer(result, min_severity: ErrorSeverity, oracle, oracle_args):
+    for res in result:
+        errs = [e for e in res['errors'] if e.severity >= min_severity]
+        #breakpoint()
+        if errs:
+            rep = Reproducer(oracle, oracle_args, res['snap'], res['ref'])
+            print(rep.asm())
+            return
+
 
 def main():
     args = parse_arguments()
@@ -97,7 +126,12 @@ def main():
 
     # Parse reference trace
     with open(txl_path, "r") as txl_file:
-        test_states = parse_arancini(txl_file, arch)
+        if args.trace_type == 'qemu':
+            test_states = parse_snapshots(txl_file)
+        elif args.trace_type == 'arancini':
+            test_states = parse_arancini(txl_file, arch)
+        else:
+            test_states = parse_snapshots(txl_file)
 
     # Compare reference trace to a truth
     if args.symbolic:
@@ -112,6 +146,9 @@ def main():
         result = compare_simple(test_states, truth)
 
     print_result(result, verbosity[args.error_level])
+
+    if args.reproducer:
+        print_reproducer(result, verbosity[args.error_level], oracle, oracle_args)
 
 if __name__ == '__main__':
     main()

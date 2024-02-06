@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Spawn GDB, connect to QEMU's GDB server, and read test states from that.
 
