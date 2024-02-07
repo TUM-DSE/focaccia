@@ -77,14 +77,13 @@ class LLDBConcreteTarget:
         """Step forward by a single instruction."""
         thread: lldb.SBThread = self.process.GetThreadAtIndex(0)
         thread.StepInstruction(False)
-    
+
     def run_until(self, address: int) -> None:
         """Continue execution until the address is arrived, ignores other breakpoints"""
         bp = self.target.BreakpointCreateByAddress(address)
         while self.read_register("pc") != address:
             self.run()
         self.target.BreakpointDelete(bp.GetID())
-
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""
@@ -219,7 +218,7 @@ class LLDBConcreteTarget:
         command = f'breakpoint delete {addr}'
         result = lldb.SBCommandReturnObject()
         self.interpreter.HandleCommand(command, result)
-    
+
     def get_basic_block(self, addr: int) -> list[lldb.SBInstruction]:
         """Returns a basic block pointed by addr
         a code section is considered a basic block only if
@@ -232,22 +231,21 @@ class LLDBConcreteTarget:
         block.append(self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0])
 
         return block
-    
+
     def get_basic_block_inst(self, addr: int) -> list[str]:
         inst = []
         for bb in self.get_basic_block(addr):
             inst.append(f'{bb.GetMnemonic(self.target)} {bb.GetOperands(self.target)}')
         return inst
-    
+
     def get_next_basic_block(self) -> list[lldb.SBInstruction]:
         return self.get_basic_block(self.read_register("pc"))
-    
+
     def get_symbol(self, addr: int) -> lldb.SBSymbol:
-        """Returns the symbol that belongs to the addr"""
+        """Returns the symbol that belongs to the addr
+        """
         for s in self.module.symbols:
-            if (s.GetType() == lldb.eSymbolTypeCode 
-            and s.GetStartAddress().GetLoadAddress(self.target) <= addr 
-            and addr < s.GetEndAddress().GetLoadAddress(self.target)):
+            if (s.GetType() == lldb.eSymbolTypeCode and s.GetStartAddress().GetLoadAddress(self.target) <= addr  < s.GetEndAddress().GetLoadAddress(self.target)):
                 return s
         raise ConcreteSectionError(f'Error getting the symbol to which address {hex(addr)} belongs to')
 
@@ -259,4 +257,3 @@ class LLDBConcreteTarget:
                 if s.GetStartAddress().GetLoadAddress(self.target) > addr:
                     addr = s.GetEndAddress().GetLoadAddress(self.target)
         return addr
-    
