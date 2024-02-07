@@ -52,7 +52,17 @@ class GDBServerStateIterator:
         self._process = gdb.selected_inferior()
         self._first_next = True
 
-        print(f'GDB executable: {self._process.progspace.filename}')
+        # Try to determine the guest architecture. This is a bit hacky and
+        # tailored to GDB's naming for the x86-64 architecture.
+        split = self._process.architecture().name().split(':')
+        archname = split[1] if len(split) > 1 else split[0]
+        archname = archname.replace('-', '_')
+        if archname not in supported_architectures:
+            print(f'Error: Current platform ({archname}) is not'
+                  f' supported by Focaccia. Exiting.')
+            exit(1)
+
+        self.arch = supported_architectures[archname]
 
     def __iter__(self):
         return self
@@ -75,8 +85,7 @@ class GDBServerStateIterator:
 
         return GDBProgramState(self._process, gdb.selected_frame())
 
-def collect_conc_trace(arch: Arch, \
-                       gdb: GDBServerStateIterator, \
+def collect_conc_trace(gdb: GDBServerStateIterator, \
                        strace: list[SymbolicTransform]) \
         -> tuple[list[ProgramState], list[SymbolicTransform]]:
     """Collect a trace of concrete states from GDB.
@@ -145,7 +154,7 @@ def collect_conc_trace(arch: Arch, \
                 except MemoryAccessError:
                     pass
 
-        state = ProgramState(arch)
+        state = ProgramState(gdb.arch)
         state.set_register('PC', cur_transform.addr)
 
         set_values(prev_transform.changed_regs.keys(),
@@ -214,16 +223,10 @@ def collect_conc_trace(arch: Arch, \
     return states, matched_transforms
 
 def main():
-    if platform.machine() not in supported_architectures:
-        print(f'Error: Current platform ({platform.machine()}) is not'
-              f' supported by Focaccia. Exiting.')
-        exit(1)
-
     args = make_argparser().parse_args()
 
     gdbserver_addr = 'localhost'
     gdbserver_port = args.port
-    arch = supported_architectures[platform.machine()]
 
     # Read pre-computed symbolic trace
     with open(args.symb_trace, 'r') as strace:
@@ -231,7 +234,6 @@ def main():
 
     # Use symbolic trace to collect concrete trace from QEMU
     conc_states, matched_transforms = collect_conc_trace(
-        arch,
         GDBServerStateIterator(gdbserver_addr, gdbserver_port),
         symb_transforms)
 
