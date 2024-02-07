@@ -7,7 +7,7 @@ from typing import Iterable, Tuple
 from focaccia.arch import supported_architectures
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
 from focaccia.lldb_target import LLDBConcreteTarget
-from focaccia.match import fold_traces
+from focaccia.match import fold_traces, match_traces
 from focaccia.parser import parse_arancini, parse_snapshots
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import collect_symbolic_trace
@@ -137,7 +137,8 @@ def main():
     if args.symbolic:
         print(f'Tracing {oracle} symbolically with arguments {oracle_args}...')
         transforms = collect_symbolic_trace(oracle, oracle_args)
-        fold_traces(test_states, transforms)
+        test_states, transforms = match_traces(test_states, transforms)
+        #fold_traces(test_states, transforms)
         result = compare_symbolic(test_states, transforms)
     else:
         # Record truth states from a concrete execution of the oracle
