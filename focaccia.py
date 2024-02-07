@@ -7,9 +7,10 @@ from typing import Iterable
 from focaccia.arch import supported_architectures
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
 from focaccia.lldb_target import LLDBConcreteTarget
+from focaccia.match import fold_traces
 from focaccia.parser import parse_arancini
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicTransform, collect_symbolic_trace
+from focaccia.symbolic import collect_symbolic_trace
 from focaccia.utils import print_result
 
 verbosity = {
@@ -41,43 +42,6 @@ def collect_concrete_trace(oracle_program: str, breakpoints: Iterable[int]) \
         target.run()
 
     return snapshots
-
-def match_traces(test: list[ProgramState], truth: list[SymbolicTransform]):
-    if not test or not truth:
-        return [], []
-
-    assert(test[0].read_register('pc') == truth[0].addr)
-
-    def index(seq, target, access=lambda el: el):
-        for i, el in enumerate(seq):
-            if access(el) == target:
-                return i
-        return None
-
-    i = 0
-    for next_state in test[1:]:
-        next_pc = next_state.read_register('pc')
-        index_in_truth = index(truth[i:], next_pc, lambda el: el.range[1])
-
-        # If no next element (i.e. no foldable range) is found in the truth
-        # trace, assume that the test trace contains excess states. Remove one
-        # and try again. This might skip testing some states, but covers more
-        # of the entire trace.
-        if index_in_truth is None:
-            test.pop(i + 1)
-            continue
-
-        # Fold the range of truth states until the next test state
-        for _ in range(index_in_truth):
-            truth[i].concat(truth.pop(i + 1))
-
-        assert(truth[i].range[1] == truth[i + 1].addr)
-
-        i += 1
-        if len(truth) <= i:
-            break
-
-    return test, truth
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Comparator for emulator logs to reference')
@@ -139,7 +103,7 @@ def main():
     if args.symbolic:
         print(f'Tracing {oracle} symbolically with arguments {oracle_args}...')
         transforms = collect_symbolic_trace(oracle, oracle_args)
-        test_states, transforms = match_traces(test_states, transforms)
+        fold_traces(test_states, transforms)
         result = compare_symbolic(test_states, transforms)
     else:
         # Record truth states from a concrete execution of the oracle

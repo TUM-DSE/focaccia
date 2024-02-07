@@ -65,4 +65,6 @@ and concrete parts together into "concolic" execution.
  - `focaccia/parser.py`: Utilities for parsing logs from Arancini and QEMU, as well as serializing/deserializing to/from
 our own log format.
 
+ - `focaccia/match.py`: Algorithms for trace matching.
+
  - `miasm_test.py`: A test script that traces a program concolically.
