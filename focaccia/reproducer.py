@@ -1,5 +1,4 @@
 
-
 from .lldb_target import LLDBConcreteTarget
 from .snapshot import ProgramState
 from .symbolic import SymbolicTransform, eval_symbol
@@ -13,10 +12,7 @@ class ReproducerRegisterError(Exception):
     pass
 
 class Reproducer():
-    def __init__(self, oracle: str, argv: str,
-                 snap: ProgramState, 
-                 sym: SymbolicTransform) -> None:
-                
+    def __init__(self, oracle: str, argv: str, snap: ProgramState, sym: SymbolicTransform) -> None:
 
         target = LLDBConcreteTarget(oracle)
 
@@ -25,9 +21,6 @@ class Reproducer():
         self.sl = target.get_symbol_limit()
         self.snap = snap
         self.sym = sym
-        print(hex(self.sl))
-        #breakpoint()
-
 
     def get_bb(self) -> str:
         try:
@@ -36,17 +29,17 @@ class Reproducer():
             for i in self.bb[:-1]:
                 asm += f'{i}\n'
             asm += f'ret\n'
-            asm += f'\n' 
+            asm += f'\n'
 
             return asm
         except:
             raise ReproducerBasicBlockError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
-    
+
     def get_regs(self) -> str:
         general_regs = ['RIP', 'RAX', 'RBX','RCX','RDX', 'RSI','RDI','RBP','RSP','R8','R9','R10','R11','R12','R13','R14','R15',]
         flag_regs = ['CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',]
         eflag_regs = ['RF', 'VM', 'AC', 'VIF', 'VIP', 'ID',]
-        
+
         try:
             asm = ""
             asm += f'_setup_regs:\n'
@@ -60,12 +53,11 @@ class Reproducer():
             if any(reg in self.sym.get_used_registers() for reg in flag_regs+eflag_regs):
                 asm += f'pushfd ${hex(x86.compose_rflags(self.snap.regs))}\n'
             asm += f'ret\n'
-            asm += f'\n' 
+            asm += f'\n'
 
             return asm
         except:
             raise ReproducerRegisterError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
-
 
     def get_mem(self) -> str:
         try:
@@ -84,7 +76,6 @@ class Reproducer():
             return asm
         except:
             raise ReproducerMemoryError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
-
 
     def get_dyn(self) -> str:
         try:
@@ -118,7 +109,7 @@ class Reproducer():
         asm += f'\n'
 
         return asm
-    
+
     def get_exit(self) -> str:
         asm = ""
         asm += f'_exit:\n'
@@ -139,16 +130,11 @@ class Reproducer():
         asm += f'movq $0, %r9\n'
         asm += f'movq $syscall_mmap, %rax\n'
         asm += f'syscall\n'
-
-#        asm += f'\n'
-#        asm += f'\n'
-
-
         asm += f'ret\n'
         asm += f'\n'
 
         return asm
-       
+
     def get_code(self) -> str:
         asm = ""
         asm += f'.section .text\n'
@@ -178,12 +164,9 @@ class Reproducer():
 
         return asm
 
-
     def asm(self) -> str:
         asm = ""
         asm += self.get_code()
         asm += self.get_data()
 
         return asm
-
-
