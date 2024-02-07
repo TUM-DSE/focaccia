@@ -12,3 +12,7 @@ __pycache__/
 
 # Dev environment
 .gdbinit
+
+# Focaccia files
+qemu.sym
+qemu.trace
