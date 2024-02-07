@@ -25,11 +25,12 @@ class Reproducer():
         self.sl = target.get_symbol_limit()
         self.snap = snap
         self.sym = sym
+        print(hex(self.sl))
+        #breakpoint()
 
 
     def get_bb(self) -> str:
         try:
-            
             asm = ""
             asm += f'_bb_{hex(self.pc)}:\n'
             for i in self.bb[:-1]:
@@ -39,7 +40,7 @@ class Reproducer():
 
             return asm
         except:
-            raise ReproducerBasicBlockError(f'{hex(self.pc)} {self.snap} {self.sym}')
+            raise ReproducerBasicBlockError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
     
     def get_regs(self) -> str:
         general_regs = ['RIP', 'RAX', 'RBX','RCX','RDX', 'RSI','RDI','RBP','RSP','R8','R9','R10','R11','R12','R13','R14','R15',]
@@ -63,7 +64,7 @@ class Reproducer():
 
             return asm
         except:
-            raise ReproducerRegisterError(f'{hex(self.pc)} {self.snap} {self.sym}')
+            raise ReproducerRegisterError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
 
 
     def get_mem(self) -> str:
@@ -82,7 +83,7 @@ class Reproducer():
 
             return asm
         except:
-            raise ReproducerMemoryError(f'{hex(self.pc)} {self.snap} {self.sym}')
+            raise ReproducerMemoryError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
 
 
     def get_dyn(self) -> str:
@@ -94,15 +95,18 @@ class Reproducer():
                 val = self.snap.read_memory(addr, int(mem.size/8))
 
                 if addr >= self.sl:
+                    asm += f'mov ${hex(addr)}, %rdi\n'
+                    asm += f'call _alloc\n'
                     for b in val:
-                        asm += f'movb ${hex(b)}, (${hex(addr)})\n'
+                        asm += f'mov ${hex(addr)}, %rax\n'
+                        asm += f'movb ${hex(b)}, (%rax)\n'
                         addr += 1
             asm += f'ret\n'
             asm += f'\n'
 
             return asm
         except:
-            raise ReproducerMemoryError()
+            raise ReproducerMemoryError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
 
     def get_start(self) -> str:
         asm = ""
@@ -124,21 +128,37 @@ class Reproducer():
         asm += f'\n'
 
         return asm
-    
-    def get_global(self) -> str:
+
+    def get_alloc(self) -> str:
         asm = ""
-        asm += f'.global _start\n'
+        asm += f'_alloc:\n'
+        asm += f'movq $4096, %rsi\n'
+        asm += f'movq $(PROT_READ | PROT_WRITE), %rdx\n'
+        asm += f'movq $(MAP_PRIVATE | MAP_ANONYMOUS), %r10\n'
+        asm += f'movq $-1, %r8\n'
+        asm += f'movq $0, %r9\n'
+        asm += f'movq $syscall_mmap, %rax\n'
+        asm += f'syscall\n'
+
+#        asm += f'\n'
+#        asm += f'\n'
+
+
+        asm += f'ret\n'
         asm += f'\n'
 
         return asm
-    
+       
     def get_code(self) -> str:
         asm = ""
         asm += f'.section .text\n'
+        asm += f'.global _start\n'
+        asm += f'\n'
         asm += f'.org {hex(self.pc)}\n'
         asm += self.get_bb()
         asm += self.get_start()
         asm += self.get_exit()
+        asm += self.get_alloc()
         asm += self.get_regs()
         asm += self.get_dyn()
 
@@ -147,6 +167,13 @@ class Reproducer():
     def get_data(self) -> str:
         asm = ""
         asm += f'.section .data\n'
+        asm += f'PROT_READ  = 0x1\n'
+        asm += f'PROT_WRITE = 0x2\n'
+        asm += f'MAP_PRIVATE = 0x2\n'
+        asm += f'MAP_ANONYMOUS = 0x20\n'
+        asm += f'syscall_mmap = 9\n'
+        asm += f'\n'
+
         asm += self.get_mem()
 
         return asm
@@ -154,7 +181,6 @@ class Reproducer():
 
     def asm(self) -> str:
         asm = ""
-        asm += self.get_global()
         asm += self.get_code()
         asm += self.get_data()
 
