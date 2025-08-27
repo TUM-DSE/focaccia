@@ -1,9 +1,3 @@
-[submodule "cpuid"]
-	path = wrappers/cpuid
-	url = https://github.com/flababah/cpuid.py.git
-[submodule "wrappers/cpuid-wrapper/cpuid"]
-	path = wrappers/cpuid-wrapper/cpuid
-	url = https://github.com/flababah/cpuid.py
 [submodule "miasm"]
 	path = miasm
 	url = git@github.com:taugoust/miasm.git
