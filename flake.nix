@@ -38,7 +38,7 @@
 		pyproject-build-systems,
 		...
 	}:
-	flake-utils.lib.eachDefaultSystem (system:
+	flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
 	let
 		qemu-60 = inputs.nixpkgs-qemu-60.qemu;
 
@@ -86,23 +86,19 @@
 			});
 
 			focaccia = super.focaccia.overrideAttrs (old: {
-				buildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.lldb ];
+				buildInputs = (old.buildInputs or []) ++ [ pkgs.lldb ];
 
 				postInstall = (old.postInstall or "") + ''
 					set -eu
-					target="$out/${python.sitePackages}"   # e.g. lib/python3.12/site-packages
-					src="${pkgs.lldb}/lib/${python.libPrefix}"
+
+					target="$out/${python.sitePackages}" 
+					src="$(${pkgs.lldb}/bin/lldb -P)"
 
 					mkdir -p "$target"
 
-					# Some nixpkgs place the package under .../pythonX.Y/site-packages
-					if [ -d "$src/site-packages" ]; then
-						src="$src/site-packages"
-					fi
-
 					# Copy the lldb Python package (and the native extension)
-					if [ -d "$src/lldb" ]; then
-						cp -a "$src/lldb" "$target/"
+					if [ -h "$src/lldb" ]; then
+						ln -sT "$src/lldb" "$target/lldb"
 					fi
 
 					# Optional: some builds ship a top-level helper
@@ -143,6 +139,25 @@
 						(old.src + "/src/focaccia/__init__.py")
 					];
 				};
+
+				postInstall = (old.postInstall or "") + ''
+					set -eu
+
+					target="$out/${python.sitePackages}" 
+					src="$(${pkgs.lldb}/bin/lldb -P)"
+
+					mkdir -p "$target"
+
+					# Copy the lldb Python package (and the native extension)
+					if [ -h "$src/lldb" ]; then
+						ln -sT "$src/lldb" "$target/lldb"
+					fi
+
+					# Optional: some builds ship a top-level helper
+					if [ -f "$src/LLDB.py" ]; then
+						cp -a "$src/LLDB.py" "$target/"
+					fi
+				'';
 			});
 		};
 
