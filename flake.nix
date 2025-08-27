@@ -2,6 +2,8 @@
 	description = "Focaccia: A Symbolic Tester for QEMU";
 
 	inputs = {
+		self.submodules = true;
+
 		nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
 		nixpkgs-qemu-60.url = "github:nixos/nixpkgs/f8f124009497b3f9908f395d2533a990feee1de8";
