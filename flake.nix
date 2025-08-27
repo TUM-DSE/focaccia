@@ -68,7 +68,7 @@
 			# Use environment variable
 			root = "$REPO_ROOT";
 
-			members = [ "focaccia" ];
+			members = [ "focaccia" "miasm" ];
 		};
 
 		# Another overlay layer for flake-specific overloads
@@ -88,6 +88,15 @@
 		pyprojectOverridesEditable = self: super: {
 			miasm = super.miasm.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
+
+				src = pkgs.lib.fileset.toSource {
+					root = old.src;
+					fileset = pkgs.lib.fileset.unions [
+						(old.src + "/pyproject.toml")
+						(old.src + "/README.md")
+						(old.src + "/miasm/__init__.py")
+					];
+				};
 			});
 
 			cpuid = super.cpuid.overrideAttrs (old: {
