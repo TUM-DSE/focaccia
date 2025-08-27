@@ -62,6 +62,13 @@
 		# in uv
 		overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
 
+		editableOverlay = workspace.mkEditablePyprojectOverlay {
+			# Use environment variable
+			root = "$REPO_ROOT";
+
+			members = [ "focaccia" ];
+		};
+
 		# Another overlay layer for flake-specific overloads
 		# This might be needed because uv does not have sufficient metadata
 		# Here, uv does include metadata about build systems used by each dependency
@@ -73,6 +80,30 @@
 			});
 			cpuid = super.cpuid.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
+			});
+		};
+
+		pyprojectOverridesEditable = self: super: {
+			miasm = super.miasm.overrideAttrs (old: {
+				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
+			});
+
+			cpuid = super.cpuid.overrideAttrs (old: {
+				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
+			});
+
+			focaccia = super.focaccia.overrideAttrs (old: {
+				nativeBuildInputs = (old.nativeBuildInputs or []) ++
+									self.resolveBuildSystem { editables = []; };
+
+				src = pkgs.lib.fileset.toSource {
+					root = old.src;
+					fileset = pkgs.lib.fileset.unions [
+						(old.src + "/pyproject.toml")
+						(old.src + "/README.md")
+						(old.src + "/src/focaccia/__init__.py")
+					];
+				};
 			});
 		};
 
@@ -89,14 +120,21 @@
 						 pyprojectOverrides 
 					 ]);
 
+		pythonSetEditable = pythonSet.overrideScope (
+			pkgs.lib.composeManyExtensions [
+				editableOverlay
+				pyprojectOverridesEditable
+			]
+		);
+
 		 # Create a Python venv with the default dependency group
 		 pythonEnv = pythonSet.mkVirtualEnv "focaccia-env" workspace.deps.default;
 
 		 # Create a Python venv with the default dependency group
-		 pythonDevEnv = pythonSet.mkVirtualEnv "focaccia-env" workspace.deps.all;
+		 pythonDevEnv = pythonSetEditable.mkVirtualEnv "focaccia-env" workspace.deps.all;
 	in {
 		# Default package just builds Focaccia
-		packages.default = pythonEnv;
+		packages.default = pythonDevEnv;
 
 		# Default app is just Focaccia
 		apps.default = {
@@ -110,12 +148,25 @@
 				packages = [
 					pythonDevEnv
 					pkgs.gdb
+					pkgs.git
 				];
+
+				env = {
+					UV_NO_SYNC = "1";
+					UV_PYTHON = python.interpreter;
+					UV_PYTHON_DOWNLOADS = "never";
+				};
+
+				shellHook = ''
+					unset PYTHONPATH
+
+					export REPO_ROOT=$(git rev-parse --show-toplevel)
+				'';
 			};
 
 			glibc = pkgs.mkShell {
 				packages = [
-					pythonDevEnv
+					pythonEnv
 					pkgs.gdb
 					pkgs.gcc
 					pkgs.glibc.all
