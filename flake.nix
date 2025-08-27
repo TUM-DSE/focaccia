@@ -57,32 +57,6 @@
 		# Pin Python version
 		python = pkgs.python312;
 
-
-		lldbPth = pkgs.writeText "lldb-path.pth" ''
-			${pkgs.lldb}/lib/${python.libPrefix}
-			${pkgs.lldb}/${python.sitePackages}
-		'';
-
-		lldbPythonBindings = python.pkgs.buildPythonPackage {
-		    pname = "python-lldb";
-			version = "0";
-			format = "other";
-	
-			src = pkgs.emptyDirectory;
-
-			dontBuild = true;
-			dontUnpack = true;
-			doCheck = false;
-
-			propagatedBuildInputs = [ pkgs.lldb ];
-
-			installPhase = ''
-				site="$out/${python.sitePackages}" 
-				mkdir -p "$site"
-				install -m444 ${lldbPth} "$site/lldb-path.pth"
-			'';	
-		};
-
 		# Define workspace root and load uv workspace metadata
 		workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
 
@@ -112,7 +86,30 @@
 			});
 
 			focaccia = super.focaccia.overrideAttrs (old: {
-				buildInputs = (old.nativeBuildInputs or []) ++ [ lldbPythonBindings ];
+				buildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.lldb ];
+
+				postInstall = (old.postInstall or "") + ''
+					set -eu
+					target="$out/${python.sitePackages}"   # e.g. lib/python3.12/site-packages
+					src="${pkgs.lldb}/lib/${python.libPrefix}"
+
+					mkdir -p "$target"
+
+					# Some nixpkgs place the package under .../pythonX.Y/site-packages
+					if [ -d "$src/site-packages" ]; then
+						src="$src/site-packages"
+					fi
+
+					# Copy the lldb Python package (and the native extension)
+					if [ -d "$src/lldb" ]; then
+						cp -a "$src/lldb" "$target/"
+					fi
+
+					# Optional: some builds ship a top-level helper
+					if [ -f "$src/LLDB.py" ]; then
+						cp -a "$src/LLDB.py" "$target/"
+					fi
+				'';
 			});
 		};
 
@@ -136,7 +133,6 @@
 
 			focaccia = super.focaccia.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++
-									[ lldbPythonBindings ] ++
 									self.resolveBuildSystem { editables = []; };
 
 				src = pkgs.lib.fileset.toSource {
