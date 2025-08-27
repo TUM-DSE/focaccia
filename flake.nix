@@ -57,6 +57,32 @@
 		# Pin Python version
 		python = pkgs.python312;
 
+
+		lldbPth = pkgs.writeText "lldb-path.pth" ''
+			${pkgs.lldb}/lib/${python.libPrefix}
+			${pkgs.lldb}/${python.sitePackages}
+		'';
+
+		lldbPythonBindings = python.pkgs.buildPythonPackage {
+		    pname = "python-lldb";
+			version = "0";
+			format = "other";
+	
+			src = pkgs.emptyDirectory;
+
+			dontBuild = true;
+			dontUnpack = true;
+			doCheck = false;
+
+			propagatedBuildInputs = [ pkgs.lldb ];
+
+			installPhase = ''
+				site="$out/${python.sitePackages}" 
+				mkdir -p "$site"
+				install -m444 ${lldbPth} "$site/lldb-path.pth"
+			'';	
+		};
+
 		# Define workspace root and load uv workspace metadata
 		workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
 
@@ -80,8 +106,13 @@
 			miasm = super.miasm.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
 			});
+
 			cpuid = super.cpuid.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
+			});
+
+			focaccia = super.focaccia.overrideAttrs (old: {
+				buildInputs = (old.nativeBuildInputs or []) ++ [ lldbPythonBindings ];
 			});
 		};
 
@@ -105,6 +136,7 @@
 
 			focaccia = super.focaccia.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++
+									[ lldbPythonBindings ] ++
 									self.resolveBuildSystem { editables = []; };
 
 				src = pkgs.lib.fileset.toSource {
