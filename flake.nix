@@ -224,6 +224,11 @@
 				program = "${packages.default}/bin/capture-transforms";
 			};
 
+			validate-qemu = {
+				type = "app";
+				program = "${packages.default}/bin/validate-qemu";
+			};
+
 			# Useful for synchronize the uv lockfile
 			uv-sync = {
 				type = "app";

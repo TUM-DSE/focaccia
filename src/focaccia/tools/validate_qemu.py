@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 
+import focaccia
 from focaccia.compare import ErrorTypes
 
 verbosity = {
@@ -70,13 +71,13 @@ def try_remove(l: list, v):
     except ValueError:
         pass
 
-if __name__ == "__main__":
+def main():
     prog = make_argparser()
     prog.add_argument('--gdb', default='gdb',
                       help='GDB binary to invoke.')
     args = prog.parse_args()
 
-    filepath = os.path.realpath(__file__)
+    filepath = focaccia.__file__
     qemu_tool_path = os.path.join(os.path.dirname(filepath), '_qemu_tool.py')
 
     # We have to remove all arguments we don't want to pass to the qemu tool
@@ -104,3 +105,7 @@ if __name__ == "__main__":
 
     ret = proc.wait()
     exit(ret)
+
+if __name__ == "__main__":
+    main()
+
