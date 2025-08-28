@@ -203,9 +203,21 @@
 		packages.default = pythonDevEnv;
 
 		# Default app is just Focaccia
-		apps.default = {
-			type = "app";
-			program = "${self.packages.default}/bin/focaccia";
+
+		apps = {
+			default = {
+				type = "app";
+				program = "${self.packages.default}/bin/focaccia";
+			};
+
+			# Useful for synchronize the uv lockfile
+			uv-sync = {
+				type = "app";
+				program = "${pkgs.writeShellScriptBin "uv-sync" ''
+					set -euo pipefail
+					exec ${pkgs.uv}/bin/uv sync
+				''}/bin/uv-sync";
+			};
 		};
 
 		# Developer shell that includes Focaccia and QEMU
