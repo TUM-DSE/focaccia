@@ -219,6 +219,11 @@
 				program = "${packages.default}/bin/convert";
 			};
 
+			capture-transforms = {
+				type = "app";
+				program = "${packages.default}/bin/capture-transforms";
+			};
+
 			# Useful for synchronize the uv lockfile
 			uv-sync = {
 				type = "app";
