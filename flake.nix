@@ -200,7 +200,12 @@
 		'';
 	in rec {
 		# Default package just builds Focaccia
-		packages.default = pythonDevEnv;
+		packages = rec {
+			focaccia = pythonEnv;
+			dev = pythonDevEnv;
+
+			default = focaccia;
+		};
 
 		# Default app is just Focaccia
 		apps = {
@@ -228,7 +233,7 @@
 		devShells = {
 			default = pkgs.mkShell {
 				packages = [
-					pythonDevEnv
+					packages.dev
 					pkgs.uv
 					pkgs.gdb
 					pkgs.git
@@ -240,7 +245,7 @@
 
 			glibc = pkgs.mkShell {
 				packages = [
-					pythonDevEnv
+					packages.dev
 					pkgs.uv
 					pkgs.gdb
 					pkgs.gcc
@@ -253,7 +258,7 @@
 
 			musl = pkgs.mkShell {
 				packages = [
-					pythonDevEnv
+					packages.dev
 					pkgs.uv
 					pkgs.gdb
 					musl-pkgs.gcc
