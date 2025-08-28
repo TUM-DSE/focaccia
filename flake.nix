@@ -97,8 +97,8 @@
 					mkdir -p "$target"
 
 					# Copy the lldb Python package (and the native extension)
-					if [ -h "$src/lldb" ]; then
-						ln -sT "$src/lldb" "$target/lldb"
+					if [ -d "$src/lldb" ]; then
+						ln -sTf "$src/lldb" "$target/lldb"
 					fi
 
 					# Optional: some builds ship a top-level helper
