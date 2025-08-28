@@ -186,6 +186,18 @@
 
 		 # Create a Python venv with the default dependency group
 		 pythonDevEnv = pythonSetEditable.mkVirtualEnv "focaccia-env" workspace.deps.all;
+
+		 uvEnv = {
+			UV_NO_SYNC = "1";
+			UV_PYTHON = python.interpreter;
+			UV_PYTHON_DOWNLOADS = "never";
+		};
+
+		uvShellHook = ''
+			unset PYTHONPATH
+
+			export REPO_ROOT=$(git rev-parse --show-toplevel)
+		'';
 	in {
 		# Default package just builds Focaccia
 		packages.default = pythonDevEnv;
@@ -201,39 +213,39 @@
 			default = pkgs.mkShell {
 				packages = [
 					pythonDevEnv
+					pkgs.uv
 					pkgs.gdb
 					pkgs.git
 				];
 
-				env = {
-					UV_NO_SYNC = "1";
-					UV_PYTHON = python.interpreter;
-					UV_PYTHON_DOWNLOADS = "never";
-				};
-
-				shellHook = ''
-					unset PYTHONPATH
-
-					export REPO_ROOT=$(git rev-parse --show-toplevel)
-				'';
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 
 			glibc = pkgs.mkShell {
 				packages = [
-					pythonEnv
+					pythonDevEnv
+					pkgs.uv
 					pkgs.gdb
 					pkgs.gcc
 					pkgs.glibc.all
 				];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 
 			musl = pkgs.mkShell {
 				packages = [
 					pythonDevEnv
+					pkgs.uv
 					pkgs.gdb
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 				];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 		};
 	});
