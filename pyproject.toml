@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 focaccia = "focaccia:cli.main"
+convert = "focaccia.tools:convert.main"
 
 [build-system]
 requires = ["hatchling"]

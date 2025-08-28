@@ -198,16 +198,20 @@
 
 			export REPO_ROOT=$(git rev-parse --show-toplevel)
 		'';
-	in {
+	in rec {
 		# Default package just builds Focaccia
 		packages.default = pythonDevEnv;
 
 		# Default app is just Focaccia
-
 		apps = {
 			default = {
 				type = "app";
-				program = "${self.packages.default}/bin/focaccia";
+				program = "${packages.default}/bin/focaccia";
+			};
+
+			convert-log = {
+				type = "app";
+				program = "${packages.default}/bin/convert";
 			};
 
 			# Useful for synchronize the uv lockfile
