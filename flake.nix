@@ -129,6 +129,7 @@
 
 			focaccia = super.focaccia.overrideAttrs (old: {
 				nativeBuildInputs = (old.nativeBuildInputs or []) ++
+									[ pkgs.lldb ] ++
 									self.resolveBuildSystem { editables = []; };
 
 				src = pkgs.lib.fileset.toSource {
@@ -198,11 +199,22 @@
 
 			export REPO_ROOT=$(git rev-parse --show-toplevel)
 		'';
+
+		gdbInternal = pkgs.gdb.override { python3 = python; };
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
-			focaccia = pythonEnv;
-			dev = pythonDevEnv;
+			focaccia = pythonEnv.overrideAttrs (old: {
+				propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ pkgs.lldb ];
+			});
+
+			dev = pythonDevEnv.overrideAttrs (old: {
+				propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ 
+					pkgs.uv
+					pkgs.lldb 
+					gdbInternal # TODO keep this internal somehow
+				];
+			});
 
 			default = focaccia;
 		};
@@ -211,22 +223,27 @@
 		apps = {
 			default = {
 				type = "app";
-				program = "${packages.default}/bin/focaccia";
+				program = "${packages.focaccia}/bin/focaccia";
 			};
 
 			convert-log = {
 				type = "app";
-				program = "${packages.default}/bin/convert";
+				program = "${packages.focaccia}/bin/convert";
 			};
 
 			capture-transforms = {
 				type = "app";
-				program = "${packages.default}/bin/capture-transforms";
+				program = "${packages.focaccia}/bin/capture-transforms";
 			};
 
 			validate-qemu = {
 				type = "app";
-				program = "${packages.default}/bin/validate-qemu";
+				# program = "${packages.focaccia}/bin/validate-qemu";
+				program = let
+					wrapper = pkgs.writeShellScriptBin "validate-qemu" ''
+						exec ${packages.focaccia}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
+					'';
+				in "${wrapper}/bin/validate-qemu";
 			};
 
 			# Useful for synchronize the uv lockfile
@@ -242,12 +259,7 @@
 		# Developer shell that includes Focaccia and QEMU
 		devShells = {
 			default = pkgs.mkShell {
-				packages = [
-					packages.dev
-					pkgs.uv
-					pkgs.gdb
-					pkgs.git
-				];
+				packages = [ packages.dev ];
 
 				env = uvEnv;
 				shellHook = uvShellHook;
@@ -256,8 +268,6 @@
 			glibc = pkgs.mkShell {
 				packages = [
 					packages.dev
-					pkgs.uv
-					pkgs.gdb
 					pkgs.gcc
 					pkgs.glibc.all
 				];
@@ -269,8 +279,6 @@
 			musl = pkgs.mkShell {
 				packages = [
 					packages.dev
-					pkgs.uv
-					pkgs.gdb
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 				];

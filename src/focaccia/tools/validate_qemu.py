@@ -6,20 +6,20 @@ Spawn GDB, connect to QEMU's GDB server, and read test states from that.
 We need two scripts (this one and the primary `qemu_tool.py`) because we can't
 pass arguments to scripts executed via `gdb -x <script>`.
 
-This script (`verify_qemu.py`) is the one the user interfaces with. It
+This script (`validate_qemu.py`) is the one the user interfaces with. It
 eventually calls `execv` to spawn a GDB process that calls the main
-`qemu_tool.py` script; `python verify_qemu.py` essentially behaves as if
+`qemu_tool.py` script; `python validate_qemu.py` essentially behaves as if
 something like `gdb --batch -x qemu_tool.py` were executed instead. Before it
 starts GDB, though, it parses command line arguments and applies some weird but
 necessary logic to pass them to `qemu_tool.py`.
 """
 
-import argparse
 import os
-import subprocess
 import sys
+import argparse
+import sysconfig
+import subprocess
 
-import focaccia
 from focaccia.compare import ErrorTypes
 
 verbosity = {
@@ -77,8 +77,8 @@ def main():
                       help='GDB binary to invoke.')
     args = prog.parse_args()
 
-    filepath = focaccia.__file__
-    qemu_tool_path = os.path.join(os.path.dirname(filepath), '_qemu_tool.py')
+    script_dirname = os.path.dirname(__file__)
+    qemu_tool_path = os.path.join(script_dirname, '_qemu_tool.py')
 
     # We have to remove all arguments we don't want to pass to the qemu tool
     # manually here. Not nice, but what can you do..
@@ -92,6 +92,14 @@ def main():
     argv_str = f'[{", ".join(quoted(a) for a in argv)}]'
     path_str = f'[{", ".join(quoted(s) for s in sys.path)}]'
 
+    paths = sysconfig.get_paths()
+    candidates = [paths["purelib"], paths["platlib"]]
+    entries = [p for p in candidates if p and os.path.isdir(p)]
+    venv_site = entries[0]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ','.join([script_dirname, venv_site])
+
+    print(f"GDB started with Python Path: {env['PYTHONPATH']}")
     gdb_cmd = [
         args.gdb,
         '-nx',  # Don't parse any .gdbinits
@@ -99,9 +107,11 @@ def main():
         '-ex', f'py import sys',
         '-ex', f'py sys.argv = {argv_str}',
         '-ex', f'py sys.path = {path_str}',
+        "-ex", f"py import site; site.addsitedir({venv_site!r})",
+        "-ex", f"py import site; site.addsitedir({script_dirname!r})",
         '-x', qemu_tool_path
     ]
-    proc = subprocess.Popen(gdb_cmd)
+    proc = subprocess.Popen(gdb_cmd, env=env)
 
     ret = proc.wait()
     exit(ret)

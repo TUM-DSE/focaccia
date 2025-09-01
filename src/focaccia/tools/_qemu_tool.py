@@ -2,7 +2,7 @@
 
     gdb -n --batch -x qemu_tool.py
 
-But please use `tools/verify_qemu.py` instead because we have some more setup
+But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
@@ -18,7 +18,7 @@ from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
 
-from verify_qemu import make_argparser, verbosity
+from validate_qemu import make_argparser, verbosity
 
 class GDBProgramState(ReadableProgramState):
     from focaccia.arch import aarch64, x86
