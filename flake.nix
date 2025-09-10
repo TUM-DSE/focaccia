@@ -224,16 +224,25 @@
 			default = {
 				type = "app";
 				program = "${packages.focaccia}/bin/focaccia";
+				meta = {
+					description = "Translation validator for user-mode emulators";
+				};
 			};
 
 			convert-log = {
 				type = "app";
 				program = "${packages.focaccia}/bin/convert";
+				meta = {
+					description = "Convert emulator debug logs to format accepted by Focaccia";
+				};
 			};
 
 			capture-transforms = {
 				type = "app";
 				program = "${packages.focaccia}/bin/capture-transforms";
+				meta = {
+					description = "Capture symbolic equations describing program execution";
+				};
 			};
 
 			validate-qemu = {
@@ -244,6 +253,9 @@
 						exec ${packages.focaccia}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
 					'';
 				in "${wrapper}/bin/validate-qemu";
+				meta = {
+					description = "Validate QEMU translations using symbolic equations";
+				};
 			};
 
 			# Useful for synchronize the uv lockfile
@@ -253,6 +265,9 @@
 					set -euo pipefail
 					exec ${pkgs.uv}/bin/uv sync
 				''}/bin/uv-sync";
+				meta = {
+					description = "Sync uv python packages";
+				};
 			};
 		};
 
