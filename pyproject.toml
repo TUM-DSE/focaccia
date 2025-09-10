@@ -21,6 +21,7 @@ dependencies = [
 dev = [
 	"ruff",
 	"black",
+	"pytest",
 	"pyright",
 ]
 
@@ -69,4 +70,9 @@ reportMissingImports = true
 reportMissingTypeStubs = false
 useLibraryCodeForTypes = true
 executionEnvironments = [ {root = "src"} ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
 

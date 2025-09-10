@@ -302,6 +302,28 @@
 				shellHook = uvShellHook;
 			};
 		};
+
+		checks = {
+			focaccia-tests = pkgs.stdenv.mkDerivation {
+				name = "focaccia-tests";
+				src = ./.;
+
+				doCheck = true;
+				dontBuild = true;
+
+				nativeCheckInputs = [ packages.dev pythonDevEnv ];
+
+				checkPhase = ''
+					set -euo pipefail
+					export REPO_ROOT="$PWD"
+					${packages.dev}/bin/python -m 'pytest' -q tests
+					touch $out
+				'';
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+		};
 	});
 }
 
