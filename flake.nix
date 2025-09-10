@@ -288,12 +288,17 @@
 				doCheck = true;
 				dontBuild = true;
 
-				nativeCheckInputs = [ pythonDevEnv ];
+				nativeCheckInputs = [ packages.dev pythonDevEnv ];
 
 				checkPhase = ''
 					set -euo pipefail
-					${packages.dev}/bin/pytest -q
+					export REPO_ROOT="$PWD"
+					${packages.dev}/bin/python -m 'pytest' -q tests
+					touch $out
 				'';
+
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 		};
 	});
