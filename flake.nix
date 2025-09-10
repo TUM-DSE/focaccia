@@ -50,7 +50,7 @@
 		musl-pkgs = import nixpkgs {
 			inherit system;
 			crossSystem = {
-				config = "x86_64-unknown-linux-musl";
+				config = "${system}-musl";
 			};
 		};
 
