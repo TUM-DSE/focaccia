@@ -298,6 +298,8 @@
 					musl-pkgs.pkg-config
 				];
 
+				hardeningDisable = [ "pie" ];
+
 				env = uvEnv;
 				shellHook = uvShellHook;
 			};
