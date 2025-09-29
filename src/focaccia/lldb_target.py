@@ -187,6 +187,8 @@ class LLDBConcreteTarget:
                                       the register's value.
         """
         try:
+            if 'Q' in regname:
+                regname = 'V' + regname[1:]
             reg = self._get_register(regname)
             assert(reg.IsValid())
             if reg.size > 8:  # reg is a vector register
