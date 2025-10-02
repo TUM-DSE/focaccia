@@ -209,7 +209,7 @@ class LLDBConcreteTarget:
                 f' register {regname}: {err}')
 
     def write_register(self, regname: str, value: int):
-        """Read the value of a register.
+        """Write a value to a register.
 
         :raise ConcreteRegisterError: If `regname` is not a valid register name
                                       or the target is otherwise unable to set
