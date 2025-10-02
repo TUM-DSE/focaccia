@@ -24,7 +24,18 @@ It will take a while to compile.
 
 ## How To Use
 
-`focaccia.py` is the main executable. Invoke `focaccia.py --help` to see what you can do with it.
+`focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.
+
+A number of additional tools are included to simplify use when validating QEMU:
+`capture-transforms`, `convert-log`, `validate-qemu`. They enable the following workflow.
+
+```bash
+capture-transforms -o oracle.trace bug.out
+qemu-x86_64 -g 12345 bug.out &
+validate-qemu --symb-trace oracle.trace localhost 12345
+```
+
+Using this workflow, Focaccia can determine whether a mistranslation occured in that particular QEMU run.
 
 ## Tools
 
