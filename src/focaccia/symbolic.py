@@ -663,8 +663,9 @@ def collect_symbolic_trace(env: TraceEnvironment,
         # Predict next concrete state.
         # We verify the symbolic execution backend on the fly for some
         # additional protection from bugs in the backend.
-        predicted_regs = transform.eval_register_transforms(lldb_state)
-        predicted_mems = transform.eval_memory_transforms(lldb_state)
+        if env.cross_validate:
+            predicted_regs = transform.eval_register_transforms(lldb_state)
+            predicted_mems = transform.eval_memory_transforms(lldb_state)
 
         # Step forward
         target.step()
@@ -674,23 +675,25 @@ def collect_symbolic_trace(env: TraceEnvironment,
         # Verify last generated transform by comparing concrete state against
         # predicted values.
         assert(len(strace) > 0)
-        for reg, val in predicted_regs.items():
-            conc_val = lldb_state.read_register(reg)
-            if conc_val != val:
-                warn(f'Symbolic execution backend generated false equation for'
-                     f' [{hex(instruction.addr)}]: {instruction}:'
-                     f' Predicted {reg} = {hex(val)}, but the'
-                     f' concrete state has value {reg} = {hex(conc_val)}.'
-                     f'\nFaulty transformation: {transform}')
-        for addr, data in predicted_mems.items():
-            conc_data = lldb_state.read_memory(addr, len(data))
-            if conc_data != data:
-                warn(f'Symbolic execution backend generated false equation for'
-                     f' [{hex(instruction.addr)}]: {instruction}: Predicted'
-                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
-                     f' but the concrete state has value'
-                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
-                     f'\nFaulty transformation: {transform}')
-                raise Exception()
+        if env.cross_validate:
+            for reg, val in predicted_regs.items():
+                conc_val = lldb_state.read_register(reg)
+                if conc_val != val:
+                    warn(f'Symbolic execution backend generated false equation for'
+                         f' [{hex(instruction.addr)}]: {instruction}:'
+                         f' Predicted {reg} = {hex(val)}, but the'
+                         f' concrete state has value {reg} = {hex(conc_val)}.'
+                         f'\nFaulty transformation: {transform}')
+            for addr, data in predicted_mems.items():
+                conc_data = lldb_state.read_memory(addr, len(data))
+                if conc_data != data:
+                    warn(f'Symbolic execution backend generated false equation for'
+                         f' [{hex(instruction.addr)}]: {instruction}: Predicted'
+                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
+                         f' but the concrete state has value'
+                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
+                         f'\nFaulty transformation: {transform}')
+                    raise Exception()
 
     return Trace(strace, env)
+

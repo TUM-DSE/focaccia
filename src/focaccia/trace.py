@@ -10,11 +10,13 @@ class TraceEnvironment:
     def __init__(self,
                  binary: str,
                  argv: list[str],
+                 cross_validate: bool,
                  envp: list[str],
                  binary_hash: str | None = None):
         self.argv = argv
         self.envp = envp
         self.binary_name = binary
+        self.cross_validate = cross_validate
         if binary_hash is None:
             self.binary_hash = file_hash(binary)
         else:
@@ -26,6 +28,7 @@ class TraceEnvironment:
         return cls(
             json['binary_name'],
             json['argv'],
+            json['cross_validate'],
             json['envp'],
             json['binary_hash'],
         )
@@ -36,6 +39,7 @@ class TraceEnvironment:
             'binary_name': self.binary_name,
             'binary_hash': self.binary_hash,
             'argv': self.argv,
+            'cross_validate': self.cross_validate,
             'envp': self.envp,
         }
 
@@ -46,11 +50,13 @@ class TraceEnvironment:
         return self.binary_name == other.binary_name \
             and self.binary_hash == other.binary_hash \
             and self.argv == other.argv \
+            and self.cross_validate == other.cross_validate \
             and self.envp == other.envp
 
     def __repr__(self) -> str:
         return f'{self.binary_name} {" ".join(self.argv)}' \
                f'\n   bin-hash={self.binary_hash}' \
+               f'\n   options=cross-validate' \
                f'\n   envp={repr(self.envp)}'
 
 class Trace(Generic[T]):
@@ -72,3 +78,4 @@ class Trace(Generic[T]):
     def __repr__(self) -> str:
         return f'Trace with {len(self.states)} trace points.' \
                f' Environment: {repr(self.env)}'
+

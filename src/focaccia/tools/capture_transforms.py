@@ -16,9 +16,12 @@ def main():
     prog.add_argument('-o', '--output',
                       default='trace.out',
                       help='Name of output file. (default: trace.out)')
+    prog.add_argument('-c', '--cross-validate',
+                      default=False,
+                      help='Cross-validate symbolic equations with concrete values')
     args = prog.parse_args()
 
-    env = TraceEnvironment(args.binary, args.args, utils.get_envp())
+    env = TraceEnvironment(args.binary, args.args, args.cross_validate, utils.get_envp())
     trace = collect_symbolic_trace(env, None)
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
