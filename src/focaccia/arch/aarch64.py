@@ -90,6 +90,8 @@ registers = [
          ('F',    6, 7),
          ('M',    0, 4),
     ),
+
+    _Reg(('TPIDR', 0, 64)),
 ]
 
 # Names of registers in the architecture
@@ -128,6 +130,7 @@ regname_aliases = {
     'Q29': 'V29',
     'Q30': 'V30',
     'Q31': 'V31',
+    'TPIDR_EL0': 'TPIDR',
 }
 
 def decompose_cpsr(cpsr: int) -> dict[str, int]:
