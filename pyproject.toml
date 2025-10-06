@@ -12,6 +12,7 @@ authors = [
 	{name = "Alp Berkman", email="alpberkman@gmail.com"}
 ]
 dependencies = [
+	"cffi",
 	"miasm",
 	"setuptools",
 	"cpuid @ git+https://github.com/taugoust/cpuid.py.git@master",

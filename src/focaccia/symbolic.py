@@ -594,12 +594,10 @@ class _LLDBConcreteState(ReadableProgramState):
 
     def read_register(self, reg: str) -> int:
         regname = self.arch.to_regname(reg)
-        if regname is None and reg != "DCZID_EL0":
+        if regname is None:
             raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
         try:
-            if reg == "DCZID_EL0":
-                return 4
             return self._target.read_register(regname)
         except ConcreteRegisterError:
             raise RegisterAccessError(regname, '')

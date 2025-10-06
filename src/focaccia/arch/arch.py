@@ -1,4 +1,5 @@
 from typing import Literal
+from collections.abc import Callable
 
 class RegisterAccessor:
     def __init__(self, regname: str, start_bit: int, end_bit: int):
@@ -76,6 +77,9 @@ class Arch():
         """
         _regname = self.to_regname(regname)
         return self._accessors.get(_regname, None)
+
+    def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
+        return None
 
     def __eq__(self, other):
         return self.archname == other.archname

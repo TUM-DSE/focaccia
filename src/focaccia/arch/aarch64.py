@@ -1,5 +1,7 @@
 """Description of 64-bit ARM."""
 
+from collections.abc import Callable
+
 from .arch import Arch, RegisterDescription as _Reg
 
 archname = 'aarch64'
@@ -131,6 +133,7 @@ regname_aliases = {
     'Q30': 'V30',
     'Q31': 'V31',
     'TPIDR_EL0': 'TPIDR',
+    'DCZID_EL0': 'DCZID',
 }
 
 def decompose_cpsr(cpsr: int) -> dict[str, int]:
@@ -166,4 +169,10 @@ class ArchAArch64(Arch):
             return reg
 
         return regname_aliases.get(name.upper(), None)
+
+    def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
+        if regname == 'DCZID':
+            from . import aarch64_dczid as dczid
+            return dczid.read
+        return None
 

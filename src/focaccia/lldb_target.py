@@ -201,6 +201,9 @@ class LLDBConcreteTarget:
             flags = self.read_flags()
             if regname in flags:
                 return flags[regname]
+            reader = self.arch.get_reg_reader(regname)
+            if reader:
+                return reader()
             raise ConcreteRegisterError(
                 f'[In LLDBConcreteTarget.read_register]: Unable to read'
                 f' register {regname}: {err}')
