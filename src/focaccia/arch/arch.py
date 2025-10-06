@@ -73,12 +73,20 @@ class Arch():
     def get_reg_accessor(self, regname: str) -> RegisterAccessor | None:
         """Get an accessor for a register name, which may be an alias.
 
-        Is used internally by ProgramState to access aliased registers.
+        It is used internally by ProgramState to access aliased registers.
         """
         _regname = self.to_regname(regname)
         return self._accessors.get(_regname, None)
 
     def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
+        """Read a register directly from Focaccia
+
+        :param name: The register to read.
+        :return: The register value.
+
+        It is used to enable reading registers that would otherwise not be accessible by other
+        means. Only meant to replace reading from the program directly for system-level constants.
+        """
         return None
 
     def __eq__(self, other):
