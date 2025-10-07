@@ -81,7 +81,7 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
             })
         res['snapshots'].append({ 'registers': regs, 'memory': mem })
 
-    json.dump(res, out_stream)
+    json.dump(res, out_stream, indent=4)
 
 def _make_unknown_env() -> TraceEnvironment:
     return TraceEnvironment('', [], [], '?')
