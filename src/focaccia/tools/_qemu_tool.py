@@ -7,6 +7,7 @@ work to do.
 """
 
 import gdb
+import traceback
 from typing import Iterable
 
 import focaccia.parser as parser
@@ -39,11 +40,15 @@ class GDBProgramState(ReadableProgramState):
         self._frame = frame
 
     @staticmethod
-    def _read_vector_reg_aarch64(val, size) -> int:
-        return int(str(val['u']), 10)
+    def _read_vector_reg_aarch64(val: gdb.Value, size) -> int:
+        try:
+            return int(str(val['d']['u']), 10)
+        except:
+            # print(f"Val is {val}")
+            return int(str(val['u']), 10)
 
     @staticmethod
-    def _read_vector_reg_x86(val, size) -> int:
+    def _read_vector_reg_x86(val: gdb.Value, size) -> int:
         num_longs = size // 64
         vals = val[f'v{num_longs}_int64']
         res = 0
@@ -276,6 +281,9 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             symb_i += 1
         except StopIteration:
             break
+        except Exception as e:
+            print(traceback.format_exc())
+            raise e
 
     return states, matched_transforms
 
@@ -296,9 +304,12 @@ def main():
         symb_transforms = parser.parse_transformations(strace)
 
     # Use symbolic trace to collect concrete trace from QEMU
-    conc_states, matched_transforms = collect_conc_trace(
-        gdb_server,
-        symb_transforms.states)
+    try:
+        conc_states, matched_transforms = collect_conc_trace(
+            gdb_server,
+            symb_transforms.states)
+    except:
+        raise Exception(f'Failed to collect concolic trace from QEMU')
 
     # Verify and print result
     if not args.quiet:
