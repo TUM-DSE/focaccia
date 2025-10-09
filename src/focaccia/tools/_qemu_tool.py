@@ -44,7 +44,10 @@ class GDBProgramState(ReadableProgramState):
         try:
             return int(str(val['d']['u']), 10)
         except:
-            return int(str(val['u']), 10)
+            try:
+                return int(str(val['u']), 10)
+            except:
+                return int(str(val['q']['u']), 10)
 
     @staticmethod
     def _read_vector_reg_x86(val: gdb.Value, size) -> int:
