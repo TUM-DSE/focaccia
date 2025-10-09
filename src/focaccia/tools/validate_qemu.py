@@ -60,6 +60,10 @@ memory, and stepping forward by single instructions.
     prog.add_argument('--error-level',
                       default='warning',
                       choices=list(verbosity.keys()))
+    prog.add_argument('--executable',
+                      default=None,
+                      help='The executable executed under QEMU, overrides the auto-detected' \
+                            'executable')
     return prog
 
 def quoted(s: str) -> str:

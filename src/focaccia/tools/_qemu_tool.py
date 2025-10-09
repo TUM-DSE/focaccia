@@ -44,7 +44,6 @@ class GDBProgramState(ReadableProgramState):
         try:
             return int(str(val['d']['u']), 10)
         except:
-            # print(f"Val is {val}")
             return int(str(val['u']), 10)
 
     @staticmethod
@@ -107,6 +106,7 @@ class GDBServerStateIterator:
     def __init__(self, address: str, port: int):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
+        gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {address}:{port}')
         self._process = gdb.selected_inferior()
         self._first_next = True
@@ -292,16 +292,30 @@ def main():
 
     gdbserver_addr = 'localhost'
     gdbserver_port = args.port
-    gdb_server = GDBServerStateIterator(gdbserver_addr, gdbserver_port)
 
-    executable = gdb_server.binary
-    argv = []  # QEMU's GDB stub does not support 'info proc cmdline'
-    envp = []  # Can't get the remote target's environment
-    env = TraceEnvironment(executable, argv, envp, '?')
+    try:
+        gdb_server = GDBServerStateIterator(gdbserver_addr, gdbserver_port)
+    except:
+        raise Exception(f'Unable to perform basic GDB setup')
+
+    try:
+        if args.executable is None:
+            executable = gdb_server.binary
+        else:
+            executable = args.executable
+
+        argv = []  # QEMU's GDB stub does not support 'info proc cmdline'
+        envp = []  # Can't get the remote target's environment
+        env = TraceEnvironment(executable, argv, envp, '?')
+    except:
+        raise Exception(f'Unable to create trace environment for executable {executable}')
 
     # Read pre-computed symbolic trace
-    with open(args.symb_trace, 'r') as strace:
-        symb_transforms = parser.parse_transformations(strace)
+    try:
+        with open(args.symb_trace, 'r') as strace:
+            symb_transforms = parser.parse_transformations(strace)
+    except:
+        raise Exception('Failed to parse state transformations from native trace')
 
     # Use symbolic trace to collect concrete trace from QEMU
     try:
@@ -313,13 +327,19 @@ def main():
 
     # Verify and print result
     if not args.quiet:
-        res = compare_symbolic(conc_states, matched_transforms)
-        print_result(res, verbosity[args.error_level])
+        try:
+            res = compare_symbolic(conc_states, matched_transforms)
+            print_result(res, verbosity[args.error_level])
+        except:
+            raise Exception('Error occured when comparing with symbolic equations')
 
     if args.output:
         from focaccia.parser import serialize_snapshots
-        with open(args.output, 'w') as file:
-            serialize_snapshots(Trace(conc_states, env), file)
+        try:
+            with open(args.output, 'w') as file:
+                serialize_snapshots(Trace(conc_states, env), file)
+        except:
+            raise Exception(f'Unable to serialize snapshots to file {args.output}')
 
 if __name__ == "__main__":
     main()
