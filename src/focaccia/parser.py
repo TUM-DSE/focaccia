@@ -36,7 +36,7 @@ def serialize_transformations(transforms: Trace[SymbolicTransform],
     json.dump({
         'env': transforms.env.to_json(),
         'states': [t.to_json() for t in transforms],
-    }, out_stream)
+    }, out_stream, indent=4)
 
 def parse_snapshots(json_stream: TextIO) -> Trace[ProgramState]:
     """Parse snapshots from our JSON format."""
