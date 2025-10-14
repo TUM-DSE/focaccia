@@ -113,20 +113,23 @@ wheels = [
 
 [[package]]
 name = "miasm"
-version = "0.1.4"
+version = "0.1.5"
 source = { directory = "miasm" }
 dependencies = [
     { name = "future", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "pyparsing", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "setuptools", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "future" },
-    { name = "pyparsing" },
-    { name = "setuptools" },
+    { name = "llvmlite", marker = "extra == 'dev'" },
+    { name = "parameterized", marker = "extra == 'dev'" },
+    { name = "pycparser", marker = "extra == 'dev'" },
+    { name = "pyparsing", specifier = ">=2.4.1" },
+    { name = "z3-solver", marker = "extra == 'dev'" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "mypy-extensions"

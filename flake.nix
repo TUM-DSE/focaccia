@@ -118,7 +118,7 @@
 					fileset = pkgs.lib.fileset.unions [
 						(old.src + "/pyproject.toml")
 						(old.src + "/README.md")
-						(old.src + "/miasm/__init__.py")
+						(old.src + "/src/miasm/__init__.py")
 					];
 				};
 			});
