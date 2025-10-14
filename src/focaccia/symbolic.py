@@ -56,9 +56,12 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
                              f' that contain IR location expressions.')
 
     res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
-    assert(isinstance(res, ExprInt))  # Must be either ExprInt or ExprLoc,
-                                      # but ExprLocs are disallowed by the
-                                      # ConcreteStateWrapper
+
+    # Must be either ExprInt or ExprLoc,
+    # but ExprLocs are disallowed by the
+    # ConcreteStateWrapper
+    if not isinstance(res, ExprInt):
+        raise Exception(f'{res} from symbol {symbol} is not an instance of ExprInt but only ExprInt can be evaluated')
     return int(res)
 
 class Instruction:
