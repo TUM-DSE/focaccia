@@ -62,7 +62,7 @@ def parse_snapshots(json_stream: TextIO) -> Trace[ProgramState]:
 def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
     """Serialize a list of snapshots to out JSON format."""
     if not snapshots:
-        return json.dump({}, out_stream)
+        return json.dump({}, out_stream, indent = 4)
 
     arch = snapshots[0].arch
     res = {
