@@ -202,3 +202,9 @@ class ArchX86(Arch):
 
         # Apply custom register alias rules
         return regname_aliases.get(name.upper(), None)
+
+    def is_instr_uarch_dep(self, instr: str) -> bool:
+        if "XGETBV" in instr.upper():
+            return True
+        return False
+
