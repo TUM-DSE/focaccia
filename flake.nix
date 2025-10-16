@@ -201,6 +201,10 @@
 		'';
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
+
+		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (_: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -295,6 +299,21 @@
 				packages = [
 					packages.dev
 					musl-pkgs.gcc
+					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+
+			musl-all = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					musl-pkgs.gcc
+					musl-redis-nocheck
 					musl-pkgs.pkg-config
 				];
 
