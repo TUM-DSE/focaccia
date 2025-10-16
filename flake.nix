@@ -248,6 +248,10 @@
 		'';
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
+
+		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (_: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -363,6 +367,21 @@
                   export BOX64_DYNAREC_DF=0
                   export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${zydis-shared-object}/lib
                 '';
+			};
+
+			musl-all = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					musl-pkgs.gcc
+					musl-redis-nocheck
+					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 		};
 
