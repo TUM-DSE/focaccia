@@ -122,11 +122,14 @@ class SymbolicTransform:
                  from_addr: int,
                  to_addr: int):
         """
-        :param state: The symbolic transformation in the form of a SimState
-                      object.
-        :param first_inst: An instruction address. The transformation
-                           represents the modifications to the program state
-                           performed by this instruction.
+        :param transform: A map of input symbolic expressions and output symbolic expressions.
+        :param instrs: A list of instructions. The transformation
+                       represents the collective modifications to the program state
+                       performed by these instructions.
+        :param arch: The architecture of the symbolic transformaion.
+        :param from_addr: The starting address of the instruction effecting the symbolic
+                          transformation.
+        :param to_addr: The final address of the last instruction in the instructions list.
         """
         self.arch = arch
 

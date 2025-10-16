@@ -79,7 +79,7 @@ class Arch():
         return self._accessors.get(_regname, None)
 
     def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
-        """Read a register directly from Focaccia
+        """Read a register directly from Focaccia.
 
         :param name: The register to read.
         :return: The register value.
@@ -88,6 +88,19 @@ class Arch():
         means. Only meant to replace reading from the program directly for system-level constants.
         """
         return None
+
+    def is_instr_uarch_dep(self, instr: str) -> bool:
+        """Returns true when an instruction is microarchitecturally-dependent.
+
+        :param name: The instruction.
+        :return: True if microarchitecturally-dependent.
+
+        Microarchitecturally-dependent instructions may have different output on different
+        microarchitectures, without it representing an error. Such instructions usually denote feature
+        support, output differences are representative of an error only if a program relies on the
+        particular microarchitectural features.
+        """
+        return False
 
     def __eq__(self, other):
         return self.archname == other.archname
