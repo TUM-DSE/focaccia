@@ -131,7 +131,8 @@ def compare_simple(test_states: list[ProgramState],
 
 def _find_register_errors(txl_from: ProgramState,
                           txl_to: ProgramState,
-                          transform_truth: SymbolicTransform) \
+                          transform_truth: SymbolicTransform,
+                          is_uarch_dep: bool = False) \
         -> list[Error]:
     """Find errors in register values.
 
@@ -155,6 +156,14 @@ def _find_register_errors(txl_from: ProgramState,
         )]
     except RegisterAccessError as err:
         s, e = transform_truth.range
+        if is_uarch_dep:
+            return [Error(ErrorTypes.INCOMPLETE,
+                          f'Register transformations {hex(s)} -> {hex(e)} depend'
+                          f' on the value of microarchitecturally-dependent register {err.regname}, which is not'
+                          f' set in the tested state. Incorrect or missing values for such registers'
+                          f'are errors only if the program relies on them. Such registers generally'
+                          f'denote microarchitectural feature support and not all programs depend on'
+                          f'all features exposed by a microarchitecture')]
         return [Error(ErrorTypes.INCOMPLETE,
                       f'Register transformations {hex(s)} -> {hex(e)} depend'
                       f' on the value of register {err.regname}, which is not'
@@ -172,10 +181,21 @@ def _find_register_errors(txl_from: ProgramState,
             continue
 
         if txl_val != truth_val:
-            errors.append(Error(ErrorTypes.CONFIRMED,
-                                f'Content of register {regname} is false.'
-                                f' Expected value: {hex(truth_val)}, actual'
-                                f' value in the translation: {hex(txl_val)}.'))
+            if is_uarch_dep:
+                errors.append(
+                    Error(
+                        ErrorTypes.POSSIBLE,
+                        f"Content of microarchitecture-specific register {regname} is different."
+                        f"This denotes an error only when relied upon"
+                        f" Expected value: {hex(truth_val)}, actual"
+                        f" value in the translation: {hex(txl_val)}.",
+                    )
+                )
+            else:
+                errors.append(Error(ErrorTypes.CONFIRMED,
+                                    f'Content of register {regname} is false.'
+                                    f' Expected value: {hex(truth_val)}, actual'
+                                    f' value in the translation: {hex(txl_val)}.'))
     return errors
 
 def _find_memory_errors(txl_from: ProgramState,
@@ -252,8 +272,10 @@ def _find_errors_symbolic(txl_from: ProgramState,
     to_pc = txl_to.read_register('PC')
     assert((from_pc, to_pc) == transform_truth.range)
 
+    is_uarch_dep = txl_from.arch.is_instr_uarch_dep(transform_truth.instructions[0].to_string())
+
     errors = []
-    errors.extend(_find_register_errors(txl_from, txl_to, transform_truth))
+    errors.extend(_find_register_errors(txl_from, txl_to, transform_truth, is_uarch_dep))
     errors.extend(_find_memory_errors(txl_from, txl_to, transform_truth))
 
     return errors
