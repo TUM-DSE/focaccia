@@ -254,6 +254,10 @@
 			version = "git";
 			src = ./rr;
 		});
+
+		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (_: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -390,9 +394,25 @@
 				packages = [
 					packages.dev
 					rr
-					musl-pkgs.gcc
 					pkgs.capnproto
+					musl-pkgs.gcc
 					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+
+			musl-all = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					pkgs.capnproto
+					musl-pkgs.gcc
+					musl-pkgs.pkg-config
+					musl-redis-nocheck
 				];
 
 				hardeningDisable = [ "pie" ];
