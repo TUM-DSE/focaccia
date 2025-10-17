@@ -20,10 +20,13 @@ def main():
                       default=False,
                       action='store_true',
                       help='Cross-validate symbolic equations with concrete values')
+    prog.add_argument('-r', '--remote',
+                      default=False,
+                      help='Remote target to trace (e.g. 127.0.0.1:12345)')
     args = prog.parse_args()
 
     env = TraceEnvironment(args.binary, args.args, args.cross_validate, utils.get_envp())
-    trace = collect_symbolic_trace(env, None)
+    trace = collect_symbolic_trace(env, None, remote=args.remote)
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
 
