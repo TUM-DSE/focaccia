@@ -316,3 +316,8 @@ class LLDBConcreteTarget:
                 if s.GetStartAddress().GetLoadAddress(self.target) > addr:
                     addr = s.GetEndAddress().GetLoadAddress(self.target)
         return addr
+
+    def get_disassembly(self, addr: int) -> str:
+        inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0]
+        return f'{inst.GetMnemonic(self.target)} {inst.GetOperands(self.target)}'
+
