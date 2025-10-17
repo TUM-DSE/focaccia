@@ -61,32 +61,66 @@ class LLDBConcreteTarget:
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(False)
-        self.target = self.debugger.CreateTargetWithFileAndArch(executable,
-                                                                lldb.LLDB_ARCH_DEFAULT)
+        self.target = self.debugger.CreateTargetWithFileAndArch(executable, lldb.LLDB_ARCH_DEFAULT)
+        
         self.module = self.target.FindModule(self.target.GetExecutable())
         self.interpreter = self.debugger.GetCommandInterpreter()
 
         # Set up objects for process execution
         self.error = lldb.SBError()
         self.listener = self.debugger.GetListener()
-        self.process = self.target.Launch(self.listener,
-                                          argv, envp,        # argv, envp
-                                          None, None, None,  # stdin, stdout, stderr
-                                          None,              # working directory
-                                          0,
-                                          True, self.error)
-        if not self.process.IsValid():
-            raise RuntimeError(f'[In LLDBConcreteTarget.__init__]: Failed to'
-                               f' launch process.')
 
         # Determine current arch
-        self.archname = self.target.GetPlatform().GetTriple().split('-')[0]
-        if self.archname not in supported_architectures:
-            err = f'LLDBConcreteTarget: Architecture {self.archname} is not' \
+        self.archname = self.determine_arch()
+        self.arch = supported_architectures[self.archname]
+
+    @classmethod
+    def from_executable(cls, 
+                        executable: str,
+                        argv: list[str] = [],
+                        envp: list[str] | None = None):
+        """Construct an LLDB concrete target. Stop at entry.
+
+        :param argv: List of arguements. Does NOT include the conventional
+                     executable name as the first entry.
+        :param envp: List of environment entries. Defaults to current
+                     `os.environ` if `None`.
+        :raises RuntimeError: If the process is unable to launch.
+        """
+        obj = cls(executable, argv, envp)
+        obj.process = obj.target.Launch(obj.listener,
+                                        argv, envp,        # argv, envp
+                                        None, None, None,  # stdin, stdout, stderr
+                                        None,              # working directory
+                                        0,
+                                        True, obj.error)
+        if not obj.target.process.IsValid():
+            raise RuntimeError(f'Failed to launch LLDB target')
+        return obj
+
+    @classmethod
+    def with_remote(cls, 
+                    remote: str,
+                    executable: str, 
+                    argv: list[str] = [],
+                    envp: list[str] | None = None):
+        obj = cls(executable, argv, envp)
+        obj.process = obj.target.ConnectRemote(obj.listener,
+                                               f'connect://{remote}',
+                                               None,
+                                               obj.error)
+        if not obj.target.process.IsValid():
+            raise RuntimeError('Failed to connect via LLDB to remote target')
+        return obj
+
+    def determine_arch(self):
+        archname = self.target.GetPlatform().GetTriple().split('-')[0]
+        if archname not in supported_architectures:
+            err = f'LLDBConcreteTarget: Architecture {archname} is not' \
                   f' supported by Focaccia.'
             print(f'[ERROR] {err}')
             raise NotImplementedError(err)
-        self.arch = supported_architectures[self.archname]
+        return archname
 
     def is_exited(self):
         """Signals whether the concrete process has exited.
@@ -99,8 +133,8 @@ class LLDBConcreteTarget:
         """Continue execution of the concrete process."""
         state = self.process.GetState()
         if state == lldb.eStateExited:
-            raise RuntimeError(f'Tried to resume process execution, but the'
-                               f' process has already exited.')
+            raise RuntimeError('Tried to resume process execution, but the'
+                               ' process has already exited.')
         assert(state == lldb.eStateStopped)
         self.process.Continue()
 

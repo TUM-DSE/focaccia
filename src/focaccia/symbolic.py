@@ -617,7 +617,8 @@ class _LLDBConcreteState(ReadableProgramState):
             raise MemoryAccessError(addr, size, 'Unable to read memory from LLDB.')
 
 def collect_symbolic_trace(env: TraceEnvironment,
-                           start_addr: int | None = None
+                           start_addr: int | None = None,
+                           remote: str | None = None,
                            ) -> Trace[SymbolicTransform]:
     """Execute a program and compute state transformations between executed
     instructions.
@@ -628,7 +629,12 @@ def collect_symbolic_trace(env: TraceEnvironment,
     binary = env.binary_name
 
     # Set up concrete reference state
-    target = LLDBConcreteTarget(binary, env.argv, env.envp)
+    target = None
+    if remote:
+        target = LLDBConcreteTarget.with_remote(remote, binary, env.argv, env.envp)
+    else:
+        target = LLDBConcreteTarget.from_executable(binary, env.argv, env.envp)
+
     if start_addr is not None:
         target.run_until(start_addr)
     lldb_state = _LLDBConcreteState(target)
