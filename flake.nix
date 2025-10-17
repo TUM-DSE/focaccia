@@ -54,6 +54,30 @@
 			};
 		};
 
+		minimal-compile-flags = " -mno-xsave -mno-xsaveopt -mno-xsavec -mno-xsaves -mno-avx" +
+					  			" -mno-avx2 -mno-avx512f";
+		musl-minimal-pkgs = import nixpkgs {
+			inherit system;
+			crossSystem = {
+				config = "${system}-musl";
+			};
+			overlays = [
+				(final: prev: {
+					stdenv = prev.stdenv.override (old: {
+						cc = if old.cc != null then old.cc.overrideAttrs (ccOld: {
+							env = let
+								oldEnv = ccOld.env or {};
+								oldFlags = oldEnv.NIX_CFLAGS_COMPILE or "";
+							in
+							oldEnv // {
+								NIX_CFLAGS_COMPILE = oldFlags + minimal-compile-flags;
+							};
+						}) else null;
+					});
+				})
+			];
+		};
+
 		# Pin Python version
 		python = pkgs.python312;
 
@@ -249,14 +273,8 @@
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
 
-		redis-flags = " -mno-xsave -mno-xsaveopt -mno-xsavec -mno-xsaves -mno-avx" +
-					  " -mno-avx2 -mno-avx512f";
-		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (old: rec {
+		musl-minimal-redis-nocheck = musl-minimal-pkgs.pkgsStatic.redis.overrideAttrs (old: {
 			doCheck = false;
-			env = (old.env or {}) // {
-				NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + redis-flags;
-			};
-			makeFlags = (old.makeFlags or []) ++ [ "CFLAGS=${env.NIX_CFLAGS_COMPILE}" ];
 		});
 	in rec {
 		# Default package just builds Focaccia
@@ -380,8 +398,8 @@
 					packages.dev
 					pkgs.rr
 					musl-pkgs.gcc
-					musl-redis-nocheck
 					musl-pkgs.pkg-config
+					musl-minimal-redis-nocheck
 				];
 
 				hardeningDisable = [ "pie" ];
