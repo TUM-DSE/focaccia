@@ -646,7 +646,14 @@ def collect_symbolic_trace(env: TraceEnvironment,
             instr = ctx.mdis.dis_instr(pc)
         except:
             err = sys.exc_info()[1]
-            warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
+
+            # Try to get the LLDB disassembly instead to simplify debugging
+            try:
+                alt_disas = target.get_disassembly(pc)
+            except:
+                warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
+                     f' Skipping.')
+            warn(f'Unable to disassemble instruction {alt_disas} at {hex(pc)}: {err}.'
                  f' Skipping.')
             target.step()
             continue
