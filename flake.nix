@@ -249,8 +249,14 @@
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
 
-		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (_: {
+		redis-flags = " -mno-xsave -mno-xsaveopt -mno-xsavec -mno-xsaves -mno-avx" +
+					  " -mno-avx2 -mno-avx512f";
+		musl-redis-nocheck = musl-pkgs.pkgsStatic.redis.overrideAttrs (old: rec {
 			doCheck = false;
+			env = (old.env or {}) // {
+				NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + redis-flags;
+			};
+			makeFlags = (old.makeFlags or []) ++ [ "CFLAGS=${env.NIX_CFLAGS_COMPILE}" ];
 		});
 	in rec {
 		# Default package just builds Focaccia
