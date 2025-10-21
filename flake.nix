@@ -366,6 +366,20 @@
                   export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${zydis-shared-object}/lib
                 '';
 			};
+
+			musl-extra = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					musl-pkgs.gcc
+					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
 		};
 
 		checks = {
