@@ -26,6 +26,7 @@ concrete_trace_parsers = {
     'focaccia': lambda f, _: parser.parse_snapshots(f),
     'qemu':     parser.parse_qemu,
     'arancini': parser.parse_arancini,
+    'box64': parser.parse_box64,
 }
 
 _MatchingAlgorithm = Callable[
