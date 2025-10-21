@@ -393,6 +393,20 @@
                 '';
 			};
 
+			musl-extra = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					musl-pkgs.gcc
+					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+
 			musl-all = pkgs.mkShell {
 				packages = [
 					packages.dev
