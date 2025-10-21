@@ -45,73 +45,28 @@ class LLDBConcreteTarget:
     }
 
     def __init__(self,
-                 executable: str,
-                 argv: list[str] = [],
-                 envp: list[str] | None = None):
+                 debugger: lldb.SBDebugger,
+                 target: lldb.SBTarget,
+                 process: lldb.SBProcess):
         """Construct an LLDB concrete target. Stop at entry.
 
-        :param argv: List of arguements. Does NOT include the conventional
-                     executable name as the first entry.
-        :param envp: List of environment entries. Defaults to current
-                     `os.environ` if `None`.
-        :raises RuntimeError: If the process is unable to launch.
+        :param debugger: LLDB SBDebugger object representing an initialized debug session.
+        :param target: LLDB SBTarget object representing an initialized target for the debugger.
+        :param process: LLDB SBProcess object representing an initialized process (either local or remote).
         """
-        if envp is None:
-            envp = [f'{k}={v}' for k, v in os.environ.items()]
+        self.debugger = debugger
+        self.target = target
+        self.process = process
 
-        self.debugger = lldb.SBDebugger.Create()
-        self.debugger.SetAsync(False)
-        self.target = self.debugger.CreateTargetWithFileAndArch(executable, lldb.LLDB_ARCH_DEFAULT)
-        
         self.module = self.target.FindModule(self.target.GetExecutable())
         self.interpreter = self.debugger.GetCommandInterpreter()
 
         # Set up objects for process execution
-        self.error = lldb.SBError()
         self.listener = self.debugger.GetListener()
 
         # Determine current arch
         self.archname = self.determine_arch()
         self.arch = supported_architectures[self.archname]
-
-    @classmethod
-    def from_executable(cls, 
-                        executable: str,
-                        argv: list[str] = [],
-                        envp: list[str] | None = None):
-        """Construct an LLDB concrete target. Stop at entry.
-
-        :param argv: List of arguements. Does NOT include the conventional
-                     executable name as the first entry.
-        :param envp: List of environment entries. Defaults to current
-                     `os.environ` if `None`.
-        :raises RuntimeError: If the process is unable to launch.
-        """
-        obj = cls(executable, argv, envp)
-        obj.process = obj.target.Launch(obj.listener,
-                                        argv, envp,        # argv, envp
-                                        None, None, None,  # stdin, stdout, stderr
-                                        None,              # working directory
-                                        0,
-                                        True, obj.error)
-        if not obj.target.process.IsValid():
-            raise RuntimeError(f'Failed to launch LLDB target')
-        return obj
-
-    @classmethod
-    def with_remote(cls, 
-                    remote: str,
-                    executable: str, 
-                    argv: list[str] = [],
-                    envp: list[str] | None = None):
-        obj = cls(executable, argv, envp)
-        obj.process = obj.target.ConnectRemote(obj.listener,
-                                               f'connect://{remote}',
-                                               None,
-                                               obj.error)
-        if not obj.target.process.IsValid():
-            raise RuntimeError('Failed to connect via LLDB to remote target')
-        return obj
 
     def determine_arch(self):
         archname = self.target.GetPlatform().GetTriple().split('-')[0]
@@ -354,4 +309,61 @@ class LLDBConcreteTarget:
     def get_disassembly(self, addr: int) -> str:
         inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0]
         return f'{inst.GetMnemonic(self.target)} {inst.GetOperands(self.target)}'
+
+class LLDBLocalTarget(LLDBConcreteTarget):
+    def __init__(self,
+                 executable: str,
+                 argv: list[str] = [],
+                 envp: list[str] | None = None):
+        """Construct an LLDB local target. Stop at entry.
+
+        :param executable: Name of executable to run under LLDB.
+        :param argv: List of arguements. Does NOT include the conventional
+                     executable name as the first entry.
+        :param envp: List of environment entries. Defaults to current
+                     `os.environ` if `None`.
+        :raises RuntimeError: If the process is unable to launch.
+        """
+        if envp is None:
+            envp = [f'{k}={v}' for k, v in os.environ.items()]
+
+        debugger = lldb.SBDebugger.Create()
+        debugger.SetAsync(False)
+        target = debugger.CreateTargetWithFileAndArch(executable, lldb.LLDB_ARCH_DEFAULT)
+        
+        # Set up objects for process execution
+        error = lldb.SBError()
+        process = target.Launch(debugger.GetListener(),
+                                argv, envp,        # argv, envp
+                                None, None, None,  # stdin, stdout, stderr
+                                None,              # working directory
+                                0,
+                                True, error)
+
+        if not target.process.IsValid():
+            raise RuntimeError(f'Failed to launch LLDB target: {error.GetCString()}')
+
+        super().__init__(debugger, target, process)
+
+class LLDBRemoteTarget(LLDBConcreteTarget):
+    def __init__(self, remote: str):
+        """Construct an LLDB remote target. Stop at entry.
+
+        :param remote: String of the form <remote_name>:<port> (e.g. localhost:12345).
+        :raises RuntimeError: If failing to attach to a remote debug session.
+        """
+        debugger = lldb.SBDebugger.Create()
+        debugger.SetAsync(False)
+        target = debugger.CreateTarget(None)
+        
+        # Set up objects for process execution
+        error = lldb.SBError()
+        process = target.ConnectRemote(debugger.GetListener(),
+                                       f'connect://{remote}',
+                                       None,
+                                       error)
+        if not target.process.IsValid():
+            raise RuntimeError(f'Failed to connect via LLDB to remote target: {error.GetCString()}')
+        
+        super().__init__(debugger, target, process)
 
