@@ -15,6 +15,8 @@ from miasm.ir.symbexec import SymbolicExecutionEngine
 
 from .arch import Arch, supported_architectures
 from .lldb_target import LLDBConcreteTarget, \
+                         LLDBLocalTarget, \
+                         LLDBRemoteTarget, \
                          ConcreteRegisterError, \
                          ConcreteMemoryError
 from .miasm_util import MiasmSymbolResolver, eval_expr, make_machine
@@ -629,9 +631,9 @@ def collect_symbolic_trace(env: TraceEnvironment,
     # Set up concrete reference state
     target = None
     if remote:
-        target = LLDBConcreteTarget.with_remote(remote, binary, env.argv, env.envp)
+        target = LLDBRemoteTarget(remote)
     else:
-        target = LLDBConcreteTarget.from_executable(binary, env.argv, env.envp)
+        target = LLDBLocalTarget(binary, env.argv, env.envp)
 
     if start_addr is not None:
         target.run_until(start_addr)
