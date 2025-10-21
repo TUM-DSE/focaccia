@@ -77,6 +77,14 @@ class LLDBConcreteTarget:
             raise NotImplementedError(err)
         return archname
 
+    def determine_name(self) -> str:
+        return self.process.GetProcessInfo().GetName()
+
+    def determine_arguments(self):
+        launch_info = self.target.GetLaunchInfo()
+        argc = self.target.GetLaunchInfo().GetNumArguments()
+        return [launch_info.GetArgumentAtIndex(i) for i in range(argc)]
+
     def is_exited(self):
         """Signals whether the concrete process has exited.
 
