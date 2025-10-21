@@ -25,6 +25,8 @@ from .snapshot import ProgramState, ReadableProgramState, \
 from .trace import Trace, TraceEnvironment
 
 logger = logging.getLogger('focaccia-symbolic')
+debug = logger.debug
+info = logger.info
 warn = logger.warn
 
 # Disable Miasm's disassembly logger
@@ -618,84 +620,54 @@ class _LLDBConcreteState(ReadableProgramState):
         except ConcreteMemoryError:
             raise MemoryAccessError(addr, size, 'Unable to read memory from LLDB.')
 
-def collect_symbolic_trace(env: TraceEnvironment,
-                           start_addr: int | None = None,
-                           remote: str | None = None,
-                           ) -> Trace[SymbolicTransform]:
-    """Execute a program and compute state transformations between executed
-    instructions.
+class SymbolicTracer:
+    def __init__(self, 
+                 env: TraceEnvironment, 
+                 remote: str | None=None,
+                 force: bool=False,
+                 cross_validate: bool=False):
+        self.env = env
+        self.force = force
+        self.remote = remote
+        self.cross_validate = cross_validate
 
-    :param binary: The binary to trace.
-    :param args:   Arguments to the program.
-    """
-    binary = env.binary_name
+    def create_debug_target(self) -> LLDBConcreteTarget:
+        binary = self.env.binary_name
+        if self.remote is False:
+            debug(f'Launching local debug target {binary} {self.env.argv}')
+            debug(f'Environment: {self.env}')
+            return LLDBLocalTarget(binary, self.env.argv, self.env.envp)
 
-    # Set up concrete reference state
-    target = None
-    if remote:
-        target = LLDBRemoteTarget(remote)
-    else:
-        target = LLDBLocalTarget(binary, env.argv, env.envp)
+        debug(f'Connecting to remote debug target {self.remote}')
+        target = LLDBRemoteTarget(self.remote)
 
-    if start_addr is not None:
-        target.run_until(start_addr)
-    lldb_state = _LLDBConcreteState(target)
+        module_name = target.determine_name()
+        if binary is None:
+            binary, self.env.binary_name = module_name, module_name
+        if binary != module_name:
+            warn(f'Discovered binary name {module_name} differs from specified name {binary}')
 
-    ctx = DisassemblyContext(lldb_state)
-    arch = ctx.arch
+        binary_args = target.determine_arguments()
+        if binary_args != self.env.argv:
+            warn(f'Discovered program arguments {binary_args} differ from those specified {self.env.argv}')
 
-    # Trace concolically
-    strace: list[SymbolicTransform] = []
-    while not target.is_exited():
-        pc = target.read_register('pc')
+        return target
 
-        # Disassemble instruction at the current PC
-        try:
-            instr = ctx.mdis.dis_instr(pc)
-            print(f'Disassembled instruction {instr} at {hex(pc)}')
-        except:
-            err = sys.exc_info()[1]
-
-            # Try to get the LLDB disassembly instead to simplify debugging
-            try:
-                alt_disas = target.get_disassembly(pc)
-            except:
-                warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
-                     f' Skipping.')
-            warn(f'Unable to disassemble instruction {alt_disas} at {hex(pc)}: {err}.'
-                 f' Skipping.')
-            target.step()
-            continue
-
-        # Run instruction
-        conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
-        new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
-
-        # Create symbolic transform
-        instruction = Instruction(instr, ctx.machine, ctx.arch, ctx.loc_db)
-        if new_pc is None:
-            new_pc = pc + instruction.length
-        else:
-            new_pc = int(new_pc)
-        transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
-        strace.append(transform)
-
-        # Predict next concrete state.
-        # We verify the symbolic execution backend on the fly for some
-        # additional protection from bugs in the backend.
-        if env.cross_validate:
+    def step_to_next(self, target, instruction, transform, lldb_state) -> bool:
+        if self.cross_validate:
+            debug(f'Evaluating register and memory transforms for {instruction} to cross-validate')
             predicted_regs = transform.eval_register_transforms(lldb_state)
             predicted_mems = transform.eval_memory_transforms(lldb_state)
 
         # Step forward
         target.step()
         if target.is_exited():
-            break
+            return False
 
         # Verify last generated transform by comparing concrete state against
         # predicted values.
-        assert(len(strace) > 0)
-        if env.cross_validate:
+        if self.cross_validate:
+            debug('Cross-validating symbolic transforms by comparing actual to predicted values')
             for reg, val in predicted_regs.items():
                 conc_val = lldb_state.read_register(reg)
                 if conc_val != val:
@@ -714,6 +686,68 @@ def collect_symbolic_trace(env: TraceEnvironment,
                          f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                          f'\nFaulty transformation: {transform}')
                     raise Exception()
+        return True
 
-    return Trace(strace, env)
+    def trace(self,
+              start_addr: int | None = None) -> Trace[SymbolicTransform]:
+        """Execute a program and compute state transformations between executed
+        instructions.
+
+        :param start_addr: Address from which to start tracing.
+        """
+        # Set up concrete reference state
+        target = self.create_debug_target()
+        if start_addr is not None:
+            target.run_until(start_addr)
+        lldb_state = _LLDBConcreteState(target)
+
+        ctx = DisassemblyContext(lldb_state)
+        arch = ctx.arch
+
+        # Trace concolically
+        strace: list[SymbolicTransform] = []
+        while not target.is_exited():
+            pc = target.read_register('pc')
+
+            # Disassemble instruction at the current PC
+            try:
+                instr = ctx.mdis.dis_instr(pc)
+                info(f'Disassembled instruction {instr} at {hex(pc)}')
+            except:
+                err = sys.exc_info()[1]
+
+                # Try to get the LLDB disassembly instead to simplify debugging
+                try:
+                    alt_disas = target.get_disassembly(pc)
+                except:
+                    warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
+                         f' Skipping.')
+                    continue
+
+                warn(f'Unable to disassemble instruction {alt_disas} at {hex(pc)}: {err}.'
+                     f' Skipping.')
+                target.step()
+                continue
+
+            # Run instruction
+            conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
+            new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
+
+            # Create symbolic transform
+            instruction = Instruction(instr, ctx.machine, ctx.arch, ctx.loc_db)
+            if new_pc is None:
+                new_pc = pc + instruction.length
+            else:
+                new_pc = int(new_pc)
+            transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
+            strace.append(transform)
+
+            if len(strace) == 0:
+                raise Exception(f'Unable to collect trace for instruction {instr}')
+
+            # Predict next concrete state.
+            # We verify the symbolic execution backend on the fly for some
+            # additional protection from bugs in the backend.
+            if not self.step_to_next(target, instr, transform, lldb_state):
+                return Trace(strace, self.env)
 
