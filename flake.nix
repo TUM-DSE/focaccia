@@ -200,15 +200,31 @@
 			export REPO_ROOT=$(git rev-parse --show-toplevel)
 		'';
 
+		checkSubmodulesInitialized = ''
+			if ! ${pkgs.git} submodule status --recursive >/dev/null 2>&1; then
+				printf 'Error: git submodules not initialized correctly, build cannot proceed\n'
+				printf 'Run git submodule update --init --recursive and then rebuild\n'
+				exit 2
+			fi
+		'';
+
 		gdbInternal = pkgs.gdb.override { python3 = python; };
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
 			focaccia = pythonEnv.overrideAttrs (old: {
+				buildPhase = ''
+					${checkSubmodulesInitialized}
+					${old.buildPhase or ""}
+				'';
 				propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ pkgs.lldb ];
 			});
 
 			dev = pythonDevEnv.overrideAttrs (old: {
+				buildPhase = ''
+					${checkSubmodulesInitialized}
+					${old.buildPhase or ""}
+				'';
 				propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ 
 					pkgs.uv
 					pkgs.lldb 
