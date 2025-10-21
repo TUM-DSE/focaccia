@@ -648,6 +648,7 @@ def collect_symbolic_trace(env: TraceEnvironment,
         # Disassemble instruction at the current PC
         try:
             instr = ctx.mdis.dis_instr(pc)
+            print(f'Disassembled instruction {instr} at {hex(pc)}')
         except:
             err = sys.exc_info()[1]
 
