@@ -315,8 +315,21 @@ class LLDBConcreteTarget:
         return addr
 
     def get_disassembly(self, addr: int) -> str:
-        inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0]
-        return f'{inst.GetMnemonic(self.target)} {inst.GetOperands(self.target)}'
+        inst: lldb.SBInstruction = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1, 'intel')[0]
+        mnemonic: str = inst.GetMnemonic(self.target).upper()
+        operands: str = inst.GetOperands(self.target).upper()
+        operands = operands.replace("0X", "0x")
+        return f'{mnemonic} {operands}'
+
+    def get_disassembly_bytes(self, addr: int):
+        error = lldb.SBError()
+        buf = self.process.ReadMemory(addr, 64, error)
+        inst = self.target.GetInstructions(lldb.SBAddress(addr, self.target), buf)[0]
+        return inst.GetData(self.target).ReadRawData(error, 0, inst.GetByteSize())
+
+    def get_instruction_size(self, addr: int) -> int:
+        inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1, 'intel')[0]
+        return inst.GetByteSize()
 
 class LLDBLocalTarget(LLDBConcreteTarget):
     def __init__(self,
