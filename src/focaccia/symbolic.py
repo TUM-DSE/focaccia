@@ -702,8 +702,12 @@ class SymbolicTracer:
         ctx = DisassemblyContext(lldb_state)
         arch = ctx.arch
 
+        # print(ctx.machine.mn().fromstring(str('add rdi, r11').upper(), ctx.loc_db, 'l'))
+        # quit()
+
         # Trace concolically
         strace: list[SymbolicTransform] = []
+        b = False
         while not target.is_exited():
             pc = target.read_register('pc')
 
@@ -717,15 +721,15 @@ class SymbolicTracer:
                 # Try to get the LLDB disassembly instead to simplify debugging
                 try:
                     alt_disas = target.get_disassembly(pc)
+                    instr = Instruction.from_string(alt_disas, ctx.arch, pc,
+                                                    target.get_instruction_size(pc))
+                    info(f'Disassembled instruction {instr} at {hex(pc)}')
+                    instr = instr.instr
                 except:
-                    warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
+                    warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
                          f' Skipping.')
+                    target.step()
                     continue
-
-                warn(f'Unable to disassemble instruction {alt_disas} at {hex(pc)}: {err}.'
-                     f' Skipping.')
-                target.step()
-                continue
 
             # Run instruction
             conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
