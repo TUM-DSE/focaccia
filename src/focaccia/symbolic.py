@@ -1,11 +1,9 @@
 """Tools and utilities for symbolic execution with Miasm."""
 
 from __future__ import annotations
-from typing import Iterable
 import logging
 import sys
 
-from miasm.analysis.binary import ContainerELF
 from miasm.analysis.machine import Machine
 from miasm.core.cpu import instruction as miasm_instr
 from miasm.core.locationdb import LocationDB
@@ -14,14 +12,15 @@ from miasm.ir.ir import Lifter
 from miasm.ir.symbexec import SymbolicExecutionEngine
 
 from .arch import Arch, supported_architectures
-from .lldb_target import LLDBConcreteTarget, \
-                         LLDBLocalTarget, \
-                         LLDBRemoteTarget, \
-                         ConcreteRegisterError, \
-                         ConcreteMemoryError
+from .lldb_target import (
+    LLDBConcreteTarget,
+    LLDBLocalTarget,
+    LLDBRemoteTarget,
+    ConcreteRegisterError,
+    ConcreteMemoryError,
+)
 from .miasm_util import MiasmSymbolResolver, eval_expr, make_machine
-from .snapshot import ProgramState, ReadableProgramState, \
-                      RegisterAccessError, MemoryAccessError
+from .snapshot import ReadableProgramState, RegisterAccessError, MemoryAccessError
 from .trace import Trace, TraceEnvironment
 
 logger = logging.getLogger('focaccia-symbolic')
@@ -56,8 +55,8 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
             return self._state.read_memory(addr, size)
 
         def resolve_location(self, loc):
-            raise ValueError(f'[In eval_symbol]: Unable to evaluate symbols'
-                             f' that contain IR location expressions.')
+            raise ValueError('[In eval_symbol]: Unable to evaluate symbols'
+                             ' that contain IR location expressions.')
 
     res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
 
@@ -619,6 +618,9 @@ class _LLDBConcreteState(ReadableProgramState):
             raise MemoryAccessError(addr, size, 'Unable to read memory from LLDB.')
 
 class SymbolicTracer:
+    """A symbolic tracer that uses `LLDBConcreteTarget` with Miasm to simultaneously execute a
+    program with concrete state and collect its symbolic transforms
+    """
     def __init__(self, 
                  env: TraceEnvironment, 
                  remote: str | None=None,
@@ -702,12 +704,8 @@ class SymbolicTracer:
         ctx = DisassemblyContext(lldb_state)
         arch = ctx.arch
 
-        # print(ctx.machine.mn().fromstring(str('add rdi, r11').upper(), ctx.loc_db, 'l'))
-        # quit()
-
         # Trace concolically
         strace: list[SymbolicTransform] = []
-        b = False
         while not target.is_exited():
             pc = target.read_register('pc')
 
