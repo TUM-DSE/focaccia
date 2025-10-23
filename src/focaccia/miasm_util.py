@@ -112,11 +112,7 @@ class MiasmSymbolResolver:
         return regname
 
     def resolve_register(self, regname: str) -> int | None:
-        try:
-            return self._state.read_register(self._miasm_to_regname(regname))
-        except RegisterAccessError as err:
-            print(f'Not a register: {regname} ({err})')
-            return None
+        return self._state.read_register(self._miasm_to_regname(regname))
 
     def resolve_memory(self, addr: int, size: int) -> bytes | None:
         try:
