@@ -26,6 +26,8 @@ It will take a while to compile.
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.
 
+### QEMU
+
 A number of additional tools are included to simplify use when validating QEMU:
 `capture-transforms`, `convert-log`, `validate-qemu`. They enable the following workflow.
 
@@ -36,6 +38,17 @@ validate-qemu --symb-trace oracle.trace localhost 12345
 ```
 
 Using this workflow, Focaccia can determine whether a mistranslation occured in that particular QEMU run.
+
+### Box64
+
+For validating Box64, we create the oracle and test traces and compare them
+using the main executable.
+
+```bash
+capture-transforms -o oracle.trace bug.out
+BOX64_TRACE_FILE=test.trace box64 bug.out
+focaccia -o oracle.trace --symbolic -t test.trace --test-trace-type box64 --error-level error
+```
 
 ## Tools
 
