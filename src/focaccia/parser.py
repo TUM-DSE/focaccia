@@ -84,7 +84,7 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
     json.dump(res, out_stream, indent=4)
 
 def _make_unknown_env() -> TraceEnvironment:
-    return TraceEnvironment('', [], [], '?')
+    return TraceEnvironment('', [], False, [], '?')
 
 def parse_qemu(stream: TextIO, arch: Arch) -> Trace[ProgramState]:
     """Parse a QEMU log from a stream.
