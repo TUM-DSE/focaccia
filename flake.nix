@@ -71,6 +71,60 @@
 			members = [ "focaccia" "miasm" ];
 		};
 
+        # Box64
+        zydis-shared-object = pkgs.zydis.overrideAttrs (oldAttrs: {
+          cmakeFlags = (oldAttrs.cmakeFlags or []) ++ [
+            "-DZYDIS_BUILD_SHARED_LIB=ON"
+          ];
+        });
+
+        repoSrc = pkgs.fetchFromGitHub {
+          owner = "ptitSeb";
+          repo = "box64";
+          rev = "74d4db051b4c74aaab23b19fbb51e441448faf8e";
+          sha256 = "sha256-G6tsqXsnTrs8I47YLnuivC79IFDGfbiLSm4J2Djc0kU=";
+        };
+
+        box64-patch = ./fix-box64.patch;
+
+        patched-box64 = pkgs.stdenv.mkDerivation {
+          name = "patched-source";
+          src = repoSrc;
+          patches = [ box64-patch ];
+          installPhase = ''
+            cp -r . $out
+          '';
+        };
+
+        box64-custom = pkgs.stdenv.mkDerivation rec {
+          pname = "box64";
+          version = "74d4db";
+
+          src = patched-box64;
+
+          nativeBuildInputs = with pkgs; [
+            cmake
+            pkg-config
+            zydis-shared-object
+            python314
+          ];
+
+          buildInputs = with pkgs; [
+          ];
+
+          cmakeFlags = [
+            "-DDYNAREC=ON"
+            "-DHAVE_TRACE=ON"
+          ];
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp box64 $out/bin/
+            runHook postInstall
+          '';
+        };
+
 		# Another overlay layer for flake-specific overloads
 		# This might be needed because uv does not have sufficient metadata
 		# Here, uv does include metadata about build systems used by each dependency
@@ -312,12 +366,18 @@
 					packages.dev
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
+                    box64-custom
 				];
 
 				hardeningDisable = [ "pie" ];
 
 				env = uvEnv;
-				shellHook = uvShellHook;
+				shellHook = uvShellHook + ''
+                  export BOX64_TRACE=1
+                  export BOX64_DYNAREC_TRACE=1
+                  export BOX64_DYNAREC_DF=0
+                  export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${zydis-shared-object}/lib
+                '';
 			};
 		};
 
