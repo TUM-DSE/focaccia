@@ -26,6 +26,10 @@ def main():
     prog.add_argument('--log-level',
                       default='info',
                       help='Set the logging level')
+    prog.add_argument('--force',
+                      default=False,
+                      action='store_true',
+                      help='Force Focaccia to continue tracing even when something goes wrong')
     prog.add_argument('--debug',
                       default=False,
                       action='store_true',
@@ -40,7 +44,8 @@ def main():
     logging.basicConfig(level=level)
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp())
-    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate)
+    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate,
+                            force=args.force)
     trace = tracer.trace()
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
