@@ -64,7 +64,8 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     # but ExprLocs are disallowed by the
     # ConcreteStateWrapper
     if not isinstance(res, ExprInt):
-        raise Exception(f'{res} from symbol {symbol} is not an instance of ExprInt but only ExprInt can be evaluated')
+        raise Exception(f'{res} from symbol {symbol} is not an instance of ExprInt'
+                        f' but only ExprInt can be evaluated')
     return int(res)
 
 class Instruction:
@@ -380,9 +381,9 @@ class SymbolicTransform:
             try:
                 return Instruction.from_string(text, arch, offset=0, length=length)
             except Exception as err:
-                warn(f'[In SymbolicTransform.from_json] Unable to parse'
-                     f' instruction string "{text}": {err}.')
-                return None
+                # Note: from None disables chaining in traceback
+                raise ValueError(f'[In SymbolicTransform.from_json] Unable to parse'
+                                 f' instruction string "{text}": {err}.') from None
 
         arch = supported_architectures[data['arch']]
         start_addr = int(data['from_addr'])
@@ -408,10 +409,10 @@ class SymbolicTransform:
             try:
                 return [inst.length, inst.to_string()]
             except Exception as err:
-                warn(f'[In SymbolicTransform.to_json] Unable to serialize'
-                     f' "{inst}" as string: {err}. This instruction will not'
-                     f' be serialized.')
-                return None
+                # Note: from None disables chaining in traceback
+                raise Exception(f'[In SymbolicTransform.to_json] Unable to serialize'
+                                f' "{inst}" as string: {err}. This instruction will not'
+                                f' be serialized.') from None
 
         instrs = [encode_inst(inst) for inst in self.instructions]
         instrs = [inst for inst in instrs if inst is not None]
@@ -582,8 +583,7 @@ def run_instruction(instr: miasm_instr,
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
         assert(isinstance(loc, Expr) or isinstance(loc, LocKey))
     except NotImplementedError as err:
-        warn(f'[WARNING] Unable to lift instruction {instr}: {err}. Skipping.')
-        return None, {}  # Create an empty transform for the instruction
+        raise Exception(f'Unable to lift instruction {instr}: {err}. Skipping.') from None
 
     # Execute instruction symbolically
     new_pc, modified = execute_location(loc)
@@ -688,8 +688,7 @@ class SymbolicTracer:
                     raise Exception()
         return True
 
-    def trace(self,
-              start_addr: int | None = None) -> Trace[SymbolicTransform]:
+    def trace(self, start_addr: int | None = None) -> Trace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
         instructions.
 
@@ -716,7 +715,7 @@ class SymbolicTracer:
             except:
                 err = sys.exc_info()[1]
 
-                # Try to get the LLDB disassembly instead to simplify debugging
+                # Try to recovery by using the LLDB disassembly instead
                 try:
                     alt_disas = target.get_disassembly(pc)
                     instr = Instruction.from_string(alt_disas, ctx.arch, pc,
@@ -724,14 +723,22 @@ class SymbolicTracer:
                     info(f'Disassembled instruction {instr} at {hex(pc)}')
                     instr = instr.instr
                 except:
-                    warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
-                         f' Skipping.')
-                    target.step()
-                    continue
+                    if self.force:
+                        warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
+                             f' Skipping.')
+                        target.step()
+                        continue
+                    raise # forward exception
 
             # Run instruction
             conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
-            new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
+
+            try:
+                new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
+            except:
+                if not self.force:
+                    raise
+                new_pc, modified = None, {}
 
             # Create symbolic transform
             instruction = Instruction(instr, ctx.machine, ctx.arch, ctx.loc_db)
@@ -743,7 +750,11 @@ class SymbolicTracer:
             strace.append(transform)
 
             if len(strace) == 0:
-                raise Exception(f'Unable to collect trace for instruction {instr}')
+                msg = f'Unable to collect trace for instruction {instr}'
+                if not self.force:
+                    raise Exception(msg)
+                else:
+                    warn(msg)
 
             # Predict next concrete state.
             # We verify the symbolic execution backend on the fly for some
