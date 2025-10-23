@@ -44,6 +44,13 @@ class LLDBConcreteTarget:
         x86.archname: x86.decompose_rflags,
     }
 
+    register_retries = {
+        aarch64.archname: {},
+        x86.archname: {
+            "rflags": ["eflags"]
+        }
+    }
+
     def __init__(self,
                  debugger: lldb.SBDebugger,
                  target: lldb.SBTarget,
@@ -146,11 +153,17 @@ class LLDBConcreteTarget:
                                       can be found.
         """
         frame = self.process.GetThreadAtIndex(0).GetFrameAtIndex(0)
-        reg = frame.FindRegister(regname)
+
+        retry_list = self.register_retries[self.archname].get(regname, [])
+        error_msg = f'[In LLDBConcreteTarget._get_register]: Register {regname} not found'
+
+        reg = None
+        for name in [regname, *retry_list]:
+            reg = frame.FindRegister(name)
+            if reg.IsValid():
+                break
         if not reg.IsValid():
-            raise ConcreteRegisterError(
-                f'[In LLDBConcreteTarget._get_register]: Register {regname}'
-                f' not found.')
+            raise ConcreteRegisterError(error_msg)
         return reg
 
     def read_flags(self) -> dict[str, int | bool]:
