@@ -208,3 +208,10 @@ class ArchX86(Arch):
             return True
         return False
 
+    def is_instr_syscall(self, instr: str) -> bool:
+        if instr.upper().startswith("SYSCALL"):
+            return True
+        if instr.upper().startswith("INT"):
+            return True
+        return False
+
