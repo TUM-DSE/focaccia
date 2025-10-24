@@ -81,6 +81,8 @@ class LLDBConcreteTarget:
         self.archname = self.determine_arch()
         self.arch = supported_architectures[self.archname]
 
+        self.delayed_pc: int | None = None
+
     def determine_arch(self):
         archname = self.target.GetPlatform().GetTriple().split('-')[0]
         if archname not in supported_architectures:
@@ -111,7 +113,6 @@ class LLDBConcreteTarget:
         if state == lldb.eStateExited:
             raise RuntimeError('Tried to resume process execution, but the'
                                ' process has already exited.')
-        assert(state == lldb.eStateStopped)
         self.process.Continue()
 
     def step(self):
@@ -122,9 +123,15 @@ class LLDBConcreteTarget:
     def run_until(self, address: int) -> None:
         """Continue execution until the address is arrived, ignores other breakpoints"""
         bp = self.target.BreakpointCreateByAddress(address)
-        while self.read_register("pc") != address:
+        while self._get_register('pc').GetValueAsUnsigned() != address:
             self.run()
         self.target.BreakpointDelete(bp.GetID())
+
+    def execute_delayed(self) -> None:
+        if self.delayed_pc is not None:
+            debug(f'Updating PC to {hex(self.delayed_pc)}')
+            self.run_until(self.delayed_pc)
+            self.delayed_pc = None
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""
@@ -193,6 +200,7 @@ class LLDBConcreteTarget:
         if self.archname not in self.flag_register_names:
             return {}
 
+        self.execute_delayed()
         flags_reg = self.flag_register_names[self.archname]
         flags_val = self._get_register(flags_reg).GetValueAsUnsigned()
         return self.flag_register_decompose[self.archname](flags_val)
@@ -205,6 +213,7 @@ class LLDBConcreteTarget:
                                       the register's value.
         """
         try:
+            self.execute_delayed()
             reg = self._get_register(regname)
             assert(reg.IsValid())
             if reg.size > 8:  # reg is a vector register
@@ -233,6 +242,7 @@ class LLDBConcreteTarget:
                                       or the target is otherwise unable to set
                                       the register's value.
         """
+        self.execute_delayed()
         reg = self._get_register(regname)
         error = lldb.SBError()
         reg.SetValueFromCString(hex(value), error)
@@ -246,6 +256,7 @@ class LLDBConcreteTarget:
 
         :raise ConcreteMemoryError: If unable to read `size` bytes from `addr`.
         """
+        self.execute_delayed()
         err = lldb.SBError()
         content = self.process.ReadMemory(addr, size, err)
         if not err.success:
@@ -261,6 +272,7 @@ class LLDBConcreteTarget:
 
         :raise ConcreteMemoryError: If unable to write at `addr`.
         """
+        self.execute_delayed()
         err = lldb.SBError()
         res = self.process.WriteMemory(addr, value, err)
         if not err.success or res != len(value):
@@ -268,6 +280,8 @@ class LLDBConcreteTarget:
                                       f' {hex(addr)}: {err}')
 
     def get_mappings(self) -> list[MemoryMap]:
+        self.execute_delayed()
+
         mmap = []
 
         region_list = self.process.GetMemoryRegions()

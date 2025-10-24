@@ -19,6 +19,7 @@ def main():
                       help='Name of output file. (default: trace.out)')
     prog.add_argument('-c', '--cross-validate',
                       default=False,
+                      action='store_true',
                       help='Cross-validate symbolic equations with concrete values')
     prog.add_argument('-r', '--remote',
                       default=False,

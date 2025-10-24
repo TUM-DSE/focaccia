@@ -427,7 +427,7 @@ class SymbolicTransform:
 
     def __repr__(self) -> str:
         start, end = self.range
-        res = f'Symbolic state transformation {hex(start)} -> {hex(end)}:\n'
+        res = f'Symbolic state transformation {start} -> {end}:\n'
         res += '  [Symbols]\n'
         for reg, expr in self.changed_regs.items():
             res += f'    {reg:6s} = {expr}\n'
@@ -657,40 +657,41 @@ class SymbolicTracer:
 
         return target
 
-    def step_to_next(self, target, instruction, transform, lldb_state) -> bool:
-        if self.cross_validate:
-            debug(f'Evaluating register and memory transforms for {instruction} to cross-validate')
-            predicted_regs = transform.eval_register_transforms(lldb_state)
-            predicted_mems = transform.eval_memory_transforms(lldb_state)
+    def step_to_next(self,
+                     target: LLDBConcreteTarget,
+                     instruction: Instruction,
+                     transform, lldb_state):
+        debug(f'Evaluating register and memory transforms for {instruction} to cross-validate')
+        predicted_regs = transform.eval_register_transforms(lldb_state)
+        predicted_mems = transform.eval_memory_transforms(lldb_state)
 
         # Step forward
         target.step()
         if target.is_exited():
-            return False
+            return
 
         # Verify last generated transform by comparing concrete state against
         # predicted values.
-        if self.cross_validate:
-            debug('Cross-validating symbolic transforms by comparing actual to predicted values')
-            for reg, val in predicted_regs.items():
-                conc_val = lldb_state.read_register(reg)
-                if conc_val != val:
-                    warn(f'Symbolic execution backend generated false equation for'
-                         f' [{hex(instruction.addr)}]: {instruction}:'
-                         f' Predicted {reg} = {hex(val)}, but the'
-                         f' concrete state has value {reg} = {hex(conc_val)}.'
-                         f'\nFaulty transformation: {transform}')
-            for addr, data in predicted_mems.items():
-                conc_data = lldb_state.read_memory(addr, len(data))
-                if conc_data != data:
-                    warn(f'Symbolic execution backend generated false equation for'
-                         f' [{hex(instruction.addr)}]: {instruction}: Predicted'
-                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
-                         f' but the concrete state has value'
-                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
-                         f'\nFaulty transformation: {transform}')
-                    raise Exception()
-        return True
+        debug('Cross-validating symbolic transforms by comparing actual to predicted values')
+        for reg, val in predicted_regs.items():
+            conc_val = lldb_state.read_register(reg)
+            if conc_val != val:
+                warn(f'Symbolic execution backend generated false equation for'
+                     f' [{hex(instruction.addr)}]: {instruction}:'
+                     f' Predicted {reg} = {hex(val)}, but the'
+                     f' concrete state has value {reg} = {hex(conc_val)}.'
+                     f'\nFaulty transformation: {transform}')
+                raise Exception()
+        for addr, data in predicted_mems.items():
+            conc_data = lldb_state.read_memory(addr, len(data))
+            if conc_data != data:
+                warn(f'Symbolic execution backend generated false equation for'
+                     f' [{hex(instruction.addr)}]: {instruction}: Predicted'
+                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
+                     f' but the concrete state has value'
+                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
+                     f'\nFaulty transformation: {transform}')
+                raise Exception()
 
     def trace(self, start_addr: int | None = None) -> Trace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
@@ -708,9 +709,21 @@ class SymbolicTracer:
         arch = ctx.arch
 
         # Trace concolically
+        new_pc = None
         strace: list[SymbolicTransform] = []
         while not target.is_exited():
-            pc = target.read_register('pc')
+            if new_pc is None or new_pc == 0:
+                try:
+                    pc = target.read_register('pc')
+                except:
+                    if target.is_exited():
+                        return Trace(strace, self.env)
+                    raise
+            else:
+                pc = new_pc
+                target.delayed_pc = pc
+
+            assert(pc != 0)
 
             # Disassemble instruction at the current PC
             tid = target.get_current_tid()
@@ -743,16 +756,12 @@ class SymbolicTracer:
 
             try:
                 new_pc, modified = run_instruction(instruction.instr, conc_state, ctx.lifter)
+                new_pc = int(new_pc)
             except:
                 if not self.force:
                     raise
                 new_pc, modified = None, {}
 
-            # Create symbolic transform
-            if new_pc is None:
-                new_pc = pc + instruction.length
-            else:
-                new_pc = int(new_pc)
             transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
             strace.append(transform)
 
@@ -766,6 +775,7 @@ class SymbolicTracer:
             # Predict next concrete state.
             # We verify the symbolic execution backend on the fly for some
             # additional protection from bugs in the backend.
-            if not self.step_to_next(target, instruction.instr, transform, lldb_state):
-                return Trace(strace, self.env)
+            if self.cross_validate:
+                self.step_to_next(target, instruction, transform, lldb_state)
+        return Trace(strace, self.env)
 
