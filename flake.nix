@@ -55,7 +55,7 @@
 		};
 
 		minimal-compile-flags = " -mno-xsave -mno-xsaveopt -mno-xsavec -mno-xsaves -mno-avx" +
-					  			" -mno-avx2 -mno-avx512f";
+					  			" -mno-avx2 -mno-avx512f -static";
 		musl-minimal-pkgs = import nixpkgs {
 			inherit system;
 			crossSystem = {
@@ -411,6 +411,8 @@
 				packages = [
 					packages.dev
 					pkgs.rr
+					musl-minimal-pkgs.pkgsStatic.gzip
+					musl-minimal-pkgs.pkgsStatic.file
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
