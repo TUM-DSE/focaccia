@@ -1,9 +1,15 @@
 import os
+import logging
 
 import lldb
 
 from .arch import supported_architectures
 from .snapshot import ProgramState
+
+logger = logging.getLogger('focaccia-lldb-target')
+debug = logger.debug
+info = logger.info
+warn = logger.warn
 
 class MemoryMap:
     """Description of a range of mapped memory.
@@ -110,7 +116,7 @@ class LLDBConcreteTarget:
 
     def step(self):
         """Step forward by a single instruction."""
-        thread: lldb.SBThread = self.process.GetThreadAtIndex(0)
+        thread: lldb.SBThread = self.process.GetSelectedThread()
         thread.StepInstruction(False)
 
     def run_until(self, address: int) -> None:
@@ -152,7 +158,9 @@ class LLDBConcreteTarget:
         :raise ConcreteRegisterError: If no register with the specified name
                                       can be found.
         """
-        frame = self.process.GetThreadAtIndex(0).GetFrameAtIndex(0)
+        debug(f'Accessing register {regname}')
+
+        frame = self.process.GetSelectedThread().GetFrameAtIndex(0)
 
         retry_list = self.register_retries[self.archname].get(regname, [])
         error_msg = f'[In LLDBConcreteTarget._get_register]: Register {regname} not found'
@@ -343,6 +351,10 @@ class LLDBConcreteTarget:
     def get_instruction_size(self, addr: int) -> int:
         inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1, 'intel')[0]
         return inst.GetByteSize()
+
+    def get_current_tid(self) -> int:
+        thread: lldb.SBThread = self.process.GetSelectedThread()
+        return thread.GetThreadID()
 
 class LLDBLocalTarget(LLDBConcreteTarget):
     def __init__(self,
