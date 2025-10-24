@@ -73,56 +73,41 @@
 
         # Box64
         zydis-shared-object = pkgs.zydis.overrideAttrs (oldAttrs: {
-          cmakeFlags = (oldAttrs.cmakeFlags or []) ++ [
-            "-DZYDIS_BUILD_SHARED_LIB=ON"
-          ];
+			cmakeFlags = (oldAttrs.cmakeFlags or []) ++ [
+			  "-DZYDIS_BUILD_SHARED_LIB=ON"
+			];
         });
 
-        repoSrc = pkgs.fetchFromGitHub {
-          owner = "ptitSeb";
-          repo = "box64";
-          rev = "74d4db051b4c74aaab23b19fbb51e441448faf8e";
-          sha256 = "sha256-G6tsqXsnTrs8I47YLnuivC79IFDGfbiLSm4J2Djc0kU=";
-        };
+        box64-patched = pkgs.stdenv.mkDerivation {
+			pname = "box64";
+			version = "74d4db";
 
-        box64-patch = ./fix-box64.patch;
+        	src = pkgs.fetchFromGitHub {
+				owner = "ptitSeb";
+				repo = "box64";
+				rev = "74d4db051b4c74aaab23b19fbb51e441448faf8e";
+				sha256 = "sha256-G6tsqXsnTrs8I47YLnuivC79IFDGfbiLSm4J2Djc0kU=";
+			};
 
-        patched-box64 = pkgs.stdenv.mkDerivation {
-          name = "patched-source";
-          src = repoSrc;
-          patches = [ box64-patch ];
-          installPhase = ''
-            cp -r . $out
-          '';
-        };
+			nativeBuildInputs = with pkgs; [
+				cmake
+				python
+				pkg-config
+				zydis-shared-object
+			];
 
-        box64-custom = pkgs.stdenv.mkDerivation rec {
-          pname = "box64";
-          version = "74d4db";
+			cmakeFlags = [
+				"-DDYNAREC=ON"
+				"-DHAVE_TRACE=ON"
+			];
 
-          src = patched-box64;
-
-          nativeBuildInputs = with pkgs; [
-            cmake
-            pkg-config
-            zydis-shared-object
-            python314
-          ];
-
-          buildInputs = with pkgs; [
-          ];
-
-          cmakeFlags = [
-            "-DDYNAREC=ON"
-            "-DHAVE_TRACE=ON"
-          ];
-
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/bin
-            cp box64 $out/bin/
-            runHook postInstall
-          '';
+			patches = [ ./fix-box64.patch ];
+			installPhase = ''
+				runHook preInstall
+				mkdir -p $out/bin
+				cp box64 $out/bin/
+				runHook postInstall
+			'';
         };
 
 		# Another overlay layer for flake-specific overloads
@@ -366,7 +351,7 @@
 					packages.dev
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
-                    box64-custom
+                    box64-patched
 				];
 
 				hardeningDisable = [ "pie" ];
