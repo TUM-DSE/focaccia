@@ -470,6 +470,10 @@ class DisassemblyContext:
         self.mdis.follow_call = True
         self.lifter = self.machine.lifter(self.loc_db)
 
+    def disassemble(self, address: int) -> Instruction:
+        miasm_instr = self.mdis.dis_instr(address)
+        return Instruction(miasm_instr, self.machine, self.arch, self.loc_db)
+
 def run_instruction(instr: miasm_instr,
                     conc_state: MiasmSymbolResolver,
                     lifter: Lifter) \
@@ -711,26 +715,26 @@ class SymbolicTracer:
             pc = target.read_register('pc')
 
             # Disassemble instruction at the current PC
+            tid = target.get_current_tid()
             try:
-                instr = ctx.mdis.dis_instr(pc)
-                info(f'Disassembled instruction {instr} at {hex(pc)}')
+                instruction = ctx.disassemble(pc)
+                info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
             except:
                 err = sys.exc_info()[1]
 
                 # Try to recovery by using the LLDB disassembly instead
                 try:
                     alt_disas = target.get_disassembly(pc)
-                    instr = Instruction.from_string(alt_disas, ctx.arch, pc,
-                                                    target.get_instruction_size(pc))
-                    info(f'Disassembled instruction {instr} at {hex(pc)}')
-                    instr = instr.instr
+                    instruction = Instruction.from_string(alt_disas, ctx.arch, pc,
+                                                         target.get_instruction_size(pc))
+                    info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
                 except:
                     if self.force:
                         if alt_disas:
-                            warn(f'Unable to handle instruction {alt_disas} at {hex(pc)} in Miasm.'
+                            warn(f'[{tid}] Unable to handle instruction {alt_disas} at {hex(pc)} in Miasm.'
                                  f' Skipping.')
                         else:
-                            warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
+                            warn(f'[{tid}] Unable to disassemble instruction {hex(pc)}: {err}.'
                                  f' Skipping.')
                         target.step()
                         continue
@@ -740,14 +744,13 @@ class SymbolicTracer:
             conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
 
             try:
-                new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
+                new_pc, modified = run_instruction(instruction.instr, conc_state, ctx.lifter)
             except:
                 if not self.force:
                     raise
                 new_pc, modified = None, {}
 
             # Create symbolic transform
-            instruction = Instruction(instr, ctx.machine, ctx.arch, ctx.loc_db)
             if new_pc is None:
                 new_pc = pc + instruction.length
             else:
@@ -756,7 +759,7 @@ class SymbolicTracer:
             strace.append(transform)
 
             if len(strace) == 0:
-                msg = f'Unable to collect trace for instruction {instr}'
+                msg = f'Unable to collect trace for instruction {instruction}'
                 if not self.force:
                     raise Exception(msg)
                 else:
@@ -765,6 +768,6 @@ class SymbolicTracer:
             # Predict next concrete state.
             # We verify the symbolic execution backend on the fly for some
             # additional protection from bugs in the backend.
-            if not self.step_to_next(target, instr, transform, lldb_state):
+            if not self.step_to_next(target, instruction.instr, transform, lldb_state):
                 return Trace(strace, self.env)
 
