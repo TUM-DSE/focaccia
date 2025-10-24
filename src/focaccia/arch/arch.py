@@ -102,8 +102,12 @@ class Arch():
         """
         return False
 
+    def is_instr_syscall(self, instr: str) -> bool:
+        return False
+
     def __eq__(self, other):
         return self.archname == other.archname
 
     def __repr__(self) -> str:
         return self.archname
+

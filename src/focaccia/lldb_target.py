@@ -111,7 +111,6 @@ class LLDBConcreteTarget:
         if state == lldb.eStateExited:
             raise RuntimeError('Tried to resume process execution, but the'
                                ' process has already exited.')
-        assert(state == lldb.eStateStopped)
         self.process.Continue()
 
     def step(self):
@@ -122,8 +121,12 @@ class LLDBConcreteTarget:
     def run_until(self, address: int) -> None:
         """Continue execution until the address is arrived, ignores other breakpoints"""
         bp = self.target.BreakpointCreateByAddress(address)
-        while self.read_register("pc") != address:
+        while True:
             self.run()
+            if self.is_exited():
+                return
+            if self.read_register('pc') == address:
+                break
         self.target.BreakpointDelete(bp.GetID())
 
     def record_snapshot(self) -> ProgramState:
@@ -241,7 +244,7 @@ class LLDBConcreteTarget:
                 f'[In LLDBConcreteTarget.write_register]: Unable to set'
                 f' {regname} to value {hex(value)}!')
 
-    def read_memory(self, addr, size):
+    def read_memory(self, addr: int, size: int) -> bytes:
         """Read bytes from memory.
 
         :raise ConcreteMemoryError: If unable to read `size` bytes from `addr`.
@@ -256,7 +259,7 @@ class LLDBConcreteTarget:
         else:
             return bytes(reversed(content))
 
-    def write_memory(self, addr, value: bytes):
+    def write_memory(self, addr: int, value: bytes):
         """Write bytes to memory.
 
         :raise ConcreteMemoryError: If unable to write at `addr`.

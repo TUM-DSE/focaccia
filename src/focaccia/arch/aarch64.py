@@ -176,3 +176,6 @@ class ArchAArch64(Arch):
             return dczid.read
         return None
 
+    def is_instr_syscall(self, instr: str) -> bool:
+        return instr.upper().startswith('SVC')
+

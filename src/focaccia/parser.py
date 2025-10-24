@@ -201,3 +201,4 @@ def parse_box64(stream: TextIO, arch: Arch) -> Trace[ProgramState]:
                 states[-1].set_register(regname, int(value, 16))
 
     return Trace(states, _make_unknown_env())
+
