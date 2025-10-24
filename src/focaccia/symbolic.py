@@ -724,8 +724,12 @@ class SymbolicTracer:
                     instr = instr.instr
                 except:
                     if self.force:
-                        warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
-                             f' Skipping.')
+                        if alt_disas:
+                            warn(f'Unable to handle instruction {alt_disas} at {hex(pc)} in Miasm.'
+                                 f' Skipping.')
+                        else:
+                            warn(f'Unable to disassemble instruction {hex(pc)}: {err}.'
+                                 f' Skipping.')
                         target.step()
                         continue
                     raise # forward exception
