@@ -84,7 +84,7 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
     json.dump(res, out_stream, indent=4)
 
 def _make_unknown_env() -> TraceEnvironment:
-    return TraceEnvironment('', [], [], '?')
+    return TraceEnvironment('', [], False, [], '?')
 
 def parse_qemu(stream: TextIO, arch: Arch) -> Trace[ProgramState]:
     """Parse a QEMU log from a stream.
@@ -166,6 +166,37 @@ def parse_arancini(stream: TextIO, arch: Arch) -> Trace[ProgramState]:
         if len(split) == 2 and states:
             regname, value = split
             regname = arch.to_regname(aliases.get(regname, regname))
+            if regname is not None:
+                states[-1].set_register(regname, int(value, 16))
+
+    return Trace(states, _make_unknown_env())
+
+def parse_box64(stream: TextIO, arch: Arch) -> Trace[ProgramState]:
+    def parse_box64_flags(state: ProgramState, flags_dump: str):
+        flags = ['O', 'D', 'S', 'Z', 'A', 'P', 'C']
+        for i, flag in enumerate(flags):
+            if flag == flags_dump[i]: # Flag is set
+                state.set_register(arch.to_regname(flag + 'F'), 1)
+            elif '-' == flags_dump[i]: # Flag is not set
+                state.set_register(arch.to_regname(flag + 'F'), 0)
+
+    trace_string = stream.read()
+
+    blocks = re.split(r'(?=\nES=)', trace_string.strip())[1:]
+    blocks = [block.strip() for block in blocks if block.strip()]
+
+    states = []
+    pattern = r'([A-Z0-9]{2,3}|flags|FLAGS)=([0-9a-fxODSZAPC?\-]+)'
+    for block in blocks:
+        states.append(ProgramState(arch))
+        matches = re.findall(pattern, block)
+
+        for regname, value in matches:
+            if regname.lower() == "flags":
+                parse_box64_flags(states[-1], value)
+                continue
+
+            regname = arch.to_regname(regname)
             if regname is not None:
                 states[-1].set_register(regname, int(value, 16))
 

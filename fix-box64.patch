@@ -1,0 +1,46 @@
+From 5f7a1982ac307d2bcdc9119c85847f48d193e378 Mon Sep 17 00:00:00 2001
+From: ckrinitsin <101062646+ckrinitsin@users.noreply.github.com>
+Date: Wed, 22 Oct 2025 18:20:31 +0200
+Subject: [PATCH] [TRACE] Fix flags output for better parsing (#3090)
+
+---
+ src/emu/x64emu.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/emu/x64emu.c b/src/emu/x64emu.c
+index f4fa700b..dde9a496 100644
+--- a/src/emu/x64emu.c
++++ b/src/emu/x64emu.c
+@@ -442,12 +442,12 @@ const char* DumpCPURegs(x64emu_t* emu, uintptr_t ip, int is32bits)
+             if(i==_RBX) {
+                 if(emu->df) {
+ #define FLAG_CHAR(f) (ACCESS_FLAG(F_##f##F)) ? #f : "?"
+-                    sprintf(tmp, "flags=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
++                    sprintf(tmp, " flags=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
+                     strcat(buff, tmp);
+ #undef FLAG_CHAR
+                 } else {
+ #define FLAG_CHAR(f) (ACCESS_FLAG(F_##f##F)) ? #f : "-"
+-                    sprintf(tmp, "FLAGS=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
++                    sprintf(tmp, " FLAGS=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
+                     strcat(buff, tmp);
+ #undef FLAG_CHAR
+                 }
+@@ -473,12 +473,12 @@ const char* DumpCPURegs(x64emu_t* emu, uintptr_t ip, int is32bits)
+                 if(i==4) {
+                     if(emu->df) {
+ #define FLAG_CHAR(f) (ACCESS_FLAG(F_##f##F)) ? #f : "?"
+-                        sprintf(tmp, "flags=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
++                        sprintf(tmp, " flags=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
+                         strcat(buff, tmp);
+ #undef FLAG_CHAR
+                     } else {
+ #define FLAG_CHAR(f) (ACCESS_FLAG(F_##f##F)) ? #f : "-"
+-                        sprintf(tmp, "FLAGS=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
++                        sprintf(tmp, " FLAGS=%s%s%s%s%s%s%s\n", FLAG_CHAR(O), FLAG_CHAR(D), FLAG_CHAR(S), FLAG_CHAR(Z), FLAG_CHAR(A), FLAG_CHAR(P), FLAG_CHAR(C));
+                         strcat(buff, tmp);
+ #undef FLAG_CHAR
+                     }
+--
+2.51.1.dirty
+
