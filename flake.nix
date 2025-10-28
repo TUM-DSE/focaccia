@@ -331,7 +331,6 @@
 
 			validate-qemu = {
 				type = "app";
-				# program = "${packages.focaccia}/bin/validate-qemu";
 				program = let
 					wrapper = pkgs.writeShellScriptBin "validate-qemu" ''
 						exec ${packages.focaccia}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
@@ -400,6 +399,7 @@
 					packages.dev
 					rr
 					musl-pkgs.gcc
+					pkgs.capnproto
 					musl-pkgs.pkg-config
 				];
 
@@ -416,6 +416,7 @@
 					musl-minimal-pkgs.pkgsStatic.gzip
 					musl-minimal-pkgs.pkgsStatic.file
 					musl-pkgs.gcc
+					pkgs.capnproto
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
 				];

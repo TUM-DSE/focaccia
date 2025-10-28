@@ -11,14 +11,19 @@ class TraceEnvironment:
                  binary: str,
                  argv: list[str],
                  envp: list[str],
-                 binary_hash: str | None = None):
+                 binary_hash: str | None = None,
+                 nondeterminism_log = None):
         self.argv = argv
         self.envp = envp
         self.binary_name = binary
+        self.detlog = nondeterminism_log
         if binary_hash is None and self.binary_name is not None:
             self.binary_hash = file_hash(binary)
         else:
             self.binary_hash = binary_hash
+
+    def is_deterministic(self) -> bool:
+        return self.detlog is not None
 
     @classmethod
     def from_json(cls, json: dict) -> TraceEnvironment:
