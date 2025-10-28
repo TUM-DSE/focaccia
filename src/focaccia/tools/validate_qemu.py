@@ -40,11 +40,6 @@ In fact, this tool could be used to test any emulator that provides a
 GDB-server interface. The server must support reading registers, reading
 memory, and stepping forward by single instructions.
 """
-    prog.add_argument('hostname',
-                      help='The hostname at which to find the GDB server.')
-    prog.add_argument('port',
-                      type=int,
-                      help='The port at which to find the GDB server.')
     prog.add_argument('--symb-trace',
                       required=True,
                       help='A pre-computed symbolic transformation trace to' \
