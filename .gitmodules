@@ -2,3 +2,6 @@
 	path = miasm
 	url = git@github.com:taugoust/miasm.git
 
+[submodule "rr"]
+	path = rr
+	url = git@github.com:rr-debugger/rr.git
