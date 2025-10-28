@@ -378,6 +378,7 @@
 					packages.dev
 					rr
 					musl-pkgs.gcc
+					pkgs.capnproto
 					musl-pkgs.pkg-config
 				];
 

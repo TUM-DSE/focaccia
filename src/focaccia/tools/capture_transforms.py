@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import sys
 import argparse
 import logging
 
@@ -24,6 +25,8 @@ def main():
     prog.add_argument('-r', '--remote',
                       default=False,
                       help='Remote target to trace (e.g. 127.0.0.1:12345)')
+    prog.add_argument('-l', '--deterministic-log',
+                      help='Path of the directory storing the deterministic log produced by RR')
     prog.add_argument('--log-level',
                       help='Set the logging level')
     prog.add_argument('--force',
@@ -46,7 +49,12 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    env = TraceEnvironment(args.binary, args.args, utils.get_envp())
+    detlog = None
+    if args.deterministic_log:
+        from focaccia.deterministic import DeterministicLog
+        detlog = DeterministicLog(args.deterministic_log)
+
+    env = TraceEnvironment(args.binary, args.args, utils.get_envp(), nondeterminism_log=detlog)
     tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate,
                             force=args.force)
     trace = tracer.trace()
