@@ -34,22 +34,6 @@
         "type": "github"
       }
     },
-    "nixpkgs-qemu-60": {
-      "locked": {
-        "lastModified": 1632168163,
-        "narHash": "sha256-iS3pBopSl0a2jAXuK/o0L+S86B9v9rnErsJHkNSdZRs=",
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "f8f124009497b3f9908f395d2533a990feee1de8",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "f8f124009497b3f9908f395d2533a990feee1de8",
-        "type": "github"
-      }
-    },
     "pyproject-build-systems": {
       "inputs": {
         "nixpkgs": [
@@ -100,7 +84,6 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "nixpkgs-qemu-60": "nixpkgs-qemu-60",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
         "uv2nix": "uv2nix"
