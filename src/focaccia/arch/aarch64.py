@@ -162,6 +162,10 @@ def decompose_cpsr(cpsr: int) -> dict[str, int]:
 class ArchAArch64(Arch):
     def __init__(self, endianness: Arch.Endianness):
         super().__init__(archname, registers, 64, endianness)
+        self.ignored_regs = [
+            'N', 'Z', 'C', 'V', 'Q', 'SSBS', 'PAN', 'DIT', 'GE',
+            'E', 'A', 'I', 'F', 'M'
+        ]
 
     def to_regname(self, name: str) -> str | None:
         reg = super().to_regname(name)
