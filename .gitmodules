@@ -6,3 +6,8 @@
 	path = qemu
 	url = git@github.com:TUM-DSE/focaccia-qemu.git
 	branch = ta/focaccia
+
+[submodule "rr"]
+	path = rr
+	url = git@github.com:rr-debugger/rr.git
+
