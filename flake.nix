@@ -249,6 +249,11 @@
 		'';
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
+		rr = pkgs.rr.overrideAttrs (old: {
+			pname = "focaccia-rr";
+			version = "git";
+			src = ./rr;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -320,7 +325,8 @@
 				type = "app";
 				program = "${pkgs.writeShellScriptBin "uv-sync" ''
 					set -euo pipefail
-					exec ${pkgs.uv}/bin/uv sync
+					${pkgs.uv}/bin/uv sync
+					sed -i '/riscv/d' uv.lock
 				''}/bin/uv-sync";
 				meta = {
 					description = "Sync uv python packages";
@@ -370,7 +376,7 @@
 			musl-extra = pkgs.mkShell {
 				packages = [
 					packages.dev
-					pkgs.rr
+					rr
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 				];
