@@ -291,7 +291,14 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     return states, matched_transforms
 
 def main():
-    args = make_argparser().parse_args()
+    prog = make_argparser()
+    prog.add_argument('hostname',
+                      help='The hostname at which to find the GDB server.')
+    prog.add_argument('port',
+                      type=int,
+                      help='The port at which to find the GDB server.')
+
+    args = prog.parse_args()
 
     gdbserver_addr = 'localhost'
     gdbserver_port = args.port
