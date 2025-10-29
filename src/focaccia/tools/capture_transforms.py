@@ -53,6 +53,16 @@ def main():
     if args.deterministic_log:
         from focaccia.deterministic import DeterministicLog
         detlog = DeterministicLog(args.deterministic_log)
+    else:
+        class NullDeterministicLog:
+            def __init__(self): pass
+            def events_file(self): return None
+            def tasks_file(self): return None
+            def mmaps_file(self): return None
+            def events(self): return []
+            def tasks(self): return []
+            def mmaps(self): return []
+        detlog = NullDeterministicLog()
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), nondeterminism_log=detlog)
     tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate,

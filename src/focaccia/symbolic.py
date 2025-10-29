@@ -762,6 +762,11 @@ class SymbolicTracer:
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
 
+        debug('Non-deterministic events handled:')
+        nondet_events = self.env.detlog.events()
+        for event in nondet_events:
+            debug(event)
+
         # Trace concolically
         strace: list[SymbolicTransform] = []
         while not self.target.is_exited():
