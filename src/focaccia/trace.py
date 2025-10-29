@@ -22,9 +22,6 @@ class TraceEnvironment:
         else:
             self.binary_hash = binary_hash
 
-    def is_deterministic(self) -> bool:
-        return self.detlog is not None
-
     @classmethod
     def from_json(cls, json: dict) -> TraceEnvironment:
         """Parse a JSON object into a TraceEnvironment."""
