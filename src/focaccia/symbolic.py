@@ -751,11 +751,14 @@ class SymbolicTracer:
                 return None
         return self.target.read_pc()
 
-    def trace(self, start_addr: int | None = None) -> Trace[SymbolicTransform]:
+    def trace(self, 
+              start_addr: int | None = None,
+              stop_addr: int | None = None) -> Trace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
         instructions.
 
         :param start_addr: Address from which to start tracing.
+        :param stop_addr: Address until which to trace.
         """
         # Set up concrete reference state
         if start_addr is not None:
@@ -773,6 +776,10 @@ class SymbolicTracer:
         strace: list[SymbolicTransform] = []
         while not self.target.is_exited():
             pc = self.target.read_pc()
+
+            if stop_addr is not None and pc == stop_addr:
+                break
+
             assert(pc != 0)
 
             # Disassemble instruction at the current PC

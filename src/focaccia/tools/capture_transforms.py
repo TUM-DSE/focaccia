@@ -37,6 +37,14 @@ def main():
                       default=False,
                       action='store_true',
                       help='Capture transforms in debug mode to identify errors in Focaccia itself')
+    prog.add_argument('--start-address',
+                      default=None,
+                      type=utils.to_int,
+                      help='Set a starting address from which to collect the symoblic trace')
+    prog.add_argument('--stop-address',
+                      default=None,
+                      type=utils.to_int,
+                      help='Set a final address up until which to collect the symoblic trace')
     args = prog.parse_args()
 
     if args.debug:
@@ -67,7 +75,8 @@ def main():
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), nondeterminism_log=detlog)
     tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate,
                             force=args.force)
-    trace = tracer.trace()
+
+    trace = tracer.trace(start_addr=args.start_address, stop_addr=args.stop_address)
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
 

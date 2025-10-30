@@ -114,3 +114,7 @@ def print_result(result, min_severity: ErrorSeverity):
           f' (showing {min_severity} and higher).')
     print('#' * 60)
     print()
+
+def to_int(value: str) -> int:
+    return int(value, 0)
+
