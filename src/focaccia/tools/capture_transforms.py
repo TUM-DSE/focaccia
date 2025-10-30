@@ -45,6 +45,11 @@ def main():
                       default=None,
                       type=utils.to_int,
                       help='Set a final address up until which to collect the symoblic trace')
+    prog.add_argument('--insn-time-limit',
+                      default=None,
+                      type=utils.to_num,
+                      help='Set a time limit for executing an instruction symbolically, skip'
+                           'instruction when limit is exceeded')
     args = prog.parse_args()
 
     if args.debug:
@@ -77,7 +82,8 @@ def main():
                             force=args.force)
 
     trace = tracer.trace(start_addr=args.start_address,
-                         stop_addr=args.stop_address)
+                         stop_addr=args.stop_address,
+                         time_limit=args.insn_time_limit)
 
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
