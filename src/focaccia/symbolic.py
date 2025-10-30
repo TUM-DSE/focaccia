@@ -22,6 +22,7 @@ from .lldb_target import (
 from .miasm_util import MiasmSymbolResolver, eval_expr, make_machine
 from .snapshot import ReadableProgramState, RegisterAccessError, MemoryAccessError
 from .trace import Trace, TraceEnvironment
+from .utils import timebound, TimeoutError
 
 logger = logging.getLogger('focaccia-symbolic')
 debug = logger.debug
@@ -786,7 +787,8 @@ class SymbolicTracer:
 
     def trace(self, 
               start_addr: int | None = None,
-              stop_addr: int | None = None) -> Trace[SymbolicTransform]:
+              stop_addr: int | None = None,
+              time_limit: int | None = None) -> Trace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
         instructions.
 
@@ -844,7 +846,11 @@ class SymbolicTracer:
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
 
-            new_pc, modified = run_instruction(instruction.instr, conc_state, ctx.lifter)
+            try:
+                new_pc, modified = timebound(time_limit, run_instruction, instruction.instr, conc_state, ctx.lifter)
+            except TimeoutError:
+                warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
+                new_pc, modified = None, {}
 
             if self.cross_validate and new_pc:
                 # Predict next concrete state.
