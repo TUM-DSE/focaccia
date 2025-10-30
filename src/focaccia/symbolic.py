@@ -613,8 +613,11 @@ class SpeculativeTracer(ReadableProgramState):
         self.pc = target.read_register('pc')
         self.speculative_pc: int | None = None
         self.speculative_count: int = 0
+        
+        self.read_cache = {}
 
     def speculate(self, new_pc):
+        self.read_cache.clear()
         if new_pc is None:
             self.progress_execution()
             self.target.step()
@@ -639,6 +642,8 @@ class SpeculativeTracer(ReadableProgramState):
             self.speculative_pc = None
             self.speculative_count = 0
 
+            self.read_cache.clear()
+
     def run_until(self, addr: int):
         if self.speculative_pc:
             raise Exception('Attempting manual execution with speculative execution enabled')
@@ -652,25 +657,35 @@ class SpeculativeTracer(ReadableProgramState):
         self.target.step()
         self.pc = self.target.read_register('pc')
 
+    def _cache(self, name: str, value):
+        self.read_cache[name] = value
+        return value
+
     def read_pc(self) -> int:
         if self.speculative_pc is not None:
             return self.speculative_pc
         return self.pc
 
     def read_flags(self) -> dict[str, int | bool]:
+        if 'flags' in self.read_cache:
+            return self.read_cache['flags']
         self.progress_execution()
-        return self.target.read_flags()
+        return self._cache('flags', self.target.read_flags())
 
     def read_register(self, reg: str) -> int:
         regname = self.arch.to_regname(reg)
         if regname is None:
             raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
+        if reg in self.read_cache:
+            return self.read_cache[reg]
+
         self.progress_execution()
-        return self.target.read_register(regname)
+        return self._cache(reg, self.target.read_register(regname))
 
     def write_register(self, regname: str, value: int):
         self.progress_execution()
+        self.read_cache.pop(regname, None)
         self.target.write_register(regname, value)
 
     def read_instructions(self, addr: int, size: int) -> bytes:
@@ -678,10 +693,14 @@ class SpeculativeTracer(ReadableProgramState):
 
     def read_memory(self, addr: int, size: int) -> bytes:
         self.progress_execution()
-        return self.target.read_memory(addr, size)
+        cache_name = f'{addr}_{size}' 
+        if cache_name in self.read_cache:
+            return self.read_cache[cache_name]
+        return self._cache(cache_name, self.target.read_memory(addr, size))
 
     def write_memory(self, addr: int, value: bytes):
         self.progress_execution()
+        self.read_cache.pop(addr, None)
         self.target.write_memory(addr, value)
 
     def __getattr__(self, name: str):
