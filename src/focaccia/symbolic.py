@@ -589,7 +589,7 @@ def run_instruction(instr: miasm_instr,
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
         assert(isinstance(loc, Expr) or isinstance(loc, LocKey))
     except NotImplementedError as err:
-        raise Exception(f'Unable to lift instruction {instr}: {err}. Skipping.') from None
+        raise Exception(f'Unable to lift instruction {instr}: {err}. Skipping')
 
     # Execute instruction symbolically
     new_pc, modified = execute_location(loc)
