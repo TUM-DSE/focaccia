@@ -474,7 +474,8 @@ class DisassemblyContext:
 
 def run_instruction(instr: miasm_instr,
                     conc_state: MiasmSymbolResolver,
-                    lifter: Lifter) \
+                    lifter: Lifter,
+                    force: bool = False) \
         -> tuple[ExprInt | None, dict[Expr, Expr]]:
     """Compute the symbolic equation of a single instruction.
 
@@ -587,7 +588,12 @@ def run_instruction(instr: miasm_instr,
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
         assert(isinstance(loc, Expr) or isinstance(loc, LocKey))
     except NotImplementedError as err:
-        raise Exception(f'Unable to lift instruction {instr}: {err}. Skipping')
+        msg = f'Unable to lift instruction {instr}: {err}'
+        if force:
+            warn(f'{msg}. Skipping')
+            return None, {}
+        else:
+            raise Exception(msg)
 
     # Execute instruction symbolically
     new_pc, modified = execute_location(loc)
@@ -603,7 +609,16 @@ class SpeculativeTracer(ReadableProgramState):
         self.speculative_pc: int | None = None
         self.speculative_count: int = 0
 
-    def speculate(self, new_pc: int):
+    def speculate(self, new_pc):
+        if new_pc is None:
+            self.progress_execution()
+            self.target.step()
+            self.pc = self.target.read_register('pc')
+            self.speculative_pc = None
+            self.speculative_count = 0
+            return
+
+        new_pc = int(new_pc)
         self.speculative_pc = new_pc
         self.speculative_count += 1
 
@@ -741,7 +756,7 @@ class SymbolicTracer:
                      f'\nFaulty transformation: {transform}')
                 raise Exception()
 
-    def progress(self, new_pc: int, instruction: Instruction) -> int | None:
+    def progress(self, new_pc, instruction: Instruction) -> int | None:
         self.target.speculate(new_pc)
         if self.target.arch.is_instr_syscall(str(instruction)):
             self.target.progress_execution()
@@ -809,14 +824,13 @@ class SymbolicTracer:
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
 
-            # TODO: handle None
             new_pc, modified = run_instruction(instruction.instr, conc_state, ctx.lifter)
-            new_pc = int(new_pc)
 
-            if self.cross_validate:
+            if self.cross_validate and new_pc:
                 # Predict next concrete state.
                 # We verify the symbolic execution backend on the fly for some
                 # additional protection from bugs in the backend.
+                new_pc = int(new_pc)
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
                 pred_regs, pred_mems = self.predict_next_state(instruction, transform)
                 self.progress(new_pc, instruction)
