@@ -31,6 +31,9 @@ warn = logger.warn
 # Disable Miasm's disassembly logger
 logging.getLogger('asmblock').setLevel(logging.CRITICAL)
 
+class ValidationError(Exception):
+    pass
+
 def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     """Evaluate a symbol based on a concrete reference state.
 
@@ -739,22 +742,20 @@ class SymbolicTracer:
         for reg, val in predicted_regs.items():
             conc_val = self.target.read_register(reg)
             if conc_val != val:
-                warn(f'Symbolic execution backend generated false equation for'
-                     f' [{hex(instruction.addr)}]: {instruction}:'
-                     f' Predicted {reg} = {hex(val)}, but the'
-                     f' concrete state has value {reg} = {hex(conc_val)}.'
-                     f'\nFaulty transformation: {transform}')
-                raise Exception()
+                raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                      f' [{hex(instruction.addr)}]: {instruction}:'
+                                      f' Predicted {reg} = {hex(val)}, but the'
+                                      f' concrete state has value {reg} = {hex(conc_val)}.'
+                                      f'\nFaulty transformation: {transform}')
         for addr, data in predicted_mems.items():
             conc_data = self.target.read_memory(addr, len(data))
             if conc_data != data:
-                warn(f'Symbolic execution backend generated false equation for'
-                     f' [{hex(instruction.addr)}]: {instruction}: Predicted'
-                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
-                     f' but the concrete state has value'
-                     f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
-                     f'\nFaulty transformation: {transform}')
-                raise Exception()
+                raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                      f' [{hex(instruction.addr)}]: {instruction}: Predicted'
+                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
+                                      f' but the concrete state has value'
+                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
+                                      f'\nFaulty transformation: {transform}')
 
     def progress(self, new_pc, instruction: Instruction) -> int | None:
         self.target.speculate(new_pc)
@@ -834,7 +835,14 @@ class SymbolicTracer:
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
                 pred_regs, pred_mems = self.predict_next_state(instruction, transform)
                 self.progress(new_pc, instruction)
-                self.validate(instruction, transform, pred_regs, pred_mems)
+
+                try:
+                    self.validate(instruction, transform, pred_regs, pred_mems)
+                except ValidationError as e:
+                    if self.force:
+                        warn(f'Cross-validation failed: {e}')
+                        continue
+                    raise
             else:
                 new_pc = self.progress(new_pc, instruction)
                 if new_pc is None:
