@@ -46,6 +46,7 @@ class Arch():
         self.archname = archname
         self.ptr_size = ptr_size
         self.endianness: Literal['little', 'big'] = endianness
+        self.ignored_regs: list[str] = []
 
         self._accessors = {}
         for desc in registers:

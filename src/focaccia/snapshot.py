@@ -27,6 +27,13 @@ class SparseMemory:
         off = addr % self.page_size
         return addr - off, off
 
+    def drop_all(self):
+        self._pages.clear()
+
+    def test(self, addr: int) -> bool:
+        page_addr, off = self._to_page_addr_and_offset(addr)
+        return page_addr in self._pages
+
     def read(self, addr: int, size: int) -> bytes:
         """Read a number of bytes from memory.
         :param addr: The offset from where to read.
@@ -112,6 +119,18 @@ class ProgramState(ReadableProgramState):
 
         self.regs: dict[str, int | None] = {reg: None for reg in arch.regnames}
         self.mem = SparseMemory()
+
+    def test_register(self, reg: str) -> bool:
+        """Test whether a register has a value assigned.
+
+        :raise RegisterAccessError: If `reg` is not a register name.
+        """
+        acc = self.arch.get_reg_accessor(reg)
+        if acc is None:
+            raise RegisterAccessError(reg, f'Not a register name: {reg}')
+
+        assert(acc.base_reg in self.regs)
+        return self.regs[acc.base_reg] is not None
 
     def read_register(self, reg: str) -> int:
         """Read a register's value.
