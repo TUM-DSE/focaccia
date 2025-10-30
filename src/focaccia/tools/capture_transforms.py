@@ -73,10 +73,12 @@ def main():
         detlog = NullDeterministicLog()
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), nondeterminism_log=detlog)
-    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.cross_validate,
+    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.debug,
                             force=args.force)
 
-    trace = tracer.trace(start_addr=args.start_address, stop_addr=args.stop_address)
+    trace = tracer.trace(start_addr=args.start_address,
+                         stop_addr=args.stop_address)
+
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)
 
