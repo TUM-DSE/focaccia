@@ -26,7 +26,7 @@ def endian_fmt(endianness: str) -> str:
     else:
         return '>'
 
-def mkCommand(cmd: str, endianness: str, reg: str="", addr: int=0, size: int=0) -> bytes:
+def mk_command(cmd: str, endianness: str, reg: str="", addr: int=0, size: int=0) -> bytes:
     # char[16]:regname | long long:addr long long:size | long long:unused
     # READ REG         | READ MEM                      | STEP ONE
 
@@ -41,7 +41,7 @@ def mkCommand(cmd: str, endianness: str, reg: str="", addr: int=0, size: int=0) 
         return struct.pack(fmt, 0, 0, "STEP ONE".encode('utf-8'))
     else:
         raise ValueError(f'Unknown command {cmd}')
-def unmkMemory(msg: bytes, endianness: str) -> tuple:
+def unmk_memory(msg: bytes, endianness: str) -> tuple:
     # packed!
     # unsigned long long: addr
     # unsigned long: length
@@ -50,7 +50,7 @@ def unmkMemory(msg: bytes, endianness: str) -> tuple:
 
     return addr, length
 
-def unmkRegister(msg: bytes, endianness: str) -> tuple:
+def unmk_register(msg: bytes, endianness: str) -> tuple:
     # packed!
     # char[108]:regname | unsigned long:bytes | char[64]:value
     fmt = f'{endian_fmt(endianness)}108sQ64s'
@@ -62,9 +62,7 @@ def unmkRegister(msg: bytes, endianness: str) -> tuple:
                                   f'[QEMU Plugin] Unable to access register {reg_name}.')
 
     val = val[:size]
-
     val = int.from_bytes(val, endianness)
-
     return val, size
 
 class PluginProgramState(ProgramState):
@@ -88,7 +86,7 @@ class PluginProgramState(ProgramState):
 
     def __init__(self, arch: Arch):
         super().__init__(arch)
-        self.curr_pc = -1
+        self.strict = False
 
     def read_register(self, reg: str, no_cached: bool=False) -> int:
         global CONN
@@ -100,11 +98,16 @@ class PluginProgramState(ProgramState):
         if reg in flags and self.arch.archname in self.flag_register_names:
             reg_name = self.flag_register_names[self.arch.archname]
         else:
-            reg_name = reg
+            reg_name = self.arch.to_regname(reg)
 
-        reg_name = reg_name.lower()
-        reg_name = self.arch.to_regname(reg_name)
-        reg_name = reg_name.lower()
+        if reg_name is None:
+            raise RegisterAccessError(reg, f'Not a register name: {reg}')
+
+        reg_acc = self.arch.get_reg_accessor(reg_name)
+        if reg_acc is None:
+            raise RegisterAccessError(reg, f'Not a enclosing register name: {reg}')
+            exit(-1)
+        reg_name = reg_acc.base_reg.lower()
 
         val = None
         from_cache = False
@@ -112,7 +115,7 @@ class PluginProgramState(ProgramState):
             val = super().read_register(reg_name)
             from_cache = True
         else:
-            msg = mkCommand("read register", self.arch.endianness, reg=reg_name)
+            msg = mk_command("read register", self.arch.endianness, reg=reg_name)
             CONN.send(msg)
 
             try:
@@ -125,8 +128,7 @@ class PluginProgramState(ProgramState):
                 print(f'Response: {resp}')
                 return 0
 
-
-            val, size = unmkRegister(resp, self.arch.endianness)
+            val, size = unmk_register(resp, self.arch.endianness)
 
         # Try to access the flags register with `reg` as a logical flag name
         if reg in flags and self.arch.archname in self.flag_register_names:
@@ -140,7 +142,7 @@ class PluginProgramState(ProgramState):
 
         if not from_cache:
             self.set_register(reg, val)
-        return val
+        return val & reg_acc.mask >> reg_acc.start
 
     def read_memory(self, addr: int, size: int) -> bytes:
         global CONN
@@ -150,14 +152,14 @@ class PluginProgramState(ProgramState):
 
         # print(f'Reading memory at {addr:x}, size={size}')
 
-        msg = mkCommand("read memory", self.arch.endianness, addr=addr, size=size)
+        msg = mk_command("read memory", self.arch.endianness, addr=addr, size=size)
         CONN.send(msg)
 
         try:
             resp = CONN.recv(16)
         except ConnectionResetError:
             raise StopIteration
-        _addr, length = unmkMemory(resp, self.arch.endianness)
+        _addr, length = unmk_memory(resp, self.arch.endianness)
 
         if _addr != addr or length == 0:
             raise MemoryAccessError(
@@ -180,7 +182,7 @@ class PluginProgramState(ProgramState):
         global CONN
 
         self._flush_caches()
-        msg = mkCommand("step", self.arch.endianness)
+        msg = mk_command("step", self.arch.endianness)
         CONN.send(msg)
 
 
@@ -264,7 +266,7 @@ def record_minimal_snapshot(prev_state: ProgramState,
     assert(cur_state.read_register('pc') == cur_transform.addr)
     assert(prev_transform.arch == cur_transform.arch)
 
-    def get_written_addresses(t: SymbolicTransform):
+    def get_written_addresses(t: SymbolicTransform) -> Iterable[ExprMem]:
         """Get all output memory accesses of a symbolic transformation."""
         return [ExprMem(a, v.size) for a, v in t.changed_mem.items()]
 
@@ -297,9 +299,7 @@ def record_minimal_snapshot(prev_state: ProgramState,
     set_values(prev_transform.changed_regs.keys(),
                get_written_addresses(prev_transform),
                cur_state,
-               prev_state,  # Evaluate memory addresses based on previous
-                            # state because they are that state's output
-                            # addresses.
+               prev_state,
                state)
     set_values(cur_transform.get_used_registers(),
                cur_transform.get_used_memory_addresses(),
@@ -398,6 +398,7 @@ def main():
     sock_path = args.use_socket
 
     qemu = PluginStateIterator(sock_path, arch)
+
     # Use symbolic trace to collect concrete trace from QEMU
     conc_states, matched_transforms = collect_conc_trace(
         qemu,
@@ -415,3 +416,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

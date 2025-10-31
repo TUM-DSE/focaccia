@@ -338,7 +338,7 @@ class SymbolicTransform:
         """
         res = {}
         for regname, expr in self.changed_regs.items():
-            if regname.upper() in self.arch.ignored_regs:
+            if not conc_state.strict and regname.upper() in self.arch.ignored_regs:
                 continue
             res[regname] = eval_symbol(expr, conc_state)
         return res
