@@ -170,6 +170,10 @@ class DeterministicLog:
         for raw_event in raw_events:
             pc, registers = parse_registers(raw_event)
             mem_writes = parse_memory_writes(raw_event)
+
+            if pc == 0:
+                pc = events[-1].pc
+
             event = Event(pc,
                           raw_event.tid,
                           raw_event.arch,
@@ -177,16 +181,5 @@ class DeterministicLog:
                           registers, mem_writes)
             events.append(event)
 
-        # deduplicate
-        deduped_events = []
-        for i in range(0, len(events), 2):
-            if events[i].event_type == 'syscall':
-                if events[i+1].pc == 0:
-                    deduped_events.append(events[i])
-                    break
-                if events[i+1].event_type != 'syscall':
-                    raise Exception(f'Event {events[i+1]} should follow {events[i]} but does not')
-                deduped_events.append(events[i+1])
-
-        return deduped_events
+        return events
 
