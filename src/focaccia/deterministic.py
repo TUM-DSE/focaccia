@@ -171,9 +171,6 @@ class DeterministicLog:
             pc, registers = parse_registers(raw_event)
             mem_writes = parse_memory_writes(raw_event)
 
-            if pc == 0:
-                pc = events[-1].pc
-
             event = Event(pc,
                           raw_event.tid,
                           raw_event.arch,

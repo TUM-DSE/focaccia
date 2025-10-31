@@ -780,17 +780,26 @@ class SymbolicTracer:
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                                       f'\nFaulty transformation: {transform}')
 
-    def progress_event(self):
-        if self.next_event < len(self.nondet_events):
+    def progress_event(self) -> None:
+        if (self.next_event + 1) < len(self.nondet_events):
             self.next_event += 1
+            debug(f'Next event to handle at index {self.next_event}')
         else:
             self.next_event = None
 
-    def post_event(self):
-        self.progress_event()
+    def post_event(self) -> None:
+        if self.next_event:
+            if self.nondet_events[self.next_event].pc == 0:
+                # Exit sequence
+                debug('Completed exit event')
+                self.target.run()
 
-    def is_stepping_instr(self, pc: int, instruction: Instruction):
+            debug(f'Completed handling event at index {self.next_event}')
+            self.progress_event()
+
+    def is_stepping_instr(self, pc: int, instruction: Instruction) -> bool:
         if self.nondet_events:
+            pc = pc + instruction.length # detlog reports next pc for each event
             if self.next_event and self.nondet_events[self.next_event].match(pc, self.target):
                 debug('Current instruction matches next event; stepping through it')
                 self.progress_event()
@@ -824,7 +833,10 @@ class SymbolicTracer:
 
         for i in range(len(self.nondet_events)):
             if self.nondet_events[i].pc == self.target.read_pc():
-                self.next_event = i
+                self.next_event = i+1
+                if self.next_event >= len(self.nondet_events):
+                    break
+
                 debug(f'Starting from event {self.nondet_events[i]} onwards')
                 break
 
@@ -872,7 +884,7 @@ class SymbolicTracer:
                         continue
                     raise # forward exception
 
-            needs_step = self.is_stepping_instr(pc, instruction)
+            is_event = self.is_stepping_instr(pc, instruction)
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
@@ -890,7 +902,7 @@ class SymbolicTracer:
                 new_pc = int(new_pc)
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
                 pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                self.progress(new_pc, step=needs_step)
+                self.progress(new_pc, step=is_event)
 
                 try:
                     self.validate(instruction, transform, pred_regs, pred_mems)
@@ -900,14 +912,14 @@ class SymbolicTracer:
                         continue
                     raise
             else:
-                new_pc = self.progress(new_pc, step=needs_step)
+                new_pc = self.progress(new_pc, step=is_event)
                 if new_pc is None:
                     continue # we're done
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
 
             strace.append(transform)
 
-            if needs_step:
+            if is_event:
                 self.post_event()
 
         return Trace(strace, self.env)
