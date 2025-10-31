@@ -36,20 +36,31 @@ def parse_x64_registers(enc_regs: bytes, signed: bool=False) -> dict[str, int]:
     regs['r12'] = parse_reg()
     regs['rbp'] = parse_reg()
     regs['rbx'] = parse_reg()
-    regs['r11'] = parse_reg()
+
+    # rcx is unreliable: parsed but ignored
+    parse_reg()
+
     regs['r10'] = parse_reg()
     regs['r9'] = parse_reg()
     regs['r8'] = parse_reg()
 
     regs['rax'] = parse_reg()
-    regs['rcx'] = parse_reg()
+
+    # rcx is unreliable: parsed but ignored
+    parse_reg()
+
     regs['rdx'] = parse_reg()
     regs['rsi'] = parse_reg()
     regs['rdi'] = parse_reg()
+
     regs['orig_rax'] = parse_reg()
+
     regs['rip'] = parse_reg()
     regs['cs'] = parse_reg()
-    regs['eflags'] = parse_reg()
+
+    # eflags is unreliable: parsed but ignored
+    parse_reg()
+
     regs['rsp'] = parse_reg()
     regs['ss'] = parse_reg()
     regs['fs_base'] = parse_reg()
@@ -100,6 +111,12 @@ class Event:
     def match(self, pc: int, target: ReadableProgramState) -> bool:
         # TODO: match the rest of the state to be sure
         if self.pc == pc:
+            for reg, value in self.registers.items():
+                if value == self.pc:
+                    continue
+                if target.read_register(reg) != value:
+                    print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
+                    return False
             return True
         return False
 
@@ -171,10 +188,17 @@ class DeterministicLog:
             pc, registers = parse_registers(raw_event)
             mem_writes = parse_memory_writes(raw_event)
 
+            event_type = raw_event.event.which()
+            if event_type == 'syscall' and raw_event.arch == rr_trace.Arch.x8664:
+                # On entry: substitute orig_rax for RAX
+                if raw_event.event.syscall.state == rr_trace.SyscallState.entering:
+                    registers['rax'] = registers['orig_rax']
+                del registers['orig_rax']
+
             event = Event(pc,
                           raw_event.tid,
                           raw_event.arch,
-                          raw_event.event.which(),
+                          event_type,
                           registers, mem_writes)
             events.append(event)
 
