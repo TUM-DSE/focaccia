@@ -90,6 +90,7 @@ class ReadableProgramState:
     """Interface for read-only program states."""
     def __init__(self, arch: Arch):
         self.arch = arch
+        self.strict = True
 
     def read_register(self, reg: str) -> int:
         """Read a register's value.
