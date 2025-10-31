@@ -6,6 +6,7 @@ from typing import Union
 import brotli
 
 from .arch import Arch
+from .snapshot import ReadableProgramState
 
 try:
     import capnp
@@ -96,6 +97,12 @@ class Event:
         self.registers = registers
         self.mem_writes = memory_writes
 
+    def match(self, pc: int, target: ReadableProgramState) -> bool:
+        # TODO: match the rest of the state to be sure
+        if self.pc == pc:
+            return True
+        return False
+
     def __repr__(self) -> str:
         reg_repr = ''
         for reg, value in self.registers.items():
@@ -169,5 +176,17 @@ class DeterministicLog:
                           raw_event.event.which(),
                           registers, mem_writes)
             events.append(event)
-        return events
+
+        # deduplicate
+        deduped_events = []
+        for i in range(0, len(events), 2):
+            if events[i].event_type == 'syscall':
+                if events[i+1].pc == 0:
+                    deduped_events.append(events[i])
+                    break
+                if events[i+1].event_type != 'syscall':
+                    raise Exception(f'Event {events[i+1]} should follow {events[i]} but does not')
+                deduped_events.append(events[i+1])
+
+        return deduped_events
 

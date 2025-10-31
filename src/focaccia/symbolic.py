@@ -720,6 +720,9 @@ class SymbolicTracer:
         self.cross_validate = cross_validate
         self.target = SpeculativeTracer(self.create_debug_target())
 
+        self.nondet_events = self.env.detlog.events()
+        self.next_event: int | None = None
+
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
         if self.remote is False:
@@ -777,9 +780,24 @@ class SymbolicTracer:
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                                       f'\nFaulty transformation: {transform}')
 
-    def progress(self, new_pc, instruction: Instruction) -> int | None:
+    def is_stepping_instr(self, pc: int, instruction: Instruction):
+        if self.nondet_events:
+            if self.next_event and self.nondet_events[self.next_event].match(pc, self.target):
+                debug('Current instruction matches next event; stepping through it')
+                if self.next_event < len(self.nondet_events):
+                    self.next_event += 1
+                else:
+                    self.next_event = None
+
+                return True
+        else:
+            if self.target.arch.is_instr_syscall(str(instruction)):
+                return True
+        return False
+
+    def progress(self, new_pc, step: bool = False) -> int | None:
         self.target.speculate(new_pc)
-        if self.target.arch.is_instr_syscall(str(instruction)):
+        if step:
             self.target.progress_execution()
             if self.target.is_exited():
                 return None
@@ -799,13 +817,19 @@ class SymbolicTracer:
         if start_addr is not None:
             self.target.run_until(start_addr)
 
+        for i in range(len(self.nondet_events)):
+            if self.nondet_events[i].pc == self.target.read_pc():
+                self.next_event = i
+                debug(f'Starting from event {self.nondet_events[i]} onwards')
+                break
+
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
 
-        debug('Non-deterministic events handled:')
-        nondet_events = self.env.detlog.events()
-        for event in nondet_events:
-            debug(event)
+        if logger.isEnabledFor(logging.DEBUG):
+            debug('Tracing program with the following non-deterministic events')
+            for event in self.nondet_events:
+                debug(event)
 
         # Trace concolically
         strace: list[SymbolicTransform] = []
@@ -843,6 +867,8 @@ class SymbolicTracer:
                         continue
                     raise # forward exception
 
+            needs_step = self.is_stepping_instr(pc, instruction)
+
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
 
@@ -859,7 +885,7 @@ class SymbolicTracer:
                 new_pc = int(new_pc)
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
                 pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                self.progress(new_pc, instruction)
+                self.progress(new_pc, step=needs_step)
 
                 try:
                     self.validate(instruction, transform, pred_regs, pred_mems)
@@ -869,7 +895,7 @@ class SymbolicTracer:
                         continue
                     raise
             else:
-                new_pc = self.progress(new_pc, instruction)
+                new_pc = self.progress(new_pc, step=needs_step)
                 if new_pc is None:
                     continue # we're done
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
