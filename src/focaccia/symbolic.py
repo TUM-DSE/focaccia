@@ -782,15 +782,20 @@ class SymbolicTracer:
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                                       f'\nFaulty transformation: {transform}')
 
+    def progress_event(self):
+        if self.next_event < len(self.nondet_events):
+            self.next_event += 1
+        else:
+            self.next_event = None
+
+    def post_event(self):
+        self.progress_event()
+
     def is_stepping_instr(self, pc: int, instruction: Instruction):
         if self.nondet_events:
             if self.next_event and self.nondet_events[self.next_event].match(pc, self.target):
                 debug('Current instruction matches next event; stepping through it')
-                if self.next_event < len(self.nondet_events):
-                    self.next_event += 1
-                else:
-                    self.next_event = None
-
+                self.progress_event()
                 return True
         else:
             if self.target.arch.is_instr_syscall(str(instruction)):
@@ -903,6 +908,9 @@ class SymbolicTracer:
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
 
             strace.append(transform)
+
+            if needs_step:
+                self.post_event()
 
         return Trace(strace, self.env)
 
