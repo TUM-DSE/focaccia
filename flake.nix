@@ -282,6 +282,10 @@
 		musl-minimal-redis-nocheck = musl-minimal-pkgs.pkgsStatic.redis.overrideAttrs (old: {
 			doCheck = false;
 		});
+
+		musl-minimal-sqlite-nocheck = musl-minimal-pkgs.pkgsStatic.sqlite.overrideAttrs (old: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -437,6 +441,7 @@
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
+					musl-minimal-sqlite-nocheck
 					musl-minimal-pkgs.pkgsStatic.gzip
 					musl-minimal-pkgs.pkgsStatic.file
 				];
