@@ -62,10 +62,34 @@ def simp_fadd(expr_simp, expr: ExprOp):
         return expr_simp(ExprInt(res, expr.size))
     return expr
 
+def simp_fsub(expr_simp, expr: ExprOp):
+    from .utils import float_bits_to_uint, uint_bits_to_float, \
+                       double_bits_to_uint, uint_bits_to_double
+
+    if expr.op != 'fsub':
+        return expr
+
+    assert(len(expr.args) == 2)
+    lhs, rhs = expr.args
+    if lhs.is_int() and rhs.is_int():
+        assert(lhs.size == rhs.size)
+        if lhs.size == 32:
+            uint_to_float = uint_bits_to_float
+            float_to_uint = float_bits_to_uint
+        elif lhs.size == 64:
+            uint_to_float = uint_bits_to_double
+            float_to_uint = double_bits_to_uint
+        else:
+            raise NotImplementedError('fsub on values of size not in {32, 64}')
+
+        res = float_to_uint(uint_to_float(lhs.arg) - uint_to_float(rhs.arg))
+        return expr_simp(ExprInt(res, expr.size))
+    return expr
+
 # The expression simplifier used in this module
 expr_simp = expr_simp_explicit
 expr_simp.enable_passes({
-    ExprOp: [simp_segm, simp_fadd],
+    ExprOp: [simp_segm, simp_fadd, simp_fsub],
 })
 
 class MiasmSymbolResolver:
