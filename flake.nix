@@ -272,6 +272,10 @@
 			doCheck = false;
 		});
 
+		musl-minimal-memcached-nocheck = musl-minimal-pkgs.pkgsStatic.memcached.overrideAttrs (old: {
+			doCheck = false;
+		});
+
 		rr = pkgs.rr.overrideAttrs (old: {
 			pname = "focaccia-rr";
 			version = "git";
@@ -419,6 +423,9 @@
 					pkgs.capnproto
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
+
+					musl-minimal-memcached-nocheck
+					pkgs.memtier-benchmark # needed to test memcached
 				];
 
 				hardeningDisable = [ "pie" ];
