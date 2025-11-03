@@ -286,6 +286,10 @@
 		musl-minimal-sqlite-nocheck = musl-minimal-pkgs.pkgsStatic.sqlite.overrideAttrs (old: {
 			doCheck = false;
 		});
+
+		musl-minimal-memcached-nocheck = musl-minimal-pkgs.pkgsStatic.memcached.overrideAttrs (old: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -442,6 +446,8 @@
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
 					musl-minimal-sqlite-nocheck
+					musl-minimal-memcached-nocheck
+					pkgs.memtier-benchmark # needed to test memcached
 					musl-minimal-pkgs.pkgsStatic.gzip
 					musl-minimal-pkgs.pkgsStatic.file
 				];
