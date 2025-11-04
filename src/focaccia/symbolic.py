@@ -916,6 +916,8 @@ class SymbolicTracer:
             else:
                 new_pc = self.progress(new_pc, step=is_event)
                 if new_pc is None:
+                    transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
+                    strace.append(transform)
                     continue # we're done
                 transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
 
