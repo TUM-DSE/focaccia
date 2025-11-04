@@ -71,6 +71,10 @@ capture-transforms --remote localhost:12345 --deterministic-log bug.rr.out -o or
 Note: the `rr replay` call prints the correct binary name to use when invoking `capture-transforms`,
 it also prints program output. As such, it should be invoked separately as a foreground process.
 
+Note: `rr record` may fail on Zen and Zen+ AMD CPUs. It is generally possible to continue using it
+by specifying flag `-F` but keep in mind that replaying may fail unexpectedly sometimes on such
+CPUs.
+
 Note: we currently do not support validating such programs on QEMU.
 
 ### Box64
