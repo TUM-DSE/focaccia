@@ -1,7 +1,8 @@
 """Parsing of JSON files containing snapshot data."""
 
 import os
-from typing import Union
+import itertools
+from typing import Union, Iterable
 
 import brotli
 
@@ -151,10 +152,29 @@ class DeterministicLog:
         return os.path.join(self.base_directory, 'mmaps')
 
     def _read(self, file, obj: SerializedObject) -> list[SerializedObject]:
+        data = bytearray()
+        objects = []
         with open(file, 'rb') as f:
-            f.read(8)
-            data = brotli.decompress(f.read())
-            return obj.read_multiple_bytes_packed(data)
+            while True:
+                try:
+                    compressed_len = int.from_bytes(f.read(4), byteorder='little')
+                    uncompressed_len = int.from_bytes(f.read(4), byteorder='little')
+                except Exception as e:
+                    raise Exception(f'Malformed deterministic log: {e}') from None
+
+                chunk = f.read(compressed_len)
+                if not chunk:
+                    break
+
+                chunk = brotli.decompress(chunk)
+                if len(chunk) != uncompressed_len:
+                    raise Exception(f'Malformed deterministic log: uncompressed chunk is not equal'
+                                    f'to reported length {hex(uncompressed_len)}')
+                data.extend(chunk)
+
+            for deser in obj.read_multiple_bytes_packed(data):
+                objects.append(deser)
+            return objects
 
     def raw_events(self) -> list[SerializedObject]:
         return self._read(self.events_file(), Frame)
