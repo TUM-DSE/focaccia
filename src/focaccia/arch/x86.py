@@ -186,6 +186,10 @@ def compose_rflags(rflags: dict[str, int]) -> int:
 class ArchX86(Arch):
     def __init__(self):
         super().__init__(archname, registers, 64)
+        self.ignored_regs = [
+            'EFLAGS', 'CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF',
+            'CS', 'DS', 'SS', 'ES', 'FS', 'GS',
+        ]
 
     def to_regname(self, name: str) -> str | None:
         """The X86 override of the standard register name lookup.

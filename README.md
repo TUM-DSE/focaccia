@@ -29,12 +29,22 @@ It will take a while to compile.
 ### QEMU
 
 A number of additional tools are included to simplify use when validating QEMU:
-`capture-transforms`, `convert-log`, `validate-qemu`. They enable the following workflow.
+`capture-transforms`, `convert-log`, `validate-qemu`, `validation_server`. They enable the following workflow.
 
 ```bash
 capture-transforms -o oracle.trace bug.out
 qemu-x86_64 -g 12345 bug.out &
 validate-qemu --symb-trace oracle.trace localhost 12345
+```
+
+Alternatively if you have access to the focaccia QEMU plugin:
+
+```bash
+validation_server.py --symb-trace oracle.trace --use-socket=/tmp/focaccia.sock --guest_arch=<arch>
+```
+After you see `Listening for QEMU Plugin connection at /tmp/focaccia.sock...` you can start QEMU like this:
+```bash
+qemu-<arch> [-one-insn-per-tb] --plugin build/contrib/plugins/libfocaccia.so <bug.out>
 ```
 
 Using this workflow, Focaccia can determine whether a mistranslation occured in that particular QEMU run.
