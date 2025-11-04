@@ -1,8 +1,11 @@
 """Tools and utilities for  execution with Miasm."""
 
 from __future__ import annotations
-import logging
+
 import sys
+import logging
+
+from pathlib import Path
 
 from miasm.analysis.machine import Machine
 from miasm.core.cpu import instruction as miasm_instr
@@ -733,17 +736,12 @@ class SymbolicTracer:
             return LLDBLocalTarget(binary, self.env.argv, self.env.envp)
 
         debug(f'Connecting to remote debug target {self.remote}')
-        target = LLDBRemoteTarget(self.remote)
+        target = LLDBRemoteTarget(self.remote, binary)
 
         module_name = target.determine_name()
-        if binary is None:
-            binary, self.env.binary_name = module_name, module_name
+        binary = str(Path(self.env.binary_name).resolve())
         if binary != module_name:
             warn(f'Discovered binary name {module_name} differs from specified name {binary}')
-
-        binary_args = target.determine_arguments()
-        if binary_args != self.env.argv:
-            warn(f'Discovered program arguments {binary_args} differ from those specified {self.env.argv}')
 
         return target
 

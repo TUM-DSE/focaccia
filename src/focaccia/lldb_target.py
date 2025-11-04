@@ -91,7 +91,7 @@ class LLDBConcreteTarget:
         return archname
 
     def determine_name(self) -> str:
-        return self.process.GetProcessInfo().GetName()
+        return self.process.GetTarget().GetExecutable().fullpath
 
     def determine_arguments(self):
         launch_info = self.target.GetLaunchInfo()
@@ -395,7 +395,7 @@ class LLDBLocalTarget(LLDBConcreteTarget):
         super().__init__(debugger, target, process)
 
 class LLDBRemoteTarget(LLDBConcreteTarget):
-    def __init__(self, remote: str):
+    def __init__(self, remote: str, executable: str | None = None):
         """Construct an LLDB remote target. Stop at entry.
 
         :param remote: String of the form <remote_name>:<port> (e.g. localhost:12345).
@@ -403,7 +403,7 @@ class LLDBRemoteTarget(LLDBConcreteTarget):
         """
         debugger = lldb.SBDebugger.Create()
         debugger.SetAsync(False)
-        target = debugger.CreateTarget(None)
+        target = debugger.CreateTarget(executable)
         
         # Set up objects for process execution
         error = lldb.SBError()
