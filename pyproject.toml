@@ -29,8 +29,8 @@ dev = [
 [project.scripts]
 focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
-capture-transforms = "focaccia.tools.capture_transforms:main"
 validate-qemu = "focaccia.tools.validate_qemu:main"
+capture-transforms = "focaccia.tools.capture_transforms:main"
 
 [build-system]
 requires = ["hatchling"]

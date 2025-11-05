@@ -106,11 +106,11 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, address: str, port: int):
+    def __init__(self, remote: str):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
-        gdb.execute(f'target remote {address}:{port}')
+        gdb.execute(f'target remote {remote}')
         self._process = gdb.selected_inferior()
         self._first_next = True
 
@@ -291,22 +291,12 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     return states, matched_transforms
 
 def main():
-    prog = make_argparser()
-    prog.add_argument('hostname',
-                      help='The hostname at which to find the GDB server.')
-    prog.add_argument('port',
-                      type=int,
-                      help='The port at which to find the GDB server.')
-
-    args = prog.parse_args()
-
-    gdbserver_addr = 'localhost'
-    gdbserver_port = args.port
+    args = make_argparser().parse_args()
 
     try:
-        gdb_server = GDBServerStateIterator(gdbserver_addr, gdbserver_port)
+        gdb_server = GDBServerStateIterator(args.remote)
     except:
-        raise Exception(f'Unable to perform basic GDB setup')
+        raise Exception('Unable to perform basic GDB setup')
 
     try:
         if args.executable is None:
