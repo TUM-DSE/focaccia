@@ -22,7 +22,7 @@ from focaccia.utils import print_result
 
 from validate_qemu import make_argparser, verbosity
 
-logger = logging.getLogger('focaccia-validator')
+logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
 info = logger.info
 warn = logger.warning
@@ -306,6 +306,9 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
 
 def main():
     args = make_argparser().parse_args()
+    
+    logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
+    logging.basicConfig(level=logging_level, force=True)
 
     try:
         gdb_server = GDBServerStateIterator(args.remote)
