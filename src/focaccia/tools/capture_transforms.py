@@ -77,13 +77,14 @@ def main():
             def mmaps(self): return []
         detlog = NullDeterministicLog()
 
-    env = TraceEnvironment(args.binary, args.args, utils.get_envp(), nondeterminism_log=detlog)
+    env = TraceEnvironment(args.binary, args.args, utils.get_envp(), 
+                           nondeterminism_log=detlog,
+                           start_address=args.start_address,
+                           stop_address=args.stop_address)
     tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.debug,
                             force=args.force)
 
-    trace = tracer.trace(start_addr=args.start_address,
-                         stop_addr=args.stop_address,
-                         time_limit=args.insn_time_limit)
+    trace = tracer.trace(time_limit=args.insn_time_limit)
 
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)

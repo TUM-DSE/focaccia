@@ -821,10 +821,7 @@ class SymbolicTracer:
                 return None
         return self.target.read_pc()
 
-    def trace(self, 
-              start_addr: int | None = None,
-              stop_addr: int | None = None,
-              time_limit: int | None = None) -> Trace[SymbolicTransform]:
+    def trace(self, time_limit: int | None = None) -> Trace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
         instructions.
 
@@ -832,8 +829,8 @@ class SymbolicTracer:
         :param stop_addr: Address until which to trace.
         """
         # Set up concrete reference state
-        if start_addr is not None:
-            self.target.run_until(start_addr)
+        if self.env.start_address is not None:
+            self.target.run_until(self.env.start_address)
 
         for i in range(len(self.nondet_events)):
             if self.nondet_events[i].pc == self.target.read_pc():
@@ -857,7 +854,7 @@ class SymbolicTracer:
         while not self.target.is_exited():
             pc = self.target.read_pc()
 
-            if stop_addr is not None and pc == stop_addr:
+            if self.env.stop_address is not None and pc == self.env.stop_address:
                 break
 
             assert(pc != 0)
@@ -894,7 +891,8 @@ class SymbolicTracer:
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
 
             try:
-                new_pc, modified = timebound(time_limit, run_instruction, instruction.instr, conc_state, ctx.lifter)
+                new_pc, modified = timebound(time_limit, run_instruction,
+                                             instruction.instr, conc_state, ctx.lifter)
             except TimeoutError:
                 warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
                 new_pc, modified = None, {}
