@@ -359,6 +359,19 @@
 					packages.dev
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+
+			musl-box64 = pkgs.mkShell {
+				packages = [
+					packages.dev
+					musl-pkgs.gcc
+					musl-pkgs.pkg-config
                     box64-patched
 				];
 
