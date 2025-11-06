@@ -86,10 +86,27 @@ def simp_fsub(expr_simp, expr: ExprOp):
         return expr_simp(ExprInt(res, expr.size))
     return expr
 
+def simp_fpconvert_fp64(expr_simp, expr: ExprOp):
+    from .utils import float_bits_to_uint, uint_bits_to_float, \
+                       double_bits_to_uint, uint_bits_to_double
+
+    if expr.op != 'fpconvert_fp64':
+        return expr
+
+    assert(len(expr.args) == 1)
+    operand = expr.args[0]
+    if operand.is_int():
+        if not operand.size == 32:
+            raise NotImplementedError('fpconvert_fp64 on values of size not in 64')
+
+        res = double_bits_to_uint(uint_bits_to_double(float_bits_to_uint(operand.arg)))
+        return expr_simp(ExprInt(res, 64))
+    return expr
+
 # The expression simplifier used in this module
 expr_simp = expr_simp_explicit
 expr_simp.enable_passes({
-    ExprOp: [simp_segm, simp_fadd, simp_fsub],
+    ExprOp: [simp_segm, simp_fadd, simp_fsub, simp_fpconvert_fp64],
 })
 
 class MiasmSymbolResolver:
