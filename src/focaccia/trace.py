@@ -34,6 +34,7 @@ class TraceEnvironment:
             json['argv'],
             json['envp'],
             json['binary_hash'],
+            None,
             json['start_address'],
             json['stop_address']
         )
@@ -61,7 +62,9 @@ class TraceEnvironment:
     def __repr__(self) -> str:
         return f'{self.binary_name} {" ".join(self.argv)}' \
                f'\n   bin-hash={self.binary_hash}' \
-               f'\n   envp={repr(self.envp)}'
+               f'\n   envp={repr(self.envp)}' \
+               f'\n   start_address={self.start_address}' \
+               f'\n   stop_address={self.stop_address}'
 
 class Trace(Generic[T]):
     def __init__(self,

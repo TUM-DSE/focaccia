@@ -154,6 +154,12 @@ class GDBServerStateIterator:
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
+    def run_until(self, addr: int):
+        breakpoint = gdb.Breakpoint(f'*{addr:#x}')
+        gdb.execute('continue')
+        breakpoint.delete()
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
 def record_minimal_snapshot(prev_state: ReadableProgramState,
                             cur_state: ReadableProgramState,
                             prev_transform: SymbolicTransform,
@@ -261,13 +267,15 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     symb_i = 0
 
     # Skip to start
-    pc = None
-    while start_addr:
+    try:
         pc = cur_state.read_register('pc')
-        if pc == start_addr:
-            info(f'Tracing QEMU from starting address: {start_addr}')
-            break
-        next(state_iter)
+        if start_addr and pc != start_addr:
+            info(f'Tracing QEMU from starting address: {hex(start_addr)}')
+            cur_state = state_iter.run_until(start_addr)
+    except Exception as e:
+        if start_addr:
+            raise Exception(f'Unable to reach start address {hex(start_addr)}: {e}')
+        raise Exception(f'Unable to trace: {e}')
 
     # An online trace matching algorithm.
     while True:
@@ -275,6 +283,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             pc = cur_state.read_register('pc')
 
             while pc != strace[symb_i].addr:
+                info(f'PC {hex(pc)} does not match next symbolic reference {hex(strace[symb_i].addr)}')
+
                 next_i = find_index(strace[symb_i+1:], pc, lambda t: t.addr)
 
                 # Drop the concrete state if no address in the symbolic trace
@@ -293,6 +303,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
                     break
 
             assert(cur_state.read_register('pc') == strace[symb_i].addr)
+            info(f'Validating instruction at address {hex(pc)}')
             states.append(record_minimal_snapshot(
                 states[-1] if states else cur_state,
                 cur_state,
@@ -354,8 +365,8 @@ def main():
         conc_states, matched_transforms = collect_conc_trace(
             gdb_server,
             symb_transforms.states,
-            env.start_address,
-            env.stop_address)
+            symb_transforms.env.start_address,
+            symb_transforms.env.stop_address)
     except Exception as e:
         raise Exception(f'Failed to collect concolic trace from QEMU: {e}')
 
