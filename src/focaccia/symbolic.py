@@ -1,11 +1,12 @@
-"""Tools and utilities for symbolic execution with Miasm."""
+"""Tools and utilities for  execution with Miasm."""
 
 from __future__ import annotations
-from typing import Iterable
-import logging
-import sys
 
-from miasm.analysis.binary import ContainerELF
+import sys
+import logging
+
+from pathlib import Path
+
 from miasm.analysis.machine import Machine
 from miasm.core.cpu import instruction as miasm_instr
 from miasm.core.locationdb import LocationDB
@@ -14,19 +15,28 @@ from miasm.ir.ir import Lifter
 from miasm.ir.symbexec import SymbolicExecutionEngine
 
 from .arch import Arch, supported_architectures
-from .lldb_target import LLDBConcreteTarget, \
-                         ConcreteRegisterError, \
-                         ConcreteMemoryError
+from .lldb_target import (
+    LLDBConcreteTarget,
+    LLDBLocalTarget,
+    LLDBRemoteTarget,
+    ConcreteRegisterError,
+    ConcreteMemoryError,
+)
 from .miasm_util import MiasmSymbolResolver, eval_expr, make_machine
-from .snapshot import ProgramState, ReadableProgramState, \
-                      RegisterAccessError, MemoryAccessError
+from .snapshot import ReadableProgramState, RegisterAccessError, MemoryAccessError
 from .trace import Trace, TraceEnvironment
+from .utils import timebound, TimeoutError
 
 logger = logging.getLogger('focaccia-symbolic')
+debug = logger.debug
+info = logger.info
 warn = logger.warn
 
 # Disable Miasm's disassembly logger
 logging.getLogger('asmblock').setLevel(logging.CRITICAL)
+
+class ValidationError(Exception):
+    pass
 
 def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     """Evaluate a symbol based on a concrete reference state.
@@ -52,8 +62,8 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
             return self._state.read_memory(addr, size)
 
         def resolve_location(self, loc):
-            raise ValueError(f'[In eval_symbol]: Unable to evaluate symbols'
-                             f' that contain IR location expressions.')
+            raise ValueError('[In eval_symbol]: Unable to evaluate symbols'
+                             ' that contain IR location expressions.')
 
     res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
 
@@ -61,7 +71,8 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     # but ExprLocs are disallowed by the
     # ConcreteStateWrapper
     if not isinstance(res, ExprInt):
-        raise Exception(f'{res} from symbol {symbol} is not an instance of ExprInt but only ExprInt can be evaluated')
+        raise Exception(f'{res} from symbol {symbol} is not an instance of ExprInt'
+                        f' but only ExprInt can be evaluated')
     return int(res)
 
 class Instruction:
@@ -116,18 +127,24 @@ class Instruction:
 class SymbolicTransform:
     """A symbolic transformation mapping one program state to another."""
     def __init__(self,
+                 tid: int, 
                  transform: dict[Expr, Expr],
                  instrs: list[Instruction],
                  arch: Arch,
                  from_addr: int,
                  to_addr: int):
         """
-        :param state: The symbolic transformation in the form of a SimState
-                      object.
-        :param first_inst: An instruction address. The transformation
-                           represents the modifications to the program state
-                           performed by this instruction.
+        :param tid: The thread ID that executed the instructions effecting the transformation.
+        :param transform: A map of input symbolic expressions and output symbolic expressions.
+        :param instrs: A list of instructions. The transformation
+                       represents the collective modifications to the program state
+                       performed by these instructions.
+        :param arch: The architecture of the symbolic transformation.
+        :param from_addr: The starting address of the instruction effecting the symbolic
+                          transformation.
+        :param to_addr: The final address of the last instruction in the instructions list.
         """
+        self.tid = tid
         self.arch = arch
 
         self.addr = from_addr
@@ -376,15 +393,16 @@ class SymbolicTransform:
             try:
                 return Instruction.from_string(text, arch, offset=0, length=length)
             except Exception as err:
-                warn(f'[In SymbolicTransform.from_json] Unable to parse'
-                     f' instruction string "{text}": {err}.')
-                return None
+                # Note: from None disables chaining in traceback
+                raise ValueError(f'[In SymbolicTransform.from_json] Unable to parse'
+                                 f' instruction string "{text}": {err}.') from None
 
+        tid = int(data['tid'])
         arch = supported_architectures[data['arch']]
         start_addr = int(data['from_addr'])
         end_addr = int(data['to_addr'])
 
-        t = SymbolicTransform({}, [], arch, start_addr, end_addr)
+        t = SymbolicTransform(tid, {}, [], arch, start_addr, end_addr)
         t.changed_regs = { name: parse(val) for name, val in data['regs'].items() }
         t.changed_mem = { parse(addr): parse(val) for addr, val in data['mem'].items() }
         instrs = [decode_inst(b, arch) for b in data['instructions']]
@@ -404,15 +422,15 @@ class SymbolicTransform:
             try:
                 return [inst.length, inst.to_string()]
             except Exception as err:
-                warn(f'[In SymbolicTransform.to_json] Unable to serialize'
-                     f' "{inst}" as string: {err}. This instruction will not'
-                     f' be serialized.')
-                return None
+                # Note: from None disables chaining in traceback
+                raise Exception(f'[In SymbolicTransform.to_json] Unable to serialize'
+                                f' "{inst}" as string: {err}') from None
 
         instrs = [encode_inst(inst) for inst in self.instructions]
         instrs = [inst for inst in instrs if inst is not None]
         return {
             'arch': self.arch.archname,
+            'tid': self.tid,
             'from_addr': self.range[0],
             'to_addr': self.range[1],
             'instructions': instrs,
@@ -422,7 +440,7 @@ class SymbolicTransform:
 
     def __repr__(self) -> str:
         start, end = self.range
-        res = f'Symbolic state transformation {hex(start)} -> {hex(end)}:\n'
+        res = f'Symbolic state transformation [{self.tid}] {start} -> {end}:\n'
         res += '  [Symbols]\n'
         for reg, expr in self.changed_regs.items():
             res += f'    {reg:6s} = {expr}\n'
@@ -445,8 +463,8 @@ class MemoryBinstream:
 
     def __getitem__(self, key: int | slice):
         if isinstance(key, slice):
-            return self._state.read_memory(key.start, key.stop - key.start)
-        return self._state.read_memory(key, 1)
+            return self._state.read_instructions(key.start, key.stop - key.start)
+        return self._state.read_instructions(key, 1)
 
 class DisassemblyContext:
     def __init__(self, target: ReadableProgramState):
@@ -463,9 +481,14 @@ class DisassemblyContext:
         self.mdis.follow_call = True
         self.lifter = self.machine.lifter(self.loc_db)
 
+    def disassemble(self, address: int) -> Instruction:
+        miasm_instr = self.mdis.dis_instr(address)
+        return Instruction(miasm_instr, self.machine, self.arch, self.loc_db)
+
 def run_instruction(instr: miasm_instr,
                     conc_state: MiasmSymbolResolver,
-                    lifter: Lifter) \
+                    lifter: Lifter,
+                    force: bool = False) \
         -> tuple[ExprInt | None, dict[Expr, Expr]]:
     """Compute the symbolic equation of a single instruction.
 
@@ -578,8 +601,12 @@ def run_instruction(instr: miasm_instr,
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
         assert(isinstance(loc, Expr) or isinstance(loc, LocKey))
     except NotImplementedError as err:
-        warn(f'[WARNING] Unable to lift instruction {instr}: {err}. Skipping.')
-        return None, {}  # Create an empty transform for the instruction
+        msg = f'Unable to lift instruction {instr}: {err}'
+        if force:
+            warn(f'{msg}. Skipping')
+            return None, {}
+        else:
+            raise Exception(msg)
 
     # Execute instruction symbolically
     new_pc, modified = execute_location(loc)
@@ -587,114 +614,319 @@ def run_instruction(instr: miasm_instr,
 
     return new_pc, modified
 
-class _LLDBConcreteState(ReadableProgramState):
-    """A wrapper around `LLDBConcreteTarget` that provides access via a
-    `ReadableProgramState` interface. Reads values directly from an LLDB
-    target. This saves us the trouble of recording a full program state, and
-    allows us instead to read values from LLDB on demand.
-    """
+class SpeculativeTracer(ReadableProgramState):
     def __init__(self, target: LLDBConcreteTarget):
         super().__init__(target.arch)
-        self._target = target
+        self.target = target
+        self.pc = target.read_register('pc')
+        self.speculative_pc: int | None = None
+        self.speculative_count: int = 0
+        
+        self.read_cache = {}
+
+    def speculate(self, new_pc):
+        self.read_cache.clear()
+        if new_pc is None:
+            self.progress_execution()
+            self.target.step()
+            self.pc = self.target.read_register('pc')
+            self.speculative_pc = None
+            self.speculative_count = 0
+            return
+
+        new_pc = int(new_pc)
+        self.speculative_pc = new_pc
+        self.speculative_count += 1
+
+    def progress_execution(self) -> None:
+        if self.speculative_pc is not None and self.speculative_count != 0:
+            debug(f'Updating PC to {hex(self.speculative_pc)}')
+            if self.speculative_count == 1:
+                self.target.step()
+            else:
+                self.target.run_until(self.speculative_pc)
+
+            self.pc = self.speculative_pc
+            self.speculative_pc = None
+            self.speculative_count = 0
+
+            self.read_cache.clear()
+
+    def run_until(self, addr: int):
+        if self.speculative_pc:
+            raise Exception('Attempting manual execution with speculative execution enabled')
+        self.target.run_until(addr)
+        self.pc = addr
+
+    def step(self):
+        self.progress_execution()
+        if self.target.is_exited():
+            return
+        self.target.step()
+        self.pc = self.target.read_register('pc')
+
+    def _cache(self, name: str, value):
+        self.read_cache[name] = value
+        return value
+
+    def read_pc(self) -> int:
+        if self.speculative_pc is not None:
+            return self.speculative_pc
+        return self.pc
+
+    def read_flags(self) -> dict[str, int | bool]:
+        if 'flags' in self.read_cache:
+            return self.read_cache['flags']
+        self.progress_execution()
+        return self._cache('flags', self.target.read_flags())
 
     def read_register(self, reg: str) -> int:
         regname = self.arch.to_regname(reg)
         if regname is None:
             raise RegisterAccessError(reg, f'Not a register name: {reg}')
 
-        try:
-            return self._target.read_register(regname)
-        except ConcreteRegisterError:
-            raise RegisterAccessError(regname, '')
+        if reg in self.read_cache:
+            return self.read_cache[reg]
+
+        self.progress_execution()
+        return self._cache(reg, self.target.read_register(regname))
+
+    def write_register(self, regname: str, value: int):
+        self.progress_execution()
+        self.read_cache.pop(regname, None)
+        self.target.write_register(regname, value)
+
+    def read_instructions(self, addr: int, size: int) -> bytes:
+        return self.target.read_memory(addr, size)
 
     def read_memory(self, addr: int, size: int) -> bytes:
-        try:
-            return self._target.read_memory(addr, size)
-        except ConcreteMemoryError:
-            raise MemoryAccessError(addr, size, 'Unable to read memory from LLDB.')
+        self.progress_execution()
+        cache_name = f'{addr}_{size}' 
+        if cache_name in self.read_cache:
+            return self.read_cache[cache_name]
+        return self._cache(cache_name, self.target.read_memory(addr, size))
 
-def collect_symbolic_trace(env: TraceEnvironment,
-                           start_addr: int | None = None
-                           ) -> Trace[SymbolicTransform]:
-    """Execute a program and compute state transformations between executed
-    instructions.
+    def write_memory(self, addr: int, value: bytes):
+        self.progress_execution()
+        self.read_cache.pop(addr, None)
+        self.target.write_memory(addr, value)
 
-    :param binary: The binary to trace.
-    :param args:   Arguments to the program.
+    def __getattr__(self, name: str):
+        return getattr(self.target, name)
+
+class SymbolicTracer:
+    """A symbolic tracer that uses `LLDBConcreteTarget` with Miasm to simultaneously execute a
+    program with concrete state and collect its symbolic transforms
     """
-    binary = env.binary_name
+    def __init__(self, 
+                 env: TraceEnvironment, 
+                 remote: str | None=None,
+                 force: bool=False,
+                 cross_validate: bool=False):
+        self.env = env
+        self.force = force
+        self.remote = remote
+        self.cross_validate = cross_validate
+        self.target = SpeculativeTracer(self.create_debug_target())
 
-    # Set up concrete reference state
-    target = LLDBConcreteTarget(binary, env.argv, env.envp)
-    if start_addr is not None:
-        target.run_until(start_addr)
-    lldb_state = _LLDBConcreteState(target)
+        self.nondet_events = self.env.detlog.events()
+        self.next_event: int | None = None
 
-    ctx = DisassemblyContext(lldb_state)
-    arch = ctx.arch
+    def create_debug_target(self) -> LLDBConcreteTarget:
+        binary = self.env.binary_name
+        if self.remote is False:
+            debug(f'Launching local debug target {binary} {self.env.argv}')
+            debug(f'Environment: {self.env}')
+            return LLDBLocalTarget(binary, self.env.argv, self.env.envp)
 
-    # Trace concolically
-    strace: list[SymbolicTransform] = []
-    while not target.is_exited():
-        pc = target.read_register('pc')
+        debug(f'Connecting to remote debug target {self.remote}')
+        target = LLDBRemoteTarget(self.remote, binary)
 
-        # Disassemble instruction at the current PC
-        try:
-            instr = ctx.mdis.dis_instr(pc)
-        except:
-            err = sys.exc_info()[1]
-            warn(f'Unable to disassemble instruction at {hex(pc)}: {err}.'
-                 f' Skipping.')
-            target.step()
-            continue
+        module_name = target.determine_name()
+        binary = str(Path(self.env.binary_name).resolve())
+        if binary != module_name:
+            warn(f'Discovered binary name {module_name} differs from specified name {binary}')
 
-        # Run instruction
-        conc_state = MiasmSymbolResolver(lldb_state, ctx.loc_db)
-        new_pc, modified = run_instruction(instr, conc_state, ctx.lifter)
+        return target
 
-        # Create symbolic transform
-        instruction = Instruction(instr, ctx.machine, ctx.arch, ctx.loc_db)
-        if new_pc is None:
-            new_pc = pc + instruction.length
-        else:
-            new_pc = int(new_pc)
-        transform = SymbolicTransform(modified, [instruction], arch, pc, new_pc)
-        strace.append(transform)
+    def predict_next_state(self, instruction: Instruction, transform: SymbolicTransform):
+        debug(f'Evaluating register and memory transforms for {instruction} to cross-validate')
+        predicted_regs = transform.eval_register_transforms(self.target)
+        predicted_mems = transform.eval_memory_transforms(self.target)
+        return predicted_regs, predicted_mems
 
-        # Predict next concrete state.
-        # We verify the symbolic execution backend on the fly for some
-        # additional protection from bugs in the backend.
-        if env.cross_validate:
-            predicted_regs = transform.eval_register_transforms(lldb_state)
-            predicted_mems = transform.eval_memory_transforms(lldb_state)
-
-        # Step forward
-        target.step()
-        if target.is_exited():
-            break
-
+    def validate(self,
+                 instruction: Instruction,
+                 transform: SymbolicTransform,
+                 predicted_regs: dict[str, int],
+                 predicted_mems: dict[int, bytes]):
         # Verify last generated transform by comparing concrete state against
         # predicted values.
-        assert(len(strace) > 0)
-        if env.cross_validate:
-            for reg, val in predicted_regs.items():
-                conc_val = lldb_state.read_register(reg)
-                if conc_val != val:
-                    warn(f'Symbolic execution backend generated false equation for'
-                         f' [{hex(instruction.addr)}]: {instruction}:'
-                         f' Predicted {reg} = {hex(val)}, but the'
-                         f' concrete state has value {reg} = {hex(conc_val)}.'
-                         f'\nFaulty transformation: {transform}')
-            for addr, data in predicted_mems.items():
-                conc_data = lldb_state.read_memory(addr, len(data))
-                if conc_data != data:
-                    warn(f'Symbolic execution backend generated false equation for'
-                         f' [{hex(instruction.addr)}]: {instruction}: Predicted'
-                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
-                         f' but the concrete state has value'
-                         f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
-                         f'\nFaulty transformation: {transform}')
-                    raise Exception()
+        if self.target.is_exited():
+            return
 
-    return Trace(strace, env)
+        debug('Cross-validating symbolic transforms by comparing actual to predicted values')
+        for reg, val in predicted_regs.items():
+            conc_val = self.target.read_register(reg)
+            if conc_val != val:
+                raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                      f' [{hex(instruction.addr)}]: {instruction}:'
+                                      f' Predicted {reg} = {hex(val)}, but the'
+                                      f' concrete state has value {reg} = {hex(conc_val)}.'
+                                      f'\nFaulty transformation: {transform}')
+        for addr, data in predicted_mems.items():
+            conc_data = self.target.read_memory(addr, len(data))
+            if conc_data != data:
+                raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                      f' [{hex(instruction.addr)}]: {instruction}: Predicted'
+                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
+                                      f' but the concrete state has value'
+                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
+                                      f'\nFaulty transformation: {transform}')
+
+    def progress_event(self) -> None:
+        if (self.next_event + 1) < len(self.nondet_events):
+            self.next_event += 1
+            debug(f'Next event to handle at index {self.next_event}')
+        else:
+            self.next_event = None
+
+    def post_event(self) -> None:
+        if self.next_event:
+            if self.nondet_events[self.next_event].pc == 0:
+                # Exit sequence
+                debug('Completed exit event')
+                self.target.run()
+
+            debug(f'Completed handling event at index {self.next_event}')
+            self.progress_event()
+
+    def is_stepping_instr(self, pc: int, instruction: Instruction) -> bool:
+        if self.nondet_events:
+            pc = pc + instruction.length # detlog reports next pc for each event
+            if self.next_event and self.nondet_events[self.next_event].match(pc, self.target):
+                debug('Current instruction matches next event; stepping through it')
+                self.progress_event()
+                return True
+        else:
+            if self.target.arch.is_instr_syscall(str(instruction)):
+                return True
+        return False
+
+    def progress(self, new_pc, step: bool = False) -> int | None:
+        self.target.speculate(new_pc)
+        if step:
+            self.target.progress_execution()
+            if self.target.is_exited():
+                return None
+        return self.target.read_pc()
+
+    def trace(self, 
+              start_addr: int | None = None,
+              stop_addr: int | None = None,
+              time_limit: int | None = None) -> Trace[SymbolicTransform]:
+        """Execute a program and compute state transformations between executed
+        instructions.
+
+        :param start_addr: Address from which to start tracing.
+        :param stop_addr: Address until which to trace.
+        """
+        # Set up concrete reference state
+        if start_addr is not None:
+            self.target.run_until(start_addr)
+
+        for i in range(len(self.nondet_events)):
+            if self.nondet_events[i].pc == self.target.read_pc():
+                self.next_event = i+1
+                if self.next_event >= len(self.nondet_events):
+                    break
+
+                debug(f'Starting from event {self.nondet_events[i]} onwards')
+                break
+
+        ctx = DisassemblyContext(self.target)
+        arch = ctx.arch
+
+        if logger.isEnabledFor(logging.DEBUG):
+            debug('Tracing program with the following non-deterministic events')
+            for event in self.nondet_events:
+                debug(event)
+
+        # Trace concolically
+        strace: list[SymbolicTransform] = []
+        while not self.target.is_exited():
+            pc = self.target.read_pc()
+
+            if stop_addr is not None and pc == stop_addr:
+                break
+
+            assert(pc != 0)
+
+            # Disassemble instruction at the current PC
+            tid = self.target.get_current_tid()
+            try:
+                instruction = ctx.disassemble(pc)
+                info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
+            except:
+                err = sys.exc_info()[1]
+
+                # Try to recovery by using the LLDB disassembly instead
+                try:
+                    alt_disas = self.target.get_disassembly(pc)
+                    instruction = Instruction.from_string(alt_disas, ctx.arch, pc,
+                                                         self.target.get_instruction_size(pc))
+                    info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
+                except:
+                    if self.force:
+                        if alt_disas:
+                            warn(f'[{tid}] Unable to handle instruction {alt_disas} at {hex(pc)} in Miasm.'
+                                 f' Skipping.')
+                        else:
+                            warn(f'[{tid}] Unable to disassemble instruction {hex(pc)}: {err}.'
+                                 f' Skipping.')
+                        self.target.step()
+                        continue
+                    raise # forward exception
+
+            is_event = self.is_stepping_instr(pc, instruction)
+
+            # Run instruction
+            conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
+
+            try:
+                new_pc, modified = timebound(time_limit, run_instruction, instruction.instr, conc_state, ctx.lifter)
+            except TimeoutError:
+                warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
+                new_pc, modified = None, {}
+
+            if self.cross_validate and new_pc:
+                # Predict next concrete state.
+                # We verify the symbolic execution backend on the fly for some
+                # additional protection from bugs in the backend.
+                new_pc = int(new_pc)
+                transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+                pred_regs, pred_mems = self.predict_next_state(instruction, transform)
+                self.progress(new_pc, step=is_event)
+
+                try:
+                    self.validate(instruction, transform, pred_regs, pred_mems)
+                except ValidationError as e:
+                    if self.force:
+                        warn(f'Cross-validation failed: {e}')
+                        continue
+                    raise
+            else:
+                new_pc = self.progress(new_pc, step=is_event)
+                if new_pc is None:
+                    transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
+                    strace.append(transform)
+                    continue # we're done
+                transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+
+            strace.append(transform)
+
+            if is_event:
+                self.post_event()
+
+        return Trace(strace, self.env)
 

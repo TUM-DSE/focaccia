@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import ctypes
 import os
-import shutil
 import sys
+import shutil
+import ctypes
+import signal
 from functools import total_ordering
 from hashlib import sha256
 
@@ -114,3 +115,31 @@ def print_result(result, min_severity: ErrorSeverity):
           f' (showing {min_severity} and higher).')
     print('#' * 60)
     print()
+
+def to_int(value: str) -> int:
+    return int(value, 0)
+
+def to_num(value: str) -> int | float:
+    try:
+        return int(value, 0)
+    except:
+        return float(value)
+
+class TimeoutError(Exception):
+    pass
+
+def timebound(timeout: int | float | None, func, *args, **kwargs):
+    if timeout is None:
+        return func(*args, **kwargs)
+
+    def _handle_timeout(signum, frame):
+        raise TimeoutError(f'Function exceeded {timeout} limit')
+    
+    old_handler = signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        return func(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+

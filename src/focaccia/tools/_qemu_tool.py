@@ -7,6 +7,7 @@ work to do.
 """
 
 import gdb
+import logging
 import traceback
 from typing import Iterable
 
@@ -20,6 +21,11 @@ from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
 
 from validate_qemu import make_argparser, verbosity
+
+logger = logging.getLogger('focaccia-qemu-validator')
+debug = logger.debug
+info = logger.info
+warn = logger.warning
 
 class GDBProgramState(ReadableProgramState):
     from focaccia.arch import aarch64, x86
@@ -263,15 +269,17 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
                 # Drop the concrete state if no address in the symbolic trace
                 # matches
                 if next_i is None:
-                    print(f'Warning: Dropping concrete state {hex(pc)}, as no'
-                          f' matching instruction can be found in the symbolic'
-                          f' reference trace.')
+                    warn(f'Dropping concrete state {hex(pc)}, as no'
+                         f' matching instruction can be found in the symbolic'
+                         f' reference trace.')
                     cur_state = next(state_iter)
                     pc = cur_state.read_register('pc')
                     continue
 
                 # Otherwise, jump to the next matching symbolic state
                 symb_i += next_i + 1
+                if symb_i >= len(strace):
+                    break
 
             assert(cur_state.read_register('pc') == strace[symb_i].addr)
             states.append(record_minimal_snapshot(
@@ -282,23 +290,33 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             matched_transforms.append(strace[symb_i])
             cur_state = next(state_iter)
             symb_i += 1
+            if symb_i >= len(strace):
+                break
         except StopIteration:
             break
         except Exception as e:
             print(traceback.format_exc())
             raise e
 
+    # Note: this may occur when symbolic traces were gathered with a stop address
+    if symb_i >= len(strace):
+        warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace)-1}')
+        
     return states, matched_transforms
 
 def main():
     args = make_argparser().parse_args()
+    
+    logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
+    logging.basicConfig(level=logging_level, force=True)
 
     try:
         gdb_server = GDBServerStateIterator(args.remote)
-    except:
-        raise Exception('Unable to perform basic GDB setup')
+    except Exception as e:
+        raise Exception(f'Unable to perform basic GDB setup: {e}') from None
 
     try:
+        executable: str | None = None
         if args.executable is None:
             executable = gdb_server.binary
         else:
@@ -307,39 +325,40 @@ def main():
         argv = []  # QEMU's GDB stub does not support 'info proc cmdline'
         envp = []  # Can't get the remote target's environment
         env = TraceEnvironment(executable, argv, envp, '?')
-    except:
-        raise Exception(f'Unable to create trace environment for executable {executable}')
+    except Exception as e:
+        raise Exception(f'Unable to create trace environment for executable {executable}: {e}') from None
 
     # Read pre-computed symbolic trace
     try:
         with open(args.symb_trace, 'r') as strace:
             symb_transforms = parser.parse_transformations(strace)
-    except:
-        raise Exception('Failed to parse state transformations from native trace')
+    except Exception as e:
+        raise Exception(f'Failed to parse state transformations from native trace: {e}') from None
 
     # Use symbolic trace to collect concrete trace from QEMU
     try:
         conc_states, matched_transforms = collect_conc_trace(
             gdb_server,
             symb_transforms.states)
-    except:
-        raise Exception(f'Failed to collect concolic trace from QEMU')
+    except Exception as e:
+        raise Exception(f'Failed to collect concolic trace from QEMU: {e}') from None
 
     # Verify and print result
     if not args.quiet:
         try:
             res = compare_symbolic(conc_states, matched_transforms)
             print_result(res, verbosity[args.error_level])
-        except:
-            raise Exception('Error occured when comparing with symbolic equations')
+        except Exception as e:
+            raise Exception('Error occured when comparing with symbolic equations: {e}') from None
 
     if args.output:
         from focaccia.parser import serialize_snapshots
         try:
             with open(args.output, 'w') as file:
                 serialize_snapshots(Trace(conc_states, env), file)
-        except:
-            raise Exception(f'Unable to serialize snapshots to file {args.output}')
+        except Exception as e:
+            raise Exception(f'Unable to serialize snapshots to file {args.output}: {e}') from None
 
 if __name__ == "__main__":
     main()
+

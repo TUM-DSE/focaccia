@@ -249,6 +249,11 @@
 		'';
 
 		gdbInternal = pkgs.gdb.override { python3 = python; };
+		rr = pkgs.rr.overrideAttrs (old: {
+			pname = "focaccia-rr";
+			version = "git";
+			src = ./rr;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -320,7 +325,8 @@
 				type = "app";
 				program = "${pkgs.writeShellScriptBin "uv-sync" ''
 					set -euo pipefail
-					exec ${pkgs.uv}/bin/uv sync
+					${pkgs.uv}/bin/uv sync
+					sed -i '/riscv/d' uv.lock
 				''}/bin/uv-sync";
 				meta = {
 					description = "Sync uv python packages";
@@ -365,6 +371,21 @@
                   export BOX64_DYNAREC_DF=0
                   export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${zydis-shared-object}/lib
                 '';
+			};
+
+			musl-extra = pkgs.mkShell {
+				packages = [
+					packages.dev
+					rr
+					musl-pkgs.gcc
+					pkgs.capnproto
+					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
 			};
 		};
 

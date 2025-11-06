@@ -18,6 +18,7 @@ necessary logic to pass them to `qemu_tool.py`.
 
 import os
 import sys
+import logging
 import argparse
 import sysconfig
 import subprocess
@@ -103,6 +104,9 @@ def main():
     if args.use_socket:
         if not args.guest_arch:
             argparser.error('--guest-arch is required when --use-socket is specified')
+
+        logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
+        logging.basicConfig(level=logging_level, force=True)
 
         # QEMU plugin interface
         start_validation_server(args.symb_trace,

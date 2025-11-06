@@ -202,3 +202,16 @@ class ArchX86(Arch):
 
         # Apply custom register alias rules
         return regname_aliases.get(name.upper(), None)
+
+    def is_instr_uarch_dep(self, instr: str) -> bool:
+        if "XGETBV" in instr.upper():
+            return True
+        return False
+
+    def is_instr_syscall(self, instr: str) -> bool:
+        if instr.upper().startswith("SYSCALL"):
+            return True
+        if instr.upper().startswith("INT"):
+            return True
+        return False
+

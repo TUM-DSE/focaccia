@@ -59,6 +59,24 @@ Note: the above workflow assumes that you used `nix build .#qemu-plugin` to buil
 
 Using this workflow, Focaccia can determine whether a mistranslation occured in that particular QEMU run.
 
+Focaccia includes support for tracing non-deterministic programs using the RR debugger, requiring a
+similar workflow:
+
+```bash
+rr record -o bug.rr.out
+rr replay -s 12345 bug.rr.out
+capture-transforms --remote localhost:12345 --deterministic-log bug.rr.out -o oracle.trace bug.out
+```
+
+Note: the `rr replay` call prints the correct binary name to use when invoking `capture-transforms`,
+it also prints program output. As such, it should be invoked separately as a foreground process.
+
+Note: `rr record` may fail on Zen and Zen+ AMD CPUs. It is generally possible to continue using it
+by specifying flag `-F` but keep in mind that replaying may fail unexpectedly sometimes on such
+CPUs.
+
+Note: we currently do not support validating such programs on QEMU.
+
 ### Box64
 
 For validating Box64, we create the oracle and test traces and compare them
