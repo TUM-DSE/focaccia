@@ -6,8 +6,6 @@
 
 		nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-		nixpkgs-qemu-60.url = "github:nixos/nixpkgs/f8f124009497b3f9908f395d2533a990feee1de8";
-
 		flake-utils.url = "github:numtide/flake-utils";
 
 		pyproject-nix = {
@@ -27,21 +25,24 @@
 			inputs.nixpkgs.follows = "nixpkgs";
 			inputs.pyproject-nix.follows = "pyproject-nix";
 		};
+
+		qemu-submodule = {
+			url = "path:qemu/";
+			flake = true;
+		};
 	};
 
-	outputs = inputs@{
-		self,
+	outputs = {
 		uv2nix,
 		nixpkgs,
 		flake-utils,
 		pyproject-nix,
 		pyproject-build-systems,
+		qemu-submodule,
 		...
 	}:
 	flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
 	let
-		qemu-60 = inputs.nixpkgs-qemu-60.qemu;
-
 		# Refine nixpkgs used in flake to system arch
 		pkgs = import nixpkgs {
 			inherit system;
@@ -271,6 +272,8 @@
 				];
 			});
 
+			qemu-plugin = qemu-submodule.packages.${system}.default;
+
 			default = focaccia;
 		};
 
@@ -302,7 +305,6 @@
 
 			validate-qemu = {
 				type = "app";
-				# program = "${packages.focaccia}/bin/validate-qemu";
 				program = let
 					wrapper = pkgs.writeShellScriptBin "validate-qemu" ''
 						exec ${packages.focaccia}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"

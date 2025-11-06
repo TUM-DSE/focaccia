@@ -2,3 +2,7 @@
 	path = miasm
 	url = git@github.com:taugoust/miasm.git
 
+[submodule "qemu"]
+	path = qemu
+	url = git@github.com:TUM-DSE/focaccia-qemu.git
+	branch = ta/focaccia

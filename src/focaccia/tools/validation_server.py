@@ -1,24 +1,25 @@
 #! /usr/bin/env python3
 
+import os
+import socket
+import struct
+import logging
 from typing import Iterable
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
-from focaccia.compare import compare_symbolic
-from focaccia.snapshot import ProgramState, ReadableProgramState, \
-                              RegisterAccessError, MemoryAccessError
+from focaccia.compare import compare_symbolic, ErrorTypes
+from focaccia.snapshot import ProgramState, RegisterAccessError, MemoryAccessError
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.trace import Trace
 from focaccia.utils import print_result
 
-from validate_qemu import make_argparser, verbosity
 
-import socket
-import struct
-import os
+logger = logging.getLogger('focaccia-qemu-validation-server')
+debug = logger.debug
+info = logger.info
+warn = logger.warning
 
-
-SOCK_PATH = '/tmp/focaccia.sock'
 
 def endian_fmt(endianness: str) -> str:
     if endianness == 'little':
@@ -124,9 +125,8 @@ class PluginProgramState(ProgramState):
                 raise StopIteration
 
             if len(resp) < 180:
-                print(f'Invalid response length: {len(resp)}')
-                print(f'Response: {resp}')
-                return 0
+                raise RegisterAccessError(reg, f'Invalid response length when reading {reg}: {len(resp)}'
+                                          f' for response {resp}')
 
             val, size = unmk_register(resp, self.arch.endianness)
 
@@ -283,7 +283,7 @@ def record_minimal_snapshot(prev_state: ProgramState,
                 regval = cur_state.read_register(regname)
                 out_state.set_register(regname, regval)
             except RegisterAccessError:
-                pass
+                out_state.set_register(regname, 0)
         for mem in mems:
             assert(mem.size % 8 == 0)
             addr = eval_symbol(mem.ptr, prev_state)
@@ -377,27 +377,20 @@ def collect_conc_trace(qemu: PluginStateIterator, \
     return states, matched_transforms
 
 
-def main():
-    prog = make_argparser()
-    prog.add_argument('--use-socket',
-                      required=True,
-                      type=str,
-                      help='Use QEMU Plugin interface at <socket> instead of GDB')
-    prog.add_argument('--guest_arch',
-                      required=True,
-                      type=str,
-                      help='Architecture of the guest being emulated. (Only required when using --use-socket)')
-
-    args = prog.parse_args()
-
+def start_validation_server(symb_trace: str,
+                            output: str,
+                            socket: str,
+                            guest_arch: str,
+                            env,
+                            verbosity: ErrorTypes,
+                            is_quiet: bool = False):
     # Read pre-computed symbolic trace
-    with open(args.symb_trace, 'r') as strace:
+    with open(symb_trace, 'r') as strace:
         symb_transforms = parser.parse_transformations(strace)
 
-    arch = supported_architectures.get(args.guest_arch)
-    sock_path = args.use_socket
+    arch = supported_architectures.get(guest_arch)
 
-    qemu = PluginStateIterator(sock_path, arch)
+    qemu = PluginStateIterator(socket, arch)
 
     # Use symbolic trace to collect concrete trace from QEMU
     conc_states, matched_transforms = collect_conc_trace(
@@ -405,15 +398,12 @@ def main():
         symb_transforms.states)
 
     # Verify and print result
-    if not args.quiet:
+    if not is_quiet:
         res = compare_symbolic(conc_states, matched_transforms)
-        print_result(res, verbosity[args.error_level])
+        print_result(res, verbosity)
 
-    if args.output:
+    if output:
         from focaccia.parser import serialize_snapshots
-        with open(args.output, 'w') as file:
+        with open(output, 'w') as file:
             serialize_snapshots(Trace(conc_states, env), file)
-
-if __name__ == "__main__":
-    main()
 
