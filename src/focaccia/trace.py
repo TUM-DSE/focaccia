@@ -12,11 +12,15 @@ class TraceEnvironment:
                  argv: list[str],
                  envp: list[str],
                  binary_hash: str | None = None,
-                 nondeterminism_log = None):
+                 nondeterminism_log = None,
+                 start_address: int | None = None,
+                 stop_address:  int | None = None):
         self.argv = argv
         self.envp = envp
         self.binary_name = binary
         self.detlog = nondeterminism_log
+        self.start_address = start_address
+        self.stop_address = stop_address
         if binary_hash is None and self.binary_name is not None:
             self.binary_hash = file_hash(binary)
         else:
@@ -30,6 +34,8 @@ class TraceEnvironment:
             json['argv'],
             json['envp'],
             json['binary_hash'],
+            json['start_address'],
+            json['stop_address']
         )
 
     def to_json(self) -> dict:
@@ -39,6 +45,8 @@ class TraceEnvironment:
             'binary_hash': self.binary_hash,
             'argv': self.argv,
             'envp': self.envp,
+            'start_address': self.start_address,
+            'stop_address': self.stop_address
         }
 
     def __eq__(self, other: object) -> bool:
@@ -59,8 +67,8 @@ class Trace(Generic[T]):
     def __init__(self,
                  trace_states: list[T],
                  env: TraceEnvironment):
-        self.states = trace_states
         self.env = env
+        self.states = trace_states
 
     def __len__(self) -> int:
         return len(self.states)

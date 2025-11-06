@@ -226,7 +226,9 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
     return state
 
 def collect_conc_trace(gdb: GDBServerStateIterator, \
-                       strace: list[SymbolicTransform]) \
+                       strace: list[SymbolicTransform],
+                       start_addr: int | None = None,
+                       stop_addr: int | None = None) \
         -> tuple[list[ProgramState], list[SymbolicTransform]]:
     """Collect a trace of concrete states from GDB.
 
@@ -257,6 +259,15 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     state_iter = iter(gdb)
     cur_state = next(state_iter)
     symb_i = 0
+
+    # Skip to start
+    pc = None
+    while start_addr:
+        pc = cur_state.read_register('pc')
+        if pc == start_addr:
+            info(f'Tracing QEMU from starting address: {start_addr}')
+            break
+        next(state_iter)
 
     # An online trace matching algorithm.
     while True:
@@ -293,6 +304,9 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             if symb_i >= len(strace):
                 break
         except StopIteration:
+            if stop_addr and pc != stop_addr:
+                raise Exception(f'QEMU stopped at {hex(pc)} before reaching the stop address'
+                                f' {hex(stop_addr)}')
             break
         except Exception as e:
             print(traceback.format_exc())
@@ -313,7 +327,7 @@ def main():
     try:
         gdb_server = GDBServerStateIterator(args.remote)
     except Exception as e:
-        raise Exception(f'Unable to perform basic GDB setup: {e}') from None
+        raise Exception(f'Unable to perform basic GDB setup: {e}')
 
     try:
         executable: str | None = None
@@ -326,22 +340,24 @@ def main():
         envp = []  # Can't get the remote target's environment
         env = TraceEnvironment(executable, argv, envp, '?')
     except Exception as e:
-        raise Exception(f'Unable to create trace environment for executable {executable}: {e}') from None
+        raise Exception(f'Unable to create trace environment for executable {executable}: {e}')
 
     # Read pre-computed symbolic trace
     try:
         with open(args.symb_trace, 'r') as strace:
             symb_transforms = parser.parse_transformations(strace)
     except Exception as e:
-        raise Exception(f'Failed to parse state transformations from native trace: {e}') from None
+        raise Exception(f'Failed to parse state transformations from native trace: {e}')
 
     # Use symbolic trace to collect concrete trace from QEMU
     try:
         conc_states, matched_transforms = collect_conc_trace(
             gdb_server,
-            symb_transforms.states)
+            symb_transforms.states,
+            env.start_address,
+            env.stop_address)
     except Exception as e:
-        raise Exception(f'Failed to collect concolic trace from QEMU: {e}') from None
+        raise Exception(f'Failed to collect concolic trace from QEMU: {e}')
 
     # Verify and print result
     if not args.quiet:
@@ -349,7 +365,7 @@ def main():
             res = compare_symbolic(conc_states, matched_transforms)
             print_result(res, verbosity[args.error_level])
         except Exception as e:
-            raise Exception('Error occured when comparing with symbolic equations: {e}') from None
+            raise Exception('Error occured when comparing with symbolic equations: {e}')
 
     if args.output:
         from focaccia.parser import serialize_snapshots
@@ -357,7 +373,7 @@ def main():
             with open(args.output, 'w') as file:
                 serialize_snapshots(Trace(conc_states, env), file)
         except Exception as e:
-            raise Exception(f'Unable to serialize snapshots to file {args.output}: {e}') from None
+            raise Exception(f'Unable to serialize snapshots to file {args.output}: {e}')
 
 if __name__ == "__main__":
     main()
