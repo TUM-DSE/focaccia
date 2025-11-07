@@ -97,16 +97,16 @@ class Event:
                  pc: int,
                  tid: int,
                  arch: Arch,
-                 event_type: str,
                  registers: dict[str, int],
-                 memory_writes: dict[int, int]):
+                 memory_writes: dict[int, int],
+                 event_type: str):
         self.pc = pc
         self.tid = tid
         self.arch = arch
-        self.event_type = event_type
 
         self.registers = registers
         self.mem_writes = memory_writes
+        self.event_type = event_type
 
     def match(self, pc: int, target: ReadableProgramState) -> bool:
         # TODO: match the rest of the state to be sure
@@ -121,7 +121,7 @@ class Event:
         return False
 
     def __repr__(self) -> str:
-        reg_repr = ''
+        reg_repr = f'{self.event_type} event\n'
         for reg, value in self.registers.items():
             reg_repr += f'{reg} = {hex(value)}\n'
 
@@ -136,6 +136,111 @@ class Event:
             repr_str += f'\nMemory writes:\n{mem_write_repr}'
 
         return repr_str
+
+class SyscallBufferFlushEvent(Event):
+    def __init__(self,
+                 pc: int,
+                 tid: int,
+                 arch: Arch,
+                 registers: dict[str, int],
+                 memory_writes: dict[int, int],
+                 mprotect_records: bytes):
+        super().__init__(pc, tid, arch, registers, memory_writes, 'syscallBufFlush')
+        self.mprotect_records = mprotect_records
+
+    def __repr__(self):
+        return f'{super().__repr__()}\nmprotect_records = {self.mprotect_records}'
+
+class SyscallExtra:
+    def __init__(self,
+                 write_offset: int | None,
+                 exec_fds_to_close: list[int] | None,
+                 opened_fds: list[int] | None,
+                 socket_local_address: bytes,
+                 socket_remote_address: bytes):
+        self.write_offset = write_offset
+        self.exec_fds_to_close = exec_fds_to_close
+        self.opened_fds = opened_fds
+        self.socket_local_address = socket_local_address
+        self.socket_remote_address = socket_remote_address
+
+class SyscallEvent(Event):
+    def __init__(self,
+                 pc: int,
+                 tid: int,
+                 arch: Arch,
+                 registers: dict[str, int],
+                 memory_writes: dict[int, int],
+                 syscall_arch: Arch,
+                 syscall_number: int,
+                 syscall_state: str,
+                 failed_during_preparation: bool,
+                 syscall_extras: SyscallExtra | None = None):
+        super().__init__(pc, tid, arch, registers, memory_writes, 'syscall')
+        self.syscall_arch = syscall_arch
+        self.syscall_number = syscall_number
+        self.syscall_state = syscall_state
+        self.failed_during_preparation = failed_during_preparation
+        self.syscall_extras = syscall_extras
+
+        if syscall_state not in ['entering', 'exiting', 'enteringPtrace']:
+            raise NotImplementedError(f'Cannot handle system call state of type: {syscall_state}')
+
+    def __repr__(self) -> str:
+        return f'{super().__repr__()}\n' \
+               f'system call architecture = {self.syscall_arch}\n' \
+               f'system call number = {hex(self.syscall_number)}\n' \
+               f'system call state = {self.syscall_state}\n' \
+               f'failed during preparation? {self.failed_during_preparation}\n' \
+               f'syscall extras: {self.syscall_extras}\n'
+
+class SignalDescriptor:
+    def __init__(self,
+                 arch: Arch,
+                 siginfo: bytes,
+                 deterministic: bool,
+                 disposition: str):
+        self.arch = arch
+        self.siginfo = siginfo
+        self.deterministic = deterministic
+        self.disposition = disposition
+
+        if self.disposition not in ['fatal', 'userHandler', 'ignored']:
+            raise NotImplementedError(f'Canot handle signal dispositions of type'
+                                      f' {self.disposition}')
+
+    def __repr__(self) -> str:
+        return f'signal architecture: {self.arch}\n' \
+               f'siginfo data:\n{self.siginfo}\n' \
+               f'deterministic? {self.deterministic}\n' \
+               f'disposition: {self.disposition}\n'
+
+class SignalEvent(Event):
+    def __init__(self,
+                 pc: int,
+                 tid: int,
+                 arch: Arch,
+                 registers: dict[str, int],
+                 memory_writes: dict[int, int],
+                 signal_number: SignalDescriptor | None = None,
+                 signal_delivery: SignalDescriptor | None = None,
+                 signal_handler: SignalDescriptor | None = None):
+        super().__init__(pc, tid, arch, registers, memory_writes, 'signal')
+        self.signal_number = signal_number
+        self.signal_delivery = signal_delivery
+        self.signal_handler = signal_handler
+
+        if [self.signal_number, self.signal_delivery, self.signal_handler].count(None) != 1:
+            raise ValueError(f'A signal event may be either a signal number, delivery or handler event')
+
+    def __repr__(self) -> str:
+        repr_str = f'{super().__repr__()}\n'
+        if self.signal_number:
+            return repr_str + '{self.signal_number}'
+        if self.signal_delivery:
+            return repr_str + '{self.signal_delivery}'
+        if self.signal_handler:
+            return repr_str + '{self.signal_handler}'
 
 class MemoryMapping:
     def __init__(self,
@@ -186,11 +291,10 @@ class CloneTask(Task):
         self.own_namespace_tid = own_namespace_tid
 
     def __repr__(self) -> str:
-        repr_str  = f'Clone task\n{super().__repr__()}\n'
-        repr_str += f'parent tid = {hex(self.parent_tid)}\n' \
-                    f'clone flags = {hex(self.clone_flags)}\n' \
-                    f'own namespace tid = {hex(self.own_namespace_tid)}'
-        return repr_str
+        return f'Clone task\n{super().__repr__()}\n' \
+               f'parent tid = {hex(self.parent_tid)}\n' \
+               f'clone flags = {hex(self.clone_flags)}\n' \
+               f'own namespace tid = {hex(self.own_namespace_tid)}'
 
 class ExecTask(Task):
     def __init__(self,
@@ -208,14 +312,13 @@ class ExecTask(Task):
         self.interpreter_base_address = interpreter_base_address
         self.interpreter_name = interpreter_name
 
-    def __repr__(self):
-        repr_str  = f'Exec task\n{super().__repr__()}\n'
-        repr_str += f'filename = {self.filename}\n' \
-                    f'command-line = {self.commandline}\n' \
-                    f'execution base address = {hex(self.execution_base_address)}\n' \
-                    f'interpereter base address = {hex(self.interpreter_base_address)}\n' \
-                    f'interpreter name = {self.interpreter_name}'
-        return repr_str
+    def __repr__(self) -> str:
+        return f'Exec task\n{super().__repr__()}\n' \
+               f'filename = {self.filename}\n' \
+               f'command-line = {self.commandline}\n' \
+               f'execution base address = {hex(self.execution_base_address)}\n' \
+               f'interpereter base address = {hex(self.interpreter_base_address)}\n' \
+               f'interpreter name = {self.interpreter_name}'
 
 class ExitTask(Task):
     def __init__(self,
@@ -225,10 +328,9 @@ class ExitTask(Task):
         super().__init__(event_count, tid)
         self.exit_status = exit_status
 
-    def __repr__(self):
-        repr_str = f'Exit task\n{super().__repr__()}\n'
-        repr_str += f'exit status = {hex(self.exit_status)}'
-        return repr_str
+    def __repr__(self) -> str:
+        return f'Exit task\n{super().__repr__()}\n' \
+               f'exit status = {hex(self.exit_status)}'
 
 class DetachTask(Task):
     def __init__(self,
@@ -236,9 +338,8 @@ class DetachTask(Task):
                  tid: int):
         super().__init__(event_count, tid)
 
-    def __repr__(self):
-        repr_str = f'Detach task\n{super().__repr__()}'
-        return repr_str
+    def __repr__(self) -> str:
+        return f'Detach task\n{super().__repr__()}'
 
 class DeterministicLog:
     def __init__(self, log_dir: str):
@@ -310,18 +411,65 @@ class DeterministicLog:
             pc, registers = parse_registers(raw_event)
             mem_writes = parse_memory_writes(raw_event)
 
-            event_type = raw_event.event.which()
-            if event_type == 'syscall' and raw_event.arch == rr_trace.Arch.x8664:
-                # On entry: substitute orig_rax for RAX
-                if raw_event.event.syscall.state == rr_trace.SyscallState.entering:
-                    registers['rax'] = registers['orig_rax']
-                del registers['orig_rax']
+            event = None
 
-            event = Event(pc,
-                          raw_event.tid,
-                          raw_event.arch,
-                          event_type,
-                          registers, mem_writes)
+            tid = raw_event.tid
+            arch = raw_event.arch
+            event_type = raw_event.event.which()
+
+            if event_type == 'syscall': 
+                if raw_event.arch == rr_trace.Arch.x8664:
+                    # On entry: substitute orig_rax for RAX
+                    if raw_event.event.syscall.state == rr_trace.SyscallState.entering:
+                        registers['rax'] = registers['orig_rax']
+                    del registers['orig_rax']
+                event = SyscallEvent(pc,
+                                     tid,
+                                     arch,
+                                     registers,
+                                     mem_writes,
+                                     raw_event.event.syscall.arch,
+                                     raw_event.event.syscall.number,
+                                     raw_event.event.syscall.state,
+                                     raw_event.event.syscall.failedDuringPreparation)
+
+            if event_type == 'syscallbufFlush':
+                event = SyscallBufferFlushEvent(pc,
+                                                tid,
+                                                arch,
+                                                registers,
+                                                mem_writes,
+                                                raw_event.event.syscallbufFlush.mprotectRecords)
+            if event_type == 'signal':
+                signal = raw_event.event.signal
+                signal_descriptor = SignalDescriptor(signal.arch,
+                                                     signal.siginfo,
+                                                     signal.deterministic,
+                                                     signal.disposition)
+                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                                    signal_number=signal_descriptor)
+
+            if event_type == 'signalDelivery':
+                signal = raw_event.event.signalDelivery
+                signal_descriptor = SignalDescriptor(signal.arch,
+                                                     signal.siginfo,
+                                                     signal.deterministic,
+                                                     signal.disposition)
+                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                                    signal_delivery=signal_descriptor)
+
+            if event_type == 'signalHandler':
+                signal = raw_event.event.signalHandler
+                signal_descriptor = SignalDescriptor(signal.arch,
+                                                     signal.siginfo,
+                                                     signal.deterministic,
+                                                     signal.disposition)
+                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                                    signal_handler=signal_descriptor)
+
+            if event is None:
+                event = Event(pc, tid, arch, registers, mem_writes, event_type)
+
             events.append(event)
 
         return events
