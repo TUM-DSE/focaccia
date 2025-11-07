@@ -13,7 +13,7 @@ from typing import Iterable
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
-from focaccia.compare import compare_symbolic
+from focaccia.compare import compare_symbolic, Error, ErrorTypes
 from focaccia.snapshot import ProgramState, ReadableProgramState, \
                               RegisterAccessError, MemoryAccessError
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
@@ -26,6 +26,15 @@ logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
 info = logger.info
 warn = logger.warning
+
+qemu_crash = {
+        "crashed": False,
+        "pc": None,
+        'txl': None,
+        'ref': None,
+        'errors': [Error(ErrorTypes.CONFIRMED, "QEMU crashed")],
+        'snap': None,
+}
 
 class GDBProgramState(ReadableProgramState):
     from focaccia.arch import aarch64, x86
@@ -315,9 +324,15 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             if symb_i >= len(strace):
                 break
         except StopIteration:
+            # TODO: The conditions may test for the same
             if stop_addr and pc != stop_addr:
                 raise Exception(f'QEMU stopped at {hex(pc)} before reaching the stop address'
                                 f' {hex(stop_addr)}')
+            if symb_i+1 < len(strace):
+                qemu_crash["crashed"] = True
+                qemu_crash["pc"] = strace[symb_i].addr
+                qemu_crash["ref"] = strace[symb_i]
+                qemu_crash["snap"] = states[-1]
             break
         except Exception as e:
             print(traceback.format_exc())
@@ -374,6 +389,14 @@ def main():
     if not args.quiet:
         try:
             res = compare_symbolic(conc_states, matched_transforms)
+            if qemu_crash["crashed"]:
+                res.append({
+                    'pc': qemu_crash["pc"],
+                    'txl': None,
+                    'ref': qemu_crash["ref"],
+                    'errors': qemu_crash["errors"],
+                    'snap': qemu_crash["snap"],
+                })
             print_result(res, verbosity[args.error_level])
         except Exception as e:
             raise Exception('Error occured when comparing with symbolic equations: {e}')
