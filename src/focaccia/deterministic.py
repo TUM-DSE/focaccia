@@ -165,7 +165,7 @@ def parse_aarch64_registers(enc_regs: bytes, order: str='little', signed: bool=F
     regs = {}
     for i in range(len(regnames)):
         regs[regnames[i]] = parse_reg()
-    
+
     return regs
 
 class MemoryWriteHole:
@@ -237,7 +237,7 @@ class Event:
 
         repr_str = f'Thread {hex(self.tid)} executed event {self.event_type} at {hex(self.pc)}\n'
         repr_str += f'Register set:\n{reg_repr}'
-        
+
         if len(self.mem_writes):
             repr_str += f'\nMemory writes:\n{mem_write_repr}'
 
