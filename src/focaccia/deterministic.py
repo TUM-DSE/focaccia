@@ -92,13 +92,43 @@ def parse_aarch64_registers(enc_regs: bytes, order: str='little', signed: bool=F
     
     return regs
 
+class MemoryWriteHole:
+    def __init__(self, offset: int, size: int):
+        self.offset = offset
+        self.size = size
+        if self.size <= 0:
+            raise ValueError(f'Write hole cannot have size {size}')
+
+    def __repr__(self) -> str:
+        return f'hole at {hex(self.offset)}:{hex(self.offset+self.size)}'
+
+class MemoryWrite:
+    def __init__(self,
+                 tid: int,
+                 address: int,
+                 size: int,
+                 holes: list[MemoryWriteHole],
+                 is_conservative: bool,
+                 data: bytes | None = None):
+        self.tid = tid
+        self.address = address
+        self.size = size
+        self.holes = holes
+        self.is_conservative = is_conservative
+        self.data = data
+
+    def __repr__(self) -> str:
+        return f'{{ tid: {hex(self.tid)}, addr: {self.address}:{self.address+self.size}\n' \
+               f'   conservative? {self.is_conservative}, holes: {self.holes}\n' \
+               f'   data: {self.data} }}'
+
 class Event:
     def __init__(self,
                  pc: int,
                  tid: int,
                  arch: Arch,
                  registers: dict[str, int],
-                 memory_writes: dict[int, int],
+                 memory_writes: list[MemoryWrite],
                  event_type: str):
         self.pc = pc
         self.tid = tid
@@ -126,8 +156,8 @@ class Event:
             reg_repr += f'{reg} = {hex(value)}\n'
 
         mem_write_repr = ''
-        for addr, size in self.mem_writes.items():
-            mem_write_repr += f'{hex(addr)}:{hex(addr+size)}\n'
+        for mem_write in self.mem_writes:
+            mem_write_repr += f'{mem_write}\n'
 
         repr_str = f'Thread {hex(self.tid)} executed event {self.event_type} at {hex(self.pc)}\n'
         repr_str += f'Register set:\n{reg_repr}'
@@ -143,7 +173,7 @@ class SyscallBufferFlushEvent(Event):
                  tid: int,
                  arch: Arch,
                  registers: dict[str, int],
-                 memory_writes: dict[int, int],
+                 memory_writes: list[MemoryWrite],
                  mprotect_records: bytes):
         super().__init__(pc, tid, arch, registers, memory_writes, 'syscallBufFlush')
         self.mprotect_records = mprotect_records
@@ -170,7 +200,7 @@ class SyscallEvent(Event):
                  tid: int,
                  arch: Arch,
                  registers: dict[str, int],
-                 memory_writes: dict[int, int],
+                 memory_writes: list[MemoryWrite],
                  syscall_arch: Arch,
                  syscall_number: int,
                  syscall_state: str,
@@ -221,7 +251,7 @@ class SignalEvent(Event):
                  tid: int,
                  arch: Arch,
                  registers: dict[str, int],
-                 memory_writes: dict[int, int],
+                 memory_writes: list[MemoryWrite],
                  signal_number: SignalDescriptor | None = None,
                  signal_delivery: SignalDescriptor | None = None,
                  signal_handler: SignalDescriptor | None = None):
@@ -399,10 +429,20 @@ class DeterministicLog:
                 return regs['pc'], regs
             raise NotImplementedError(f'Unable to parse registers for architecture {arch}')
     
-        def parse_memory_writes(event: Frame) -> dict[int, int]:
-            writes = {}
+        def parse_memory_writes(event: Frame) -> list[MemoryWrite]:
+            writes = []
             for raw_write in event.memWrites:
-                writes[int(raw_write.addr)] = int(raw_write.size)
+                holes = []
+                for raw_hole in raw_write.holes:
+                    holes.append(MemoryWriteHole(raw_hole.offset, raw_hole.size))
+
+                mem_write = MemoryWrite(raw_write.tid,
+                                        raw_write.addr,
+                                        raw_write.size,
+                                        holes,
+                                        raw_write.sizeIsConservative)
+
+                writes.append(mem_write)
             return writes
 
         events = []
