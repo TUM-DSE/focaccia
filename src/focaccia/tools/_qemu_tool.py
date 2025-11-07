@@ -19,6 +19,7 @@ from focaccia.snapshot import ProgramState, ReadableProgramState, \
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
+from focaccia.deterministic import DeterministicLog, Event
 
 from validate_qemu import make_argparser, verbosity
 
@@ -121,11 +122,13 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, remote: str):
+    def __init__(self, remote: str, replay_log: list[Event] | None):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {remote}')
+        self._replay_log = replay_log
+        self._replay_idx = 0
         self._process = gdb.selected_inferior()
         self._first_next = True
 
@@ -141,6 +144,55 @@ class GDBServerStateIterator:
 
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
+
+    def _handle_sync_point(self, call: int, addr: int, length: int, arch: Arch):
+        def _search_next_event(addr: int, idx: int) -> Event | None:
+            if self._replay_log is None:
+                return idx, None
+            for i in range(idx, len(self._replay_log)):
+                event = self._replay_log[i]
+                if event.pc == addr:
+                    return i, event
+            return idx, None
+
+        _new_pc = addr + length
+        print(f'Handling syscall at {hex(_new_pc)} with call number {call}')
+        if int(call) in arch.get_em_syscalls().keys():
+
+            #print(f'Events: {self._replay_log[self._replay_idx:]}')
+            i, e = _search_next_event(_new_pc, self._replay_idx)
+            if e is None:
+                raise Exception(f'No matching event found in deterministic log \
+                                for syscall at {hex(_new_pc)}')
+
+            e = self._replay_log[i+1]
+            print(f'Adjusting w/ Event: {e}')
+            gdb.execute(f'set $pc = {hex(_new_pc)}')
+            self._replay_idx = i+2
+
+            reg_name = arch.get_syscall_reg()
+            gdb.execute(f'set $rax = {hex(e.registers.get("{reg_name}", 0))}')
+
+            assert(len(arch.get_em_syscalls()[int(call)].outputs) == len(e.mem_writes))
+
+            w_idx = 0
+            for _reg, _size, _type in arch.get_em_syscalls()[int(call)].outputs:
+                if arch.to_regname(_size) is not None:
+                    _size = e.registers[_size]
+                else:
+                    _size = int(_size)
+
+                _addr_rr = e.registers[_reg]
+                _size_rr = e.mem_writes[_addr_rr]
+
+                assert (_size == _size_rr), f'{_size} != {_size_rr}'
+                _addr = gdb.selected_frame().read_register(_reg)
+                # TODO
+                gdb.execute(f'set {{{_type}[_src]}}{_addr} = *({_type}[{_size}] *){_addr}')
+
+            return _new_pc
+
+        return addr
 
     def __iter__(self):
         return self
@@ -160,6 +212,11 @@ class GDBServerStateIterator:
             if not self._process.is_valid() or len(self._process.threads()) == 0:
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
+            if self._replay_log is not None:
+                asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
+                if 'syscall' in asm['asm']:
+                    call_reg = self.arch.get_syscall_reg()
+                    new_pc = self._handle_sync_point(gdb.selected_frame().read_register(call_reg), asm['addr'], asm['length'], self.arch)
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
@@ -341,17 +398,26 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     # Note: this may occur when symbolic traces were gathered with a stop address
     if symb_i >= len(strace):
         warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace)-1}')
-        
+
     return states, matched_transforms
 
 def main():
     args = make_argparser().parse_args()
-    
+
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
 
+    if args.deterministic is not None:
+        replay_log = DeterministicLog(log_dir=args.deterministic)
+
+    if args.deterministic is not None:
+        replay_log = DeterministicLog(log_dir=args.deterministic)
+
+    print(f'Events: {list(replay_log.raw_events())}')
+    print(f'Maps: {list(replay_log.raw_mmaps())}')
+    exit(0)
     try:
-        gdb_server = GDBServerStateIterator(args.remote)
+        gdb_server = GDBServerStateIterator(args.remote, replay_log.events())
     except Exception as e:
         raise Exception(f'Unable to perform basic GDB setup: {e}')
 
