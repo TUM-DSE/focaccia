@@ -1,6 +1,17 @@
 from typing import Literal
 from collections.abc import Callable
 
+class SyscallInfo:
+    def __init__(self, name: str, outputs: list[(str, str, str)]):
+        """ Describes a syscall by its name and outputs.
+
+        An output is a regname holding the pointer,
+        the length in bytes--either as a number or as onther register name-- and
+        the type of the output
+        """
+        self.name = name
+        self.outputs = outputs
+
 class RegisterAccessor:
     def __init__(self, regname: str, start_bit: int, end_bit: int):
         """An accessor that describes a range of bits.
@@ -102,6 +113,19 @@ class Arch():
         particular microarchitectural features.
         """
         return False
+
+    def get_em_syscalls(self) -> dict[int, str]:
+        """Returns an architecture specific set of syscalls that Focaccia needs to purely emulate."""
+        raise NotImplementedError("Architecture must implement get_em_syscalls")
+
+    def get_pasthru_syscalls(self) -> dict[int, str]:
+        """Returns an architecture specific set of syscalls that Focaccia needs to passthrough and
+        then warns about missmatching values. Examples are memory and lock related syscalls."""
+        raise NotImplementedError("Architecture must implement get_pasthru_syscalls")
+
+    def get_syscall_reg(self) -> str:
+        """Returns the register name that contains the syscall number."""
+        raise NotImplementedError("Architecture must implement get_syscall_reg")
 
     def is_instr_syscall(self, instr: str) -> bool:
         return False

@@ -57,7 +57,7 @@ class Event:
 
         repr_str = f'Thread {hex(self.tid)} executed event {self.event_type} at {hex(self.pc)}\n'
         repr_str += f'Register set:\n{reg_repr}'
-        
+
         if len(self.mem_writes):
             repr_str += f'\nMemory writes:\n{mem_write_repr}'
 

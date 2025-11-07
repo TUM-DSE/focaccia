@@ -79,10 +79,12 @@ memory, and stepping forward by single instructions.
     prog.add_argument('--remote',
                       type=str,
                       help='The hostname:port pair at which to find a QEMU GDB server.')
-    prog.add_argument('--gdb', 
+    prog.add_argument('--gdb',
                       type=str,
                       default='gdb',
                       help='GDB binary to invoke.')
+    prog.add_argument('--deterministic', default=None,
+                      help='The directory containing rr traces')
     return prog
 
 def quoted(s: str) -> str:
