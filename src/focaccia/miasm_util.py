@@ -93,11 +93,13 @@ def simp_fpconvert_fp64(expr_simp, expr: ExprOp):
     if expr.op != 'fpconvert_fp64':
         return expr
 
-    assert(len(expr.args) == 1)
+    if not len(expr.args) == 1:
+        raise NotImplementedError(f'fpconvert_fp64 on number of arguments not in 1: {expr.args}')
+
     operand = expr.args[0]
     if operand.is_int():
         if not operand.size == 32:
-            raise NotImplementedError('fpconvert_fp64 on values of size not in 64')
+            raise NotImplementedError(f'fpconvert_fp64 on values of size not in 64: {operand.size}')
 
         res = double_bits_to_uint(uint_bits_to_double(float_bits_to_uint(operand.arg)))
         return expr_simp(ExprInt(res, 64))
