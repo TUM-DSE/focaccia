@@ -118,7 +118,7 @@ class MemoryWrite:
         self.data = data
 
     def __repr__(self) -> str:
-        return f'{{ tid: {hex(self.tid)}, addr: {self.address}:{self.address+self.size}\n' \
+        return f'{{ tid: {hex(self.tid)}, addr: {hex(self.address)}:{hex(self.address+self.size)}\n' \
                f'   conservative? {self.is_conservative}, holes: {self.holes}\n' \
                f'   data: {self.data} }}'
 
@@ -384,6 +384,9 @@ class DeterministicLog:
     def mmaps_file(self) -> str:
         return os.path.join(self.base_directory, 'mmaps')
 
+    def data_file(self) -> str:
+        return os.path.join(self.base_directory, 'data')
+
     def _read(self, file, obj: SerializedObject) -> list[SerializedObject]:
         data = bytearray()
         objects = []
@@ -428,21 +431,44 @@ class DeterministicLog:
                 regs = parse_aarch64_registers(event.registers.raw)
                 return regs['pc'], regs
             raise NotImplementedError(f'Unable to parse registers for architecture {arch}')
+
+        def fill_memory_writes(self, mem_writes: list[MemoryWrite]) -> list[MemoryWrite]:
+            with open(self.data_file, 'rb') as f:
+                for mem_write in mem_writes:
+                    mem_write.data = f.read(mem_write.size)
+            return mem_writes
+
     
         def parse_memory_writes(event: Frame) -> list[MemoryWrite]:
             writes = []
-            for raw_write in event.memWrites:
-                holes = []
-                for raw_hole in raw_write.holes:
-                    holes.append(MemoryWriteHole(raw_hole.offset, raw_hole.size))
+            with open(self.data_file(), 'rb') as f:
+                for raw_write in event.memWrites:
+                    # Skip memory writes with 0 bytes
+                    if raw_write.size == 0:
+                        continue
 
-                mem_write = MemoryWrite(raw_write.tid,
-                                        raw_write.addr,
-                                        raw_write.size,
-                                        holes,
-                                        raw_write.sizeIsConservative)
+                    holes = []
+                    for raw_hole in raw_write.holes:
+                        holes.append(MemoryWriteHole(raw_hole.offset, raw_hole.size))
 
-                writes.append(mem_write)
+                    data = bytearray()
+                    for hole in holes:
+                        until_hole = hole.offset - f.tell()
+                        data.extend(f.read(until_hole))
+                        data.extend(b'\x00' * hole.size)
+
+                    # No holes
+                    if len(data) == 0:
+                        data = f.read(raw_write.size)
+
+                    mem_write = MemoryWrite(raw_write.tid,
+                                            raw_write.addr,
+                                            raw_write.size,
+                                            holes,
+                                            raw_write.sizeIsConservative,
+                                            bytes(data))
+                    writes.append(mem_write)
+
             return writes
 
         events = []
