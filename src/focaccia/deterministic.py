@@ -491,7 +491,7 @@ class DeterministicLog:
                 return regs['pc'], regs
             raise NotImplementedError(f'Unable to parse registers for architecture {arch}')
 
-        def parse_memory_writes(event: Frame, reader: io.RawIOBase):
+        def parse_memory_writes(event: Frame, reader: io.RawIOBase) -> list[MemoryWrite]:
             writes = []
             for raw_write in event.memWrites:
                 # Skip memory writes with 0 bytes
