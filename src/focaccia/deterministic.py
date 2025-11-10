@@ -506,6 +506,7 @@ class DeterministicLog:
                                                 registers,
                                                 mem_writes,
                                                 raw_event.event.syscallbufFlush.mprotectRecords)
+                raise NotImplementedError(f'Cannot support system call buffer events yet: {event}')
             if event_type == 'signal':
                 signal = raw_event.event.signal
                 signal_descriptor = SignalDescriptor(signal.arch,
