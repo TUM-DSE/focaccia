@@ -387,9 +387,8 @@ class DeterministicLog:
     def data_file(self) -> str:
         return os.path.join(self.base_directory, 'data')
 
-    def _read(self, file, obj: SerializedObject) -> list[SerializedObject]:
+    def _read(self, file) -> bytes:
         data = bytearray()
-        objects = []
         with open(file, 'rb') as f:
             while True:
                 try:
@@ -407,19 +406,24 @@ class DeterministicLog:
                     raise Exception(f'Malformed deterministic log: uncompressed chunk is not equal'
                                     f'to reported length {hex(uncompressed_len)}')
                 data.extend(chunk)
+        return bytes(data)
 
-            for deser in obj.read_multiple_bytes_packed(data):
-                objects.append(deser)
-            return objects
+    def _read_structure(self, file, obj: SerializedObject) -> list[SerializedObject]:
+        data = self._read(file)
+
+        objects = []
+        for deser in obj.read_multiple_bytes_packed(data):
+            objects.append(deser)
+        return objects
 
     def raw_events(self) -> list[Frame]:
-        return self._read(self.events_file(), Frame)
+        return self._read_structure(self.events_file(), Frame)
 
     def raw_tasks(self) -> list[TaskEvent]:
-        return self._read(self.tasks_file(), TaskEvent)
+        return self._read_structure(self.tasks_file(), TaskEvent)
 
     def raw_mmaps(self) -> list[MMap]:
-        return self._read(self.mmaps_file(), MMap)
+        return self._read_structure(self.mmaps_file(), MMap)
 
     def events(self) -> list[Event]:
         def parse_registers(event: Frame) -> Union[int, dict[str, int]]:
@@ -439,43 +443,46 @@ class DeterministicLog:
             return mem_writes
 
     
-        def parse_memory_writes(event: Frame) -> list[MemoryWrite]:
+        def parse_memory_writes(event: Frame, data_src: bytes, pos: int):
             writes = []
-            with open(self.data_file(), 'rb') as f:
-                for raw_write in event.memWrites:
-                    # Skip memory writes with 0 bytes
-                    if raw_write.size == 0:
-                        continue
+            for raw_write in event.memWrites:
+                # Skip memory writes with 0 bytes
+                if raw_write.size == 0:
+                    continue
 
-                    holes = []
-                    for raw_hole in raw_write.holes:
-                        holes.append(MemoryWriteHole(raw_hole.offset, raw_hole.size))
+                holes = []
+                for raw_hole in raw_write.holes:
+                    holes.append(MemoryWriteHole(raw_hole.offset, raw_hole.size))
 
-                    data = bytearray()
-                    for hole in holes:
-                        until_hole = hole.offset - f.tell()
-                        data.extend(f.read(until_hole))
-                        data.extend(b'\x00' * hole.size)
+                data = bytearray()
+                for hole in holes:
+                    until_hole = hole.offset - pos
+                    data.extend(data_src[pos:pos+until_hole])
+                    data.extend(b'\x00' * hole.size)
+                    pos += until_hole
 
-                    # No holes
-                    if len(data) == 0:
-                        data = f.read(raw_write.size)
+                # No holes
+                if len(data) == 0:
+                    data = data_src[pos:pos+raw_write.size]
+                    pos += raw_write.size
 
-                    mem_write = MemoryWrite(raw_write.tid,
-                                            raw_write.addr,
-                                            raw_write.size,
-                                            holes,
-                                            raw_write.sizeIsConservative,
-                                            bytes(data))
-                    writes.append(mem_write)
+                mem_write = MemoryWrite(raw_write.tid,
+                                        raw_write.addr,
+                                        raw_write.size,
+                                        holes,
+                                        raw_write.sizeIsConservative,
+                                        bytes(data))
+                writes.append(mem_write)
+            return writes, pos
 
-            return writes
+        pos = 0
+        data = self._read(self.data_file())
 
         events = []
         raw_events = self.raw_events()
         for raw_event in raw_events:
             pc, registers = parse_registers(raw_event)
-            mem_writes = parse_memory_writes(raw_event)
+            mem_writes, pos = parse_memory_writes(raw_event, data, pos)
 
             event = None
 
