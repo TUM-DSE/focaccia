@@ -132,11 +132,7 @@ class GDBServerStateIterator:
         self._process = gdb.selected_inferior()
         self._first_next = True
 
-        # Try to determine the guest architecture. This is a bit hacky and
-        # tailored to GDB's naming for the x86-64 architecture.
-        split = self._process.architecture().name().split(':')
-        archname = split[1] if len(split) > 1 else split[0]
-        archname = archname.replace('-', '_')
+        archname = self.get_architecture_name()
         if archname not in supported_architectures:
             print(f'Error: Current platform ({archname}) is not'
                   f' supported by Focaccia. Exiting.')
@@ -156,22 +152,21 @@ class GDBServerStateIterator:
             return idx, None
 
         _new_pc = addr + length
-        print(f'Handling syscall at {hex(_new_pc)} with call number {call}')
+        info(f'Handling syscall at {hex(_new_pc)} with call number {call}')
         if int(call) in arch.get_em_syscalls().keys():
-
-            #print(f'Events: {self._deterministic_log[self._deterministic_idx:]}')
             i, e = _search_next_event(_new_pc, self._deterministic_idx)
             if e is None:
                 raise Exception(f'No matching event found in deterministic log \
                                 for syscall at {hex(_new_pc)}')
 
             e = self._deterministic_log[i+1]
-            print(f'Adjusting w/ Event: {e}')
-            gdb.execute(f'set $pc = {hex(_new_pc)}')
+
+            info(f'Adjusting with event:\n{e}')
+            self.skip_until(_new_pc)
             self._deterministic_idx = i+2
 
             reg_name = arch.get_syscall_reg()
-            gdb.execute(f'set $rax = {hex(e.registers.get("{reg_name}", 0))}')
+            self.set_register(reg_name, e.registers.get(reg_name))
 
             assert(len(arch.get_em_syscalls()[int(call)].outputs) == len(e.mem_writes))
 
@@ -187,9 +182,8 @@ class GDBServerStateIterator:
                 w_idx += 1
 
                 assert (_size == _w_rr.size), f'{_size} != {_w_rr.size}'
-                _addr = gdb.selected_frame().read_register(_reg)
+                _addr = self.read_register(_reg)
                 cmd = f'set {{char[{_size}]}}{hex(_addr)} = 0x{_w_rr.data.hex()}'
-                # print(f'GDB: {cmd}')
                 gdb.execute(cmd)
 
             return _new_pc
@@ -207,26 +201,48 @@ class GDBServerStateIterator:
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
         # Step
-        pc = gdb.selected_frame().read_register('pc')
+        pc = self.read_register('pc')
         new_pc = pc
         while pc == new_pc:  # Skip instruction chains from REP STOS etc.
-            gdb.execute('si', to_string=True)
-            if not self._process.is_valid() or len(self._process.threads()) == 0:
+            self.step()
+            if self.exited():
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
             if self._deterministic_log is not None:
                 asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
                 if 'syscall' in asm['asm']:
                     call_reg = self.arch.get_syscall_reg()
-                    new_pc = self._handle_sync_point(gdb.selected_frame().read_register(call_reg), asm['addr'], asm['length'], self.arch)
+                    new_pc = self._handle_sync_point(self.read_register(call_reg), asm['addr'], asm['length'], self.arch)
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-    def run_until(self, addr: int):
+    def step(self) -> None:
+        gdb.execute('si', to_string=True)
+    
+    def skip_until(self, new_pc: int) -> None:
+        gdb.execute(f'set $pc = {hex(new_pc)}')
+
+    def run_until(self, addr: int) -> GDBProgramState:
         breakpoint = gdb.Breakpoint(f'*{addr:#x}')
         gdb.execute('continue')
         breakpoint.delete()
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
+    def exited(self) -> bool:
+        return not self._process.is_valid() or len(self._process.threads()) == 0
+
+    def read_register(self, regname: str) -> int:
+        return int(gdb.selected_frame().read_register(regname))
+
+    def write_register(self, regname: str, value: int) -> None:
+        gdb.execute(f'set ${regname} = {value}')
+
+    def get_architecture_name(self) -> str:
+        # Try to determine the guest architecture. This is a bit hacky and
+        # tailored to GDB's naming for the x86-64 architecture.
+        split = self._process.architecture().name().split(':')
+        archname = split[1] if len(split) > 1 else split[0]
+        return archname.replace('-', '_')
 
 def record_minimal_snapshot(prev_state: ReadableProgramState,
                             cur_state: ReadableProgramState,
