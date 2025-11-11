@@ -55,6 +55,30 @@
 			};
 		};
 
+		minimal-compile-flags = " -mno-xsave -mno-xsaveopt -mno-xsavec -mno-xsaves -mno-avx" +
+					  			" -mno-avx2 -mno-avx512f -static";
+		musl-minimal-pkgs = import nixpkgs {
+			inherit system;
+			crossSystem = {
+				config = "${system}-musl";
+			};
+			overlays = [
+				(final: prev: {
+					stdenv = prev.stdenv.override (old: {
+						cc = if old.cc != null then old.cc.overrideAttrs (ccOld: {
+							env = let
+								oldEnv = ccOld.env or {};
+								oldFlags = oldEnv.NIX_CFLAGS_COMPILE or "";
+							in
+							oldEnv // {
+								NIX_CFLAGS_COMPILE = oldFlags + minimal-compile-flags;
+							};
+						}) else null;
+					});
+				})
+			];
+		};
+
 		# Pin Python version
 		python = pkgs.python312;
 
@@ -254,6 +278,10 @@
 			version = "git";
 			src = ./rr;
 		});
+
+		musl-minimal-redis-nocheck = musl-minimal-pkgs.pkgsStatic.redis.overrideAttrs (old: {
+			doCheck = false;
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -390,9 +418,27 @@
 				packages = [
 					packages.dev
 					rr
-					musl-pkgs.gcc
 					pkgs.capnproto
+					musl-pkgs.gcc
 					musl-pkgs.pkg-config
+				];
+
+				hardeningDisable = [ "pie" ];
+
+				env = uvEnv;
+				shellHook = uvShellHook;
+			};
+
+			musl-all = pkgs.mkShell {
+				packages = [
+					packages.dev
+					pkgs.rr
+					pkgs.capnproto
+					musl-pkgs.gcc
+					musl-pkgs.pkg-config
+					musl-minimal-redis-nocheck
+					musl-minimal-pkgs.pkgsStatic.gzip
+					musl-minimal-pkgs.pkgsStatic.file
 				];
 
 				hardeningDisable = [ "pie" ];
