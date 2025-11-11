@@ -122,13 +122,13 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, remote: str, replay_log: list[Event] | None):
+    def __init__(self, remote: str, deterministic_log: list[Event] | None):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {remote}')
-        self._replay_log = replay_log
-        self._replay_idx = 0
+        self._deterministic_log = deterministic_log
+        self._deterministic_idx = 0
         self._process = gdb.selected_inferior()
         self._first_next = True
 
@@ -147,10 +147,10 @@ class GDBServerStateIterator:
 
     def _handle_sync_point(self, call: int, addr: int, length: int, arch: Arch):
         def _search_next_event(addr: int, idx: int) -> Event | None:
-            if self._replay_log is None:
+            if self._deterministic_log is None:
                 return idx, None
-            for i in range(idx, len(self._replay_log)):
-                event = self._replay_log[i]
+            for i in range(idx, len(self._deterministic_log)):
+                event = self._deterministic_log[i]
                 if event.pc == addr:
                     return i, event
             return idx, None
@@ -159,16 +159,16 @@ class GDBServerStateIterator:
         print(f'Handling syscall at {hex(_new_pc)} with call number {call}')
         if int(call) in arch.get_em_syscalls().keys():
 
-            #print(f'Events: {self._replay_log[self._replay_idx:]}')
-            i, e = _search_next_event(_new_pc, self._replay_idx)
+            #print(f'Events: {self._deterministic_log[self._deterministic_idx:]}')
+            i, e = _search_next_event(_new_pc, self._deterministic_idx)
             if e is None:
                 raise Exception(f'No matching event found in deterministic log \
                                 for syscall at {hex(_new_pc)}')
 
-            e = self._replay_log[i+1]
+            e = self._deterministic_log[i+1]
             print(f'Adjusting w/ Event: {e}')
             gdb.execute(f'set $pc = {hex(_new_pc)}')
-            self._replay_idx = i+2
+            self._deterministic_idx = i+2
 
             reg_name = arch.get_syscall_reg()
             gdb.execute(f'set $rax = {hex(e.registers.get("{reg_name}", 0))}')
@@ -183,12 +183,14 @@ class GDBServerStateIterator:
                     _size = int(_size)
 
                 _addr_rr = e.registers[_reg]
-                _size_rr = e.mem_writes[_addr_rr]
+                _w_rr = e.mem_writes[w_idx]
+                w_idx += 1
 
-                assert (_size == _size_rr), f'{_size} != {_size_rr}'
+                assert (_size == _w_rr.size), f'{_size} != {_w_rr.size}'
                 _addr = gdb.selected_frame().read_register(_reg)
-                # TODO
-                gdb.execute(f'set {{{_type}[_src]}}{_addr} = *({_type}[{_size}] *){_addr}')
+                cmd = f'set {{char[{_size}]}}{hex(_addr)} = 0x{_w_rr.data.hex()}'
+                # print(f'GDB: {cmd}')
+                gdb.execute(cmd)
 
             return _new_pc
 
@@ -212,7 +214,7 @@ class GDBServerStateIterator:
             if not self._process.is_valid() or len(self._process.threads()) == 0:
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
-            if self._replay_log is not None:
+            if self._deterministic_log is not None:
                 asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
                 if 'syscall' in asm['asm']:
                     call_reg = self.arch.get_syscall_reg()
@@ -410,12 +412,6 @@ def main():
     if args.deterministic is not None:
         replay_log = DeterministicLog(log_dir=args.deterministic)
 
-    if args.deterministic is not None:
-        replay_log = DeterministicLog(log_dir=args.deterministic)
-
-    print(f'Events: {list(replay_log.raw_events())}')
-    print(f'Maps: {list(replay_log.raw_mmaps())}')
-    exit(0)
     try:
         gdb_server = GDBServerStateIterator(args.remote, replay_log.events())
     except Exception as e:
