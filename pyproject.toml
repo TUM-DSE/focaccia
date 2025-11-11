@@ -32,7 +32,7 @@ dev = [
 [project.scripts]
 focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
-validate-qemu = "focaccia.tools.validate_qemu:main"
+validate-qemu = "focaccia.tools.qemu.validate_qemu:main"
 capture-transforms = "focaccia.tools.capture_transforms:main"
 
 [build-system]

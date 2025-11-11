@@ -25,7 +25,7 @@ import subprocess
 
 from focaccia.compare import ErrorTypes
 from focaccia.arch import supported_architectures
-from focaccia.tools.validation_server import start_validation_server
+from focaccia.tools.qemu.validation_server import start_validation_server
 
 verbosity = {
     'info':    ErrorTypes.INFO,
