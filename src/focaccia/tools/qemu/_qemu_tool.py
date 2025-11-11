@@ -20,6 +20,7 @@ from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
 from focaccia.deterministic import DeterministicLog, Event
+from focaccia.tools.qemu.deterministic import emulated_system_calls
 
 from validate_qemu import make_argparser, verbosity
 
@@ -152,8 +153,10 @@ class GDBServerStateIterator:
             return idx, None
 
         _new_pc = addr + length
+
         info(f'Handling syscall at {hex(_new_pc)} with call number {call}')
-        if int(call) in arch.get_em_syscalls().keys():
+        syscall = emulated_system_calls[arch.archname].get(call, None)
+        if syscall:
             i, e = _search_next_event(_new_pc, self._deterministic_idx)
             if e is None:
                 raise Exception(f'No matching event found in deterministic log \
@@ -165,28 +168,23 @@ class GDBServerStateIterator:
             self.skip_until(_new_pc)
             self._deterministic_idx = i+2
 
-            reg_name = arch.get_syscall_reg()
-            self.set_register(reg_name, e.registers.get(reg_name))
+            patchup_registers = [arch.get_syscall_reg(), *syscall.patchup_registers]
+            debug(f'Patching registers {patchup_registers}')
+            for reg in patchup_registers:
+                self.set_register(reg, e.registers.get(reg))
 
-            assert(len(arch.get_em_syscalls()[int(call)].outputs) == len(e.mem_writes))
-
-            w_idx = 0
-            for _reg, _size, _type in arch.get_em_syscalls()[int(call)].outputs:
-                if arch.to_regname(_size) is not None:
-                    _size = e.registers[_size]
-                else:
-                    _size = int(_size)
-
-                _addr_rr = e.registers[_reg]
-                _w_rr = e.mem_writes[w_idx]
-                w_idx += 1
-
-                assert (_size == _w_rr.size), f'{_size} != {_w_rr.size}'
-                _addr = self.read_register(_reg)
-                cmd = f'set {{char[{_size}]}}{hex(_addr)} = 0x{_w_rr.data.hex()}'
-                gdb.execute(cmd)
+            for mem_write in e.mem_writes:
+                # TODO: handle holes
+                # TODO: address mapping
+                address = mem_write.address
+                size = mem_write.size
+                data = mem_write.data
+                debug(f'Writing memory {hex(address)}:{hex(address+size)} with:\n{data.hex(' ')}')
+                self.write_memory(address, size, data)
 
             return _new_pc
+        else:
+            info(f'System call number {call} is not emulated')
 
         return addr
 
@@ -208,11 +206,14 @@ class GDBServerStateIterator:
             if self.exited():
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
-            if self._deterministic_log is not None:
-                asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
-                if 'syscall' in asm['asm']:
-                    call_reg = self.arch.get_syscall_reg()
-                    new_pc = self._handle_sync_point(self.read_register(call_reg), asm['addr'], asm['length'], self.arch)
+
+        if self._deterministic_log is not None:
+            asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
+            if self.arch.is_instr_syscall(str(asm['asm'])):
+                call_reg = self.arch.get_syscall_reg()
+                new_pc = self._handle_sync_point(self.read_register(call_reg),
+                                                 asm['addr'], asm['length'], 
+                                                 self.arch)
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
@@ -236,6 +237,9 @@ class GDBServerStateIterator:
 
     def write_register(self, regname: str, value: int) -> None:
         gdb.execute(f'set ${regname} = {value}')
+
+    def write_holes(self, address: int, size: int, data: bytes) -> None:
+        self._process.write_memory(address, data, size)
 
     def get_architecture_name(self) -> str:
         # Try to determine the guest architecture. This is a bit hacky and

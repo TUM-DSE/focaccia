@@ -28,6 +28,7 @@ from focaccia.arch import supported_architectures
 from focaccia.tools.qemu.validation_server import start_validation_server
 
 verbosity = {
+    'debug':    ErrorTypes.INFO,
     'info':    ErrorTypes.INFO,
     'warning': ErrorTypes.POSSIBLE,
     'error':   ErrorTypes.CONFIRMED,
