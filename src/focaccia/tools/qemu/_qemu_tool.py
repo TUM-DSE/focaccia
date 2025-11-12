@@ -225,9 +225,32 @@ class GDBServerStateIterator:
         gdb.execute(f'set $pc = {hex(new_pc)}')
 
     def run_until(self, addr: int) -> GDBProgramState:
+        """Continues emulator execution until specified address reached.
+
+        :param addr: The address to stop at.
+        :returns: The emulator state at that point.
+        """
         breakpoint = gdb.Breakpoint(f'*{addr:#x}')
         gdb.execute('continue')
         breakpoint.delete()
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
+    def run_until_any(self, addresses: Iterable) -> GDBProgramState:
+        """Continues emulator execution until any of the specified addresses are reached.
+
+        :param addresses: The addresses to stop at.
+        :returns: The emulator state at that point.
+        """
+        breakpoints = []
+
+        for addr in addresses:
+            breakpoints.append(gdb.Breakpoint(f'*{addr:#x}'))
+
+        gdb.execute('continue')
+
+        for br in breakpoints:
+            br.delete()
+
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
     def exited(self) -> bool:
