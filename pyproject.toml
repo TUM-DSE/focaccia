@@ -14,6 +14,7 @@ authors = [
 dependencies = [
 	"cffi",
 	"miasm",
+	"orjson",
 	"brotli",
 	"pycapnp",
 	"setuptools",

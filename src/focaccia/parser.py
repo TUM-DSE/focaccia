@@ -1,8 +1,8 @@
 """Parsing of JSON files containing snapshot data."""
 
-import base64
-import json
 import re
+import base64
+import orjson as json
 from typing import TextIO
 
 from .arch import supported_architectures, Arch
@@ -22,7 +22,7 @@ def _get_or_throw(obj: dict, key: str):
 
 def parse_transformations(json_stream: TextIO) -> Trace[SymbolicTransform]:
     """Parse symbolic transformations from a text stream."""
-    data = json.load(json_stream)
+    data = json.loads(json_stream.read())
 
     env = TraceEnvironment.from_json(_get_or_throw(data, 'env'))
     strace = [SymbolicTransform.from_json(item) \
@@ -33,14 +33,15 @@ def parse_transformations(json_stream: TextIO) -> Trace[SymbolicTransform]:
 def serialize_transformations(transforms: Trace[SymbolicTransform],
                               out_stream: TextIO):
     """Serialize symbolic transformations to a text stream."""
-    json.dump({
+    data = json.dumps({
         'env': transforms.env.to_json(),
         'states': [t.to_json() for t in transforms],
-    }, out_stream, indent=4)
+    }, option=json.OPT_INDENT_2).decode()
+    out_stream.write(data)
 
 def parse_snapshots(json_stream: TextIO) -> Trace[ProgramState]:
     """Parse snapshots from our JSON format."""
-    json_data = json.load(json_stream)
+    json_data = json.loads(json_stream.read())
 
     arch = supported_architectures[_get_or_throw(json_data, 'architecture')]
     env = TraceEnvironment.from_json(_get_or_throw(json_data, 'env'))
@@ -62,7 +63,8 @@ def parse_snapshots(json_stream: TextIO) -> Trace[ProgramState]:
 def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
     """Serialize a list of snapshots to out JSON format."""
     if not snapshots:
-        return json.dump({}, out_stream, indent = 4)
+        empty = json.dumps({}, option=json.OPT_INDENT_2).decode()
+        out_stream.write(empty)
 
     arch = snapshots[0].arch
     res = {
@@ -81,7 +83,8 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
             })
         res['snapshots'].append({ 'registers': regs, 'memory': mem })
 
-    json.dump(res, out_stream, indent=4)
+    data = json.dumps(res, option=json.OPT_INDENT_2).decode()
+    out_stream.write(data)
 
 def _make_unknown_env() -> TraceEnvironment:
     return TraceEnvironment('', [], False, [], '?')
