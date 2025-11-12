@@ -47,14 +47,13 @@ class Event:
         self.mem_writes = memory_writes
         self.event_type = event_type
 
-    def match(self, pc: int, target: ReadableProgramState) -> bool:
+    def match(self, target) -> bool:
         # TODO: match the rest of the state to be sure
-        if self.pc == pc:
+        if self.pc == target.read_pc():
             for reg, value in self.registers.items():
                 if value == self.pc:
                     continue
                 if target.read_register(reg) != value:
-                    print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
                     return False
             return True
         return False
@@ -293,4 +292,39 @@ except Exception:
         def events(self) -> list[Event]: return []
         def tasks(self) -> list[Event]: return []
         def mmaps(self) -> list[Event]: return []
+finally:
+    class DeterministicEventIterator:
+        def __init__(self, deterministic_log: DeterministicLog):
+            self._detlog = deterministic_log
+            self._events = self._detlog.events()
+            self._idx: int | None = 0 # None represents no current event
+
+        def events(self) -> list[Event]:
+            return self._events
+
+        def current_event(self) -> Event | None:
+            if self._idx and self._idx < len(self._events):
+                return self._events[self._idx]
+            return None
+
+        def update(self, target: ReadableProgramState) -> Event | None:
+            if self._idx is None:
+                self._idx = 0 
+
+            for idx in range(self._idx+1, len(self._events)):
+                if self._events[idx].match(target):
+                    self._idx = idx
+                    return self.current_event()
+            self._idx = None
+            return None
+
+        def next(self) -> Event | None:
+            if self._idx is None:
+                return None
+
+            self._idx += 1
+            return self.current_event()
+
+        def __bool__(self) -> bool:
+            return len(self.events()) > 0
 

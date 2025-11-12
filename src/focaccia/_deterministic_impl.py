@@ -221,10 +221,17 @@ class DeterministicLog:
             arch = event.arch
             if arch == rr_trace.Arch.x8664:
                 regs = parse_x64_registers(event.registers.raw)
-                return regs['rip'], regs
+                if event.event.which() == 'syscall':
+                    regs['rip'] -= 2
+                pc = regs['rip']
+                return pc, regs
             if arch == rr_trace.Arch.aarch64:
                 regs = parse_aarch64_registers(event.registers.raw)
-                return regs['pc'], regs
+                if event.event.which() == 'syscall':
+                    regs['pc'] -= 4
+                pc = regs['pc']
+                return pc, regs
+                return pc, regs
             raise NotImplementedError(f'Unable to parse registers for architecture {arch}')
 
         def parse_memory_writes(event: Frame, reader: io.RawIOBase) -> list[MemoryWrite]:
