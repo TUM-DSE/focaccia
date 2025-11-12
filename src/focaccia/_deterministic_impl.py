@@ -3,7 +3,7 @@
 import os
 import io
 import struct
-from typing import Union, Optional
+from typing import Union, Tuple, Optional
 
 import brotli
 
@@ -217,14 +217,14 @@ class DeterministicLog:
         return self._read_structure(self.mmaps_file(), MMap)
 
     def events(self) -> list[Event]:
-        def parse_registers(event: Frame) -> Union[int, dict[str, int]]:
+        def parse_registers(event: Frame) -> Tuple[str, dict[str, int]]:
             arch = event.arch
             if arch == rr_trace.Arch.x8664:
                 regs = parse_x64_registers(event.registers.raw)
-                return regs['rip'], regs
+                return 'rip', regs
             if arch == rr_trace.Arch.aarch64:
                 regs = parse_aarch64_registers(event.registers.raw)
-                return regs['pc'], regs
+                return 'pc', regs
             raise NotImplementedError(f'Unable to parse registers for architecture {arch}')
 
         def parse_memory_writes(event: Frame, reader: io.RawIOBase) -> list[MemoryWrite]:
@@ -274,10 +274,18 @@ class DeterministicLog:
             if event_type == 'syscall': 
                 if raw_event.arch == rr_trace.Arch.x8664:
                     # On entry: substitute orig_rax for RAX
-                    if raw_event.event.syscall.state == rr_trace.SyscallState.entering:
+                    syscall = raw_event.event.syscall
+                    if syscall.state == rr_trace.SyscallState.entering:
                         registers['rax'] = registers['orig_rax']
+                        if syscall.number != 59:
+                            registers[pc] -= 2
                     del registers['orig_rax']
-                event = SyscallEvent(pc,
+                if raw_event.arch == rr_trace.Arch.aarch64:
+                    syscall = raw_event.event.syscall
+                    if syscall.state == rr_trace.SyscallState.entering and syscall.number != 221:
+                        registers[pc] -= 4
+
+                event = SyscallEvent(registers[pc],
                                      tid,
                                      arch,
                                      registers,
@@ -288,7 +296,7 @@ class DeterministicLog:
                                      raw_event.event.syscall.failedDuringPreparation)
 
             if event_type == 'syscallbufFlush':
-                event = SyscallBufferFlushEvent(pc,
+                event = SyscallBufferFlushEvent(registers[pc],
                                                 tid,
                                                 arch,
                                                 registers,
@@ -301,7 +309,7 @@ class DeterministicLog:
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)
-                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                event = SignalEvent(registers[pc], tid, arch, registers, mem_writes, 
                                     signal_number=signal_descriptor)
 
             if event_type == 'signalDelivery':
@@ -310,7 +318,7 @@ class DeterministicLog:
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)
-                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                event = SignalEvent(registers[pc], tid, arch, registers, mem_writes, 
                                     signal_delivery=signal_descriptor)
 
             if event_type == 'signalHandler':
@@ -319,11 +327,11 @@ class DeterministicLog:
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)
-                event = SignalEvent(pc, tid, arch, registers, mem_writes, 
+                event = SignalEvent(registers[pc], tid, arch, registers, mem_writes, 
                                     signal_handler=signal_descriptor)
 
             if event is None:
-                event = Event(pc, tid, arch, registers, mem_writes, event_type)
+                event = Event(registers[pc], tid, arch, registers, mem_writes, event_type)
 
             events.append(event)
 

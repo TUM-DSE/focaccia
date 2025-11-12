@@ -1,4 +1,7 @@
 from .arch import Arch
+from .snapshot import ReadableProgramState
+
+from typing import Callable
 
 class MemoryWriteHole:
     def __init__(self, offset: int, size: int):
@@ -280,4 +283,53 @@ except Exception:
         def events(self) -> list[Event]: return []
         def tasks(self) -> list[Task]: return []
         def mmaps(self) -> list[MemoryMapping]: return []
+finally:
+    class DeterministicEventIterator:
+        def __init__(self, deterministic_log: DeterministicLog, match_fn: Callable):
+            self._detlog = deterministic_log
+            self._events = self._detlog.events()
+            self._pc_to_event = {}
+            self._match = match_fn
+            self._idx: int | None = None # None represents no current event
+            self._in_event: bool = False
+
+            idx = 0
+            for event in self._events:
+                self._pc_to_event.setdefault(event.pc, []).append((event, idx))
+
+        def events(self) -> list[Event]:
+            return self._events
+
+        def current_event(self) -> Event | None:
+            # No event when not synchronized
+            if self._idx is None or not self._in_event:
+                return None
+            return self._events[self._idx]
+
+        def update(self, target: ReadableProgramState) -> Event | None:
+            # Quick check
+            candidates = self._pc_to_event.get(target.read_pc(), [])
+            if len(candidates) == 0:
+                self._in_event = False
+                return None
+
+            # Find synchronization point
+            if self._idx is None:
+                for event, idx in candidates:
+                    if self._match(event, target):
+                        self._idx = idx
+                        self._in_event = True
+                        return self.current_event()
+
+            return self.next()
+
+        def next(self) -> Event | None:
+            if self._idx is None:
+                raise ValueError('Attempted to get next event without synchronizing')
+
+            self._idx += 1
+            return self.current_event()
+
+        def __bool__(self) -> bool:
+            return len(self.events()) > 0
 
