@@ -5,8 +5,9 @@ import argparse
 import logging
 
 from focaccia import parser, utils
-from focaccia.symbolic import SymbolicTracer
 from focaccia.trace import TraceEnvironment
+from focaccia.symbolic import SymbolicTracer
+from focaccia.deterministic import DeterministicLog
 
 def main():
     prog = argparse.ArgumentParser()
@@ -62,20 +63,10 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    detlog = None
-    if args.deterministic_log:
-        from focaccia.deterministic import DeterministicLog
-        detlog = DeterministicLog(args.deterministic_log)
-    else:
-        class NullDeterministicLog:
-            def __init__(self): pass
-            def events_file(self): return None
-            def tasks_file(self): return None
-            def mmaps_file(self): return None
-            def events(self): return []
-            def tasks(self): return []
-            def mmaps(self): return []
-        detlog = NullDeterministicLog()
+    detlog = DeterministicLog(args.deterministic_log)
+    if args.deterministic_log and detlog.base_directory is None:
+        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
+                                   'Focaccia built without deterministic log support')
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), 
                            nondeterminism_log=detlog,
