@@ -123,12 +123,13 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, remote: str, deterministic_log: list[Event] | None):
+    def __init__(self, remote: str, deterministic_log: DeterministicLog):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {remote}')
         self._deterministic_log = deterministic_log
+        self._deterministic_events = self._deterministic_log.events()
         self._deterministic_idx = 0
         self._process = gdb.selected_inferior()
         self._first_next = True
@@ -144,10 +145,10 @@ class GDBServerStateIterator:
 
     def _handle_sync_point(self, call: int, addr: int, length: int, arch: Arch):
         def _search_next_event(addr: int, idx: int) -> Event | None:
-            if self._deterministic_log is None:
+            if self._deterministic_events is None:
                 return idx, None
-            for i in range(idx, len(self._deterministic_log)):
-                event = self._deterministic_log[i]
+            for i in range(idx, len(self._deterministic_events)):
+                event = self._deterministic_events[i]
                 if event.pc == addr:
                     return i, event
             return idx, None
@@ -162,7 +163,7 @@ class GDBServerStateIterator:
                 raise Exception(f'No matching event found in deterministic log \
                                 for syscall at {hex(_new_pc)}')
 
-            e = self._deterministic_log[i+1]
+            e = self._deterministic_events[i+1]
 
             info(f'Adjusting with event:\n{e}')
             self.skip_until(_new_pc)
@@ -207,7 +208,7 @@ class GDBServerStateIterator:
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
 
-        if self._deterministic_log is not None:
+        if self._deterministic_events is not None:
             asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
             if self.arch.is_instr_syscall(str(asm['asm'])):
                 call_reg = self.arch.get_syscall_reg()
@@ -429,11 +430,13 @@ def main():
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
 
-    if args.deterministic is not None:
-        replay_log = DeterministicLog(log_dir=args.deterministic)
+    detlog = DeterministicLog(args.deterministic)
+    if args.deterministic and detlog.base_directory is None:
+        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but'
+                                   'Focaccia built without deterministic log support')
 
     try:
-        gdb_server = GDBServerStateIterator(args.remote, replay_log.events())
+        gdb_server = GDBServerStateIterator(args.remote, detlog)
     except Exception as e:
         raise Exception(f'Unable to perform basic GDB setup: {e}')
 
