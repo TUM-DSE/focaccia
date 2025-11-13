@@ -214,18 +214,6 @@ class Event:
         self.mem_writes = memory_writes
         self.event_type = event_type
 
-    def match(self, pc: int, target: ReadableProgramState) -> bool:
-        # TODO: match the rest of the state to be sure
-        if self.pc == pc:
-            for reg, value in self.registers.items():
-                if value == self.pc:
-                    continue
-                if target.read_register(reg) != value:
-                    print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
-                    return False
-            return True
-        return False
-
     def __repr__(self) -> str:
         reg_repr = f'{self.event_type} event\n'
         for reg, value in self.registers.items():

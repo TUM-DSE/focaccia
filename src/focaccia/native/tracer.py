@@ -12,6 +12,7 @@ from focaccia.trace import Trace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform, DisassemblyContext, run_instruction
+from focaccia.deterministic import Event
 
 from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
 
@@ -25,6 +26,18 @@ logging.getLogger('asmblock').setLevel(logging.CRITICAL)
 
 class ValidationError(Exception):
     pass
+
+def match_event(event: Event, pc: int, target: ReadableProgramState) -> bool:
+    # TODO: match the rest of the state to be sure
+    if event.pc == pc:
+        for reg, value in event.registers.items():
+            if value == event.pc:
+                continue
+            if target.read_register(reg) != value:
+                print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
+                return False
+        return True
+    return False
 
 class SpeculativeTracer(ReadableProgramState):
     def __init__(self, target: LLDBConcreteTarget):
@@ -216,7 +229,7 @@ class SymbolicTracer:
     def is_stepping_instr(self, pc: int, instruction: Instruction) -> bool:
         if self.nondet_events:
             pc = pc + instruction.length # detlog reports next pc for each event
-            if self.next_event and self.nondet_events[self.next_event].match(pc, self.target):
+            if self.next_event and match_event(self.nondet_events[self.next_event], pc, self.target):
                 debug('Current instruction matches next event; stepping through it')
                 self.progress_event()
                 return True
