@@ -5,8 +5,8 @@ import argparse
 import logging
 
 from focaccia import parser, utils
-from focaccia.symbolic import SymbolicTracer
 from focaccia.trace import TraceEnvironment
+from focaccia.native.tracer import SymbolicTracer
 
 def main():
     prog = argparse.ArgumentParser()

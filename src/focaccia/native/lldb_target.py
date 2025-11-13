@@ -3,8 +3,8 @@ import logging
 
 import lldb
 
-from .arch import supported_architectures
-from .snapshot import ProgramState
+from focaccia.snapshot import ProgramState
+from focaccia.arch import supported_architectures
 
 logger = logging.getLogger('focaccia-lldb-target')
 debug = logger.debug
