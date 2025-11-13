@@ -20,7 +20,7 @@ from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
 
-from validate_qemu import make_argparser, verbosity
+from focaccia.tools.validate_qemu import make_argparser, verbosity
 
 logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug

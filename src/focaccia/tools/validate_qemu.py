@@ -23,9 +23,10 @@ import argparse
 import sysconfig
 import subprocess
 
+import focaccia.qemu
 from focaccia.compare import ErrorTypes
 from focaccia.arch import supported_architectures
-from focaccia.tools.validation_server import start_validation_server
+from focaccia.qemu.validation_server import start_validation_server
 
 verbosity = {
     'info':    ErrorTypes.INFO,
@@ -118,7 +119,7 @@ def main():
                                 args.quiet)
     else:
         # QEMU GDB interface
-        script_dirname = os.path.dirname(__file__)
+        script_dirname = os.path.dirname(focaccia.qemu.__file__)
         qemu_tool_path = os.path.join(script_dirname, '_qemu_tool.py')
 
         # We have to remove all arguments we don't want to pass to the qemu tool
