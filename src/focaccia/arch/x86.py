@@ -183,18 +183,6 @@ def compose_rflags(rflags: dict[str, int]) -> int:
         (0x00200000 if rflags.get('ID', 0)  else 0)
     )
 
-# Incomplete, only the most common ones
-emulatedSyscalls = {
-    34: _Sc('pause', []),
-    39: _Sc('getpid', []),
-    102: _Sc('getuid', []),
-    318: _Sc('getrandom', [('rdi', 'rsi', 'char')]),
-}
-
-# Focaccia will do scheduling (and locking ???)
-passthruSyscalls = {
-}
-
 class ArchX86(Arch):
     def __init__(self):
         super().__init__(archname, registers, 64)
@@ -235,3 +223,4 @@ class ArchX86(Arch):
 
     def get_syscall_reg(self) -> str:
         return 'rax'
+

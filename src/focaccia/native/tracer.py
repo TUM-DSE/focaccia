@@ -217,12 +217,12 @@ class SymbolicTracer:
                 self.target.run()
 
             debug(f'Completed handling event: {current_event}')
-            self.nondet_events.next()
+            self.nondet_events.update_to_next()
 
     def is_stepping_instr(self, instruction: Instruction) -> bool:
         if self.nondet_events.current_event():
             debug('Current instruction matches next event; stepping through it')
-            self.nondet_events.next()
+            self.nondet_events.update_to_next()
             return True
         else:
             if self.target.arch.is_instr_syscall(str(instruction)):

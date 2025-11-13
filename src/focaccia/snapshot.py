@@ -161,7 +161,7 @@ class ProgramState(ReadableProgramState):
 
         return (regval & acc.mask) >> acc.start
 
-    def set_register(self, reg: str, value: int):
+    def write_register(self, reg: str, value: int):
         """Assign a value to a register.
 
         :raise RegisterAccessError: If `reg` is not a register name.

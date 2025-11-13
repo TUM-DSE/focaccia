@@ -29,6 +29,7 @@ from focaccia.arch import supported_architectures
 from focaccia.qemu.validation_server import start_validation_server
 
 verbosity = {
+    'debug':   ErrorTypes.INFO,
     'info':    ErrorTypes.INFO,
     'warning': ErrorTypes.POSSIBLE,
     'error':   ErrorTypes.CONFIRMED,
@@ -83,7 +84,7 @@ memory, and stepping forward by single instructions.
                       type=str,
                       default='gdb',
                       help='GDB binary to invoke.')
-    prog.add_argument('--deterministic', default=None,
+    prog.add_argument('--deterministic-log', default=None,
                       help='The directory containing rr traces')
     return prog
 

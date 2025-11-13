@@ -1,6 +1,7 @@
 from .arch import Arch
 from .snapshot import ReadableProgramState
 
+from reprlib import repr as alt_repr
 from typing import Callable
 
 class MemoryWriteHole:
@@ -56,7 +57,7 @@ class Event:
 
         mem_write_repr = ''
         for mem_write in self.mem_writes:
-            mem_write_repr += f'{mem_write}\n'
+            mem_write_repr += f'{alt_repr(mem_write)}\n'
 
         repr_str = f'Thread {hex(self.tid)} executed event {self.event_type} at {hex(self.pc)}\n'
         repr_str += f'Register set:\n{reg_repr}'
@@ -306,6 +307,13 @@ finally:
                 return None
             return self._events[self._idx]
 
+        def next_event(self) -> Event | None:
+            if self._idx is None:
+                raise ValueError('Attempted to get next event without synchronizing')
+            if self._idx + 1 >= len(self._events):
+                return None
+            return self._events[self._idx+1]
+
         def update(self, target: ReadableProgramState) -> Event | None:
             # Quick check
             candidates = self._pc_to_event.get(target.read_pc(), [])
@@ -321,13 +329,14 @@ finally:
                         self._in_event = True
                         return self.current_event()
 
-            return self.next()
+            return self.update_to_next()
 
-        def next(self) -> Event | None:
+        def update_to_next(self, count: int = 1) -> Event | None:
             if self._idx is None:
                 raise ValueError('Attempted to get next event without synchronizing')
 
-            self._idx += 1
+            self._in_event = True
+            self._idx += count
             return self.current_event()
 
         def __bool__(self) -> bool:

@@ -19,7 +19,8 @@ from focaccia.snapshot import ProgramState, ReadableProgramState, \
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
-from focaccia.deterministic import DeterministicLog, Event
+from focaccia.deterministic import DeterministicLog, DeterministicEventIterator, Event, SyscallEvent
+from focaccia.qemu.deterministic import emulated_system_calls
 
 from focaccia.tools.validate_qemu import make_argparser, verbosity
 
@@ -37,7 +38,13 @@ qemu_crash = {
         'snap': None,
 }
 
-class GDBProgramState(ReadableProgramState):
+def match_event(event: Event, target: ReadableProgramState) -> bool:
+    # Match just on PC
+    if event.pc == target.read_pc():
+        return True
+    return False
+
+class GDBProgramState(ProgramState):
     from focaccia.arch import aarch64, x86
 
     flag_register_names = {
@@ -122,13 +129,12 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, remote: str, deterministic_log: list[Event] | None):
+    def __init__(self, remote: str, deterministic_log: DeterministicLog):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {remote}')
         self._deterministic_log = deterministic_log
-        self._deterministic_idx = 0
         self._process = gdb.selected_inferior()
         self._first_next = True
 
@@ -138,95 +144,128 @@ class GDBServerStateIterator:
         archname = split[1] if len(split) > 1 else split[0]
         archname = archname.replace('-', '_')
         if archname not in supported_architectures:
-            print(f'Error: Current platform ({archname}) is not'
-                  f' supported by Focaccia. Exiting.')
-            exit(1)
+            raise NotImplementedError(f'Platform {archname} is not supported by Focaccia')
 
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
 
-    def _handle_sync_point(self, call: int, addr: int, length: int, arch: Arch):
-        def _search_next_event(addr: int, idx: int) -> Event | None:
-            if self._deterministic_log is None:
-                return idx, None
-            for i in range(idx, len(self._deterministic_log)):
-                event = self._deterministic_log[i]
-                if event.pc == addr:
-                    return i, event
-            return idx, None
+        self._deterministic_events = DeterministicEventIterator(self._deterministic_log, match_event)
 
-        _new_pc = addr + length
-        print(f'Handling syscall at {hex(_new_pc)} with call number {call}')
-        if int(call) in arch.get_em_syscalls().keys():
+        # Filter non-deterministic events for event after start
+        self._deterministic_events.update(self.current_state())
+        self._deterministic_events.update_to_next()
 
-            #print(f'Events: {self._deterministic_log[self._deterministic_idx:]}')
-            i, e = _search_next_event(_new_pc, self._deterministic_idx)
-            if e is None:
-                raise Exception(f'No matching event found in deterministic log \
-                                for syscall at {hex(_new_pc)}')
+    def current_state(self) -> ReadableProgramState:
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-            e = self._deterministic_log[i+1]
-            print(f'Adjusting w/ Event: {e}')
-            gdb.execute(f'set $pc = {hex(_new_pc)}')
-            self._deterministic_idx = i+2
+    def _handle_syscall(self) -> GDBProgramState:
+        cur_event = self._deterministic_events.current_event()
+        call = cur_event.registers.get(self.arch.get_syscall_reg())
 
-            reg_name = arch.get_syscall_reg()
-            gdb.execute(f'set $rax = {hex(e.registers.get("{reg_name}", 0))}')
+        post_event = self._deterministic_events.update_to_next()
+        syscall = emulated_system_calls[self.arch.archname].get(call, None)
+        debug(f'Handling event:\n{cur_event}')
+        if syscall is not None:
+            info(f'Replaying system call number {hex(call)}')
 
-            assert(len(arch.get_em_syscalls()[int(call)].outputs) == len(e.mem_writes))
+            self.skip(post_event.pc)
+            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-            w_idx = 0
-            for _reg, _size, _type in arch.get_em_syscalls()[int(call)].outputs:
-                if arch.to_regname(_size) is not None:
-                    _size = e.registers[_size]
-                else:
-                    _size = int(_size)
+            patchup_regs = [self.arch.get_syscall_reg(), *(syscall.patchup_registers or [])]
+            for reg in patchup_regs:
+                next_state.write_register(reg, post_event.registers.get(reg))
 
-                _addr_rr = e.registers[_reg]
-                _w_rr = e.mem_writes[w_idx]
-                w_idx += 1
+            for mem in post_event.mem_writes:
+                # TODO: handle holes
+                # TODO: address mapping
+                addr, data = mem.address, mem.data
+                next_state.write_memory(addr, data)
 
-                assert (_size == _w_rr.size), f'{_size} != {_w_rr.size}'
-                _addr = gdb.selected_frame().read_register(_reg)
-                cmd = f'set {{char[{_size}]}}{hex(_addr)} = 0x{_w_rr.data.hex()}'
-                # print(f'GDB: {cmd}')
-                gdb.execute(cmd)
+            return next_state
 
-            return _new_pc
+        info(f'System call number {hex(call)} not replayed')
+        self._step()
+        if self._is_exited():
+            raise StopIteration
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-        return addr
+    def _handle_event(self) -> GDBProgramState:
+        current_event = self._deterministic_events.current_event()
+        if not current_event:
+            return self.current_state()
+
+        if isinstance(current_event, SyscallEvent):
+            return self._handle_syscall()
+
+        warn(f'Event handling for events of type {current_event.event_type} not implemented')
+        return self.current_state()
+
+    def _is_exited(self) -> bool:
+        return not self._process.is_valid() or len(self._process.threads()) == 0
 
     def __iter__(self):
         return self
 
-    def __next__(self):
+    def __next__(self) -> ReadableProgramState:
         # The first call to __next__ should yield the first program state,
         # i.e. before stepping the first time
         if self._first_next:
             self._first_next = False
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
+        if match_event(self._deterministic_events.current_event(), self.current_state()):
+            state = self._handle_event()
+            if self._is_exited():
+                raise StopIteration
+            self._deterministic_events.update_to_next()
+            return state
+
         # Step
         pc = gdb.selected_frame().read_register('pc')
         new_pc = pc
         while pc == new_pc:  # Skip instruction chains from REP STOS etc.
-            gdb.execute('si', to_string=True)
-            if not self._process.is_valid() or len(self._process.threads()) == 0:
+            self._step()
+            if self._is_exited():
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
-            if self._deterministic_log is not None:
-                asm = gdb.selected_frame().architecture().disassemble(new_pc, count=1)[0]
-                if 'syscall' in asm['asm']:
-                    call_reg = self.arch.get_syscall_reg()
-                    new_pc = self._handle_sync_point(gdb.selected_frame().read_register(call_reg), asm['addr'], asm['length'], self.arch)
 
-        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+        return self.current_state()
 
-    def run_until(self, addr: int):
-        breakpoint = gdb.Breakpoint(f'*{addr:#x}')
+    def run_until(self, addr: int) -> ReadableProgramState:
+        events_handled = 0
+        event = self._deterministic_events.current_event()
+        while event:
+            state = self._run_until_any([addr, event.pc])
+            if state.read_pc() == addr:
+                # Check if we started at the very _start
+                self._first_next = events_handled == 0
+                return state
+
+            self._handle_event()
+
+            event = self._deterministic_events.update_to_next()
+            events_handled += 1
+        return self._run_until_any([addr])
+
+    def _run_until_any(self, addresses: list[int]) -> ReadableProgramState:
+        info(f'Executing until {[hex(x) for x in addresses]}')
+
+        breakpoints = []
+        for addr in addresses:
+            breakpoints.append(gdb.Breakpoint(f'*{addr:#x}'))
+
         gdb.execute('continue')
-        breakpoint.delete()
+
+        for bp in breakpoints:
+            bp.delete()
+
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
+    def skip(self, new_pc: int):
+        gdb.execute(f'set $pc = {hex(new_pc)}')
+
+    def _step(self):
+        gdb.execute('si', to_string=True)
 
 def record_minimal_snapshot(prev_state: ReadableProgramState,
                             cur_state: ReadableProgramState,
@@ -270,7 +309,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
         for regname in regs:
             try:
                 regval = cur_state.read_register(regname)
-                out_state.set_register(regname, regval)
+                out_state.write_register(regname, regval)
             except RegisterAccessError:
                 pass
         for mem in mems:
@@ -283,7 +322,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
                 pass
 
     state = ProgramState(cur_transform.arch)
-    state.set_register('PC', cur_transform.addr)
+    state.write_register('PC', cur_transform.addr)
 
     set_values(prev_transform.changed_regs.keys(),
                get_written_addresses(prev_transform),
@@ -334,24 +373,33 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     cur_state = next(state_iter)
     symb_i = 0
 
+    if logger.isEnabledFor(logging.DEBUG):
+        debug('Tracing program with the following non-deterministic events:')
+        for event in gdb._deterministic_events.events():
+            debug(event)
+
     # Skip to start
+    pc = cur_state.read_register('pc')
+    start_addr = start_addr if start_addr else pc
     try:
-        pc = cur_state.read_register('pc')
-        if start_addr and pc != start_addr:
-            info(f'Tracing QEMU from starting address: {hex(start_addr)}')
+        if pc != start_addr:
+            info(f'Executing until starting address {hex(start_addr)}')
             cur_state = state_iter.run_until(start_addr)
     except Exception as e:
-        if start_addr:
+        if pc != start_addr:
             raise Exception(f'Unable to reach start address {hex(start_addr)}: {e}')
         raise Exception(f'Unable to trace: {e}')
 
     # An online trace matching algorithm.
+    info(f'Tracing QEMU between {hex(start_addr)}:{hex(stop_addr) if stop_addr else "end"}')
     while True:
         try:
             pc = cur_state.read_register('pc')
+            if stop_addr and pc == stop_addr:
+                break
 
             while pc != strace[symb_i].addr:
-                info(f'PC {hex(pc)} does not match next symbolic reference {hex(strace[symb_i].addr)}')
+                warn(f'PC {hex(pc)} does not match next symbolic reference {hex(strace[symb_i].addr)}')
 
                 next_i = find_index(strace[symb_i+1:], pc, lambda t: t.addr)
 
@@ -409,11 +457,13 @@ def main():
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
 
-    if args.deterministic is not None:
-        replay_log = DeterministicLog(log_dir=args.deterministic)
+    detlog = DeterministicLog(args.deterministic_log)
+    if args.deterministic_log and detlog.base_directory is None:
+        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
+                                   'Focaccia built without deterministic log support')
 
     try:
-        gdb_server = GDBServerStateIterator(args.remote, replay_log.events())
+        gdb_server = GDBServerStateIterator(args.remote, detlog)
     except Exception as e:
         raise Exception(f'Unable to perform basic GDB setup: {e}')
 
