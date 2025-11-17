@@ -12,7 +12,7 @@ from focaccia.trace import Trace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform, DisassemblyContext, run_instruction
-from focaccia.deterministic import Event, DeterministicEventIterator
+from focaccia.deterministic import Event, EventMatcher
 
 from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
 
@@ -154,8 +154,6 @@ class SymbolicTracer:
         self.cross_validate = cross_validate
         self.target = SpeculativeTracer(self.create_debug_target())
 
-        self.nondet_events = DeterministicEventIterator(self.env.detlog, match_event)
-
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
         if self.remote is False:
@@ -208,30 +206,10 @@ class SymbolicTracer:
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                                       f'\nFaulty transformation: {transform}')
 
-    def post_event(self) -> None:
-        current_event = self.nondet_events.current_event()
-        if current_event:
-            if current_event.pc == 0:
-                # Exit sequence
-                debug('Completed exit event')
-                self.target.run()
-
-            debug(f'Completed handling event: {current_event}')
-            self.nondet_events.update_to_next()
-
-    def is_stepping_instr(self, instruction: Instruction) -> bool:
-        if self.nondet_events.current_event():
-            debug('Current instruction matches next event; stepping through it')
-            self.nondet_events.update_to_next()
-            return True
-        else:
-            if self.target.arch.is_instr_syscall(str(instruction)):
-                return True
-        return False
-
     def progress(self, new_pc, step: bool = False) -> int | None:
         self.target.speculate(new_pc)
         if step:
+            info(f'Stepping through event at {hex(self.target.read_pc())}')
             self.target.progress_execution()
             if self.target.is_exited():
                 return None
@@ -251,9 +229,10 @@ class SymbolicTracer:
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
 
+        event_matcher = EventMatcher(self.env.detlog.events(), match_event, self.target)
         if logger.isEnabledFor(logging.DEBUG):
             debug('Tracing program with the following non-deterministic events')
-            for event in self.nondet_events.events():
+            for event in event_matcher.events:
                 debug(event)
 
         # Trace concolically
@@ -262,9 +241,8 @@ class SymbolicTracer:
             pc = self.target.read_pc()
 
             if self.env.stop_address is not None and pc == self.env.stop_address:
+                info(f'Reached stop address at {hex(pc)}')
                 break
-
-            self.nondet_events.update(self.target)
 
             # Disassemble instruction at the current PC
             tid = self.target.get_current_tid()
@@ -292,7 +270,8 @@ class SymbolicTracer:
                         continue
                     raise # forward exception
 
-            is_event = self.is_stepping_instr(instruction)
+            event, post_event = event_matcher.match_pair(self.target)
+            in_event = (event and event_matcher) or self.target.arch.is_instr_syscall(str(instruction))
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
@@ -311,7 +290,7 @@ class SymbolicTracer:
                 new_pc = int(new_pc)
                 transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
                 pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                self.progress(new_pc, step=is_event)
+                self.progress(new_pc, step=in_event)
 
                 try:
                     self.validate(instruction, transform, pred_regs, pred_mems)
@@ -321,7 +300,7 @@ class SymbolicTracer:
                         continue
                     raise
             else:
-                new_pc = self.progress(new_pc, step=is_event)
+                new_pc = self.progress(new_pc, step=in_event)
                 if new_pc is None:
                     transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
                     strace.append(transform)
@@ -330,8 +309,13 @@ class SymbolicTracer:
 
             strace.append(transform)
 
-            if is_event:
-                self.post_event()
+            if post_event:
+                if post_event.pc == 0:
+                    # Exit sequence
+                    debug('Completed exit event')
+                    self.target.run()
+
+                debug(f'Completed handling event: {post_event}')
 
         return Trace(strace, self.env)
 

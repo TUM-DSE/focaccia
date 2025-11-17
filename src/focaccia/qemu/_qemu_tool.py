@@ -9,7 +9,7 @@ work to do.
 import gdb
 import logging
 import traceback
-from typing import Iterable
+from typing import Iterable, Optional
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
@@ -19,7 +19,13 @@ from focaccia.snapshot import ProgramState, ReadableProgramState, \
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
-from focaccia.deterministic import DeterministicLog, DeterministicEventIterator, Event, SyscallEvent
+from focaccia.deterministic import (
+    DeterministicLog,
+    LogStateMatcher,
+    Event,
+    SyscallEvent,
+    MemoryMapping,
+)
 from focaccia.qemu.deterministic import emulated_system_calls
 
 from focaccia.tools.validate_qemu import make_argparser, verbosity
@@ -40,6 +46,7 @@ qemu_crash = {
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     # Match just on PC
+    debug(f'Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}')
     if event.pc == target.read_pc():
         return True
     return False
@@ -149,23 +156,20 @@ class GDBServerStateIterator:
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
 
-        self._deterministic_events = DeterministicEventIterator(self._deterministic_log, match_event)
-
-        # Filter non-deterministic events for event after start
-        self._deterministic_events.update(self.current_state())
-        self._deterministic_events.update_to_next()
+        self._log_matcher = LogStateMatcher(self._deterministic_log.events(),
+                                            self._deterministic_log.mmaps(),
+                                            match_event,
+                                            from_state=self.current_state())
+        info(f'Synchronizing at PC {hex(self.current_state().read_pc())} with {self._log_matcher.matched_events()}')
 
     def current_state(self) -> ReadableProgramState:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-    def _handle_syscall(self) -> GDBProgramState:
-        cur_event = self._deterministic_events.current_event()
-        call = cur_event.registers.get(self.arch.get_syscall_reg())
+    def _handle_syscall(self, event: Event, post_event: Event) -> GDBProgramState:
+        call = event.registers.get(self.arch.get_syscall_reg())
 
-        post_event = self._deterministic_events.update_to_next()
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
-        debug(f'Handling event:\n{cur_event}')
-        if syscall is not None:
+        if syscall is not None and False:
             info(f'Replaying system call number {hex(call)}')
 
             self.skip(post_event.pc)
@@ -189,15 +193,14 @@ class GDBServerStateIterator:
             raise StopIteration
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-    def _handle_event(self) -> GDBProgramState:
-        current_event = self._deterministic_events.current_event()
-        if not current_event:
+    def _handle_event(self, event: Event | None, post_event: Event | None) -> GDBProgramState:
+        if not event:
             return self.current_state()
 
-        if isinstance(current_event, SyscallEvent):
-            return self._handle_syscall()
+        if isinstance(event, SyscallEvent):
+            return self._handle_syscall(event, post_event)
 
-        warn(f'Event handling for events of type {current_event.event_type} not implemented')
+        warn(f'Event handling for events of type {event.event_type} not implemented')
         return self.current_state()
 
     def _is_exited(self) -> bool:
@@ -213,11 +216,12 @@ class GDBServerStateIterator:
             self._first_next = False
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-        if match_event(self._deterministic_events.current_event(), self.current_state()):
-            state = self._handle_event()
+        event, post_event, _ = self._log_matcher.match_pair(self.current_state())
+        if event:
+            state = self._handle_event(event, post_event)
             if self._is_exited():
                 raise StopIteration
-            self._deterministic_events.update_to_next()
+
             return state
 
         # Step
@@ -233,7 +237,7 @@ class GDBServerStateIterator:
 
     def run_until(self, addr: int) -> ReadableProgramState:
         events_handled = 0
-        event = self._deterministic_events.current_event()
+        event, _ = self._log_matcher.next()
         while event:
             state = self._run_until_any([addr, event.pc])
             if state.read_pc() == addr:
@@ -241,9 +245,10 @@ class GDBServerStateIterator:
                 self._first_next = events_handled == 0
                 return state
 
-            self._handle_event()
+            event, post_event, _ = self._log_matcher.match_pair(self.current_state())
+            self._handle_event(event, post_event)
 
-            event = self._deterministic_events.update_to_next()
+            event, _ = self._log_matcher.next()
             events_handled += 1
         return self._run_until_any([addr])
 
@@ -375,7 +380,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
 
     if logger.isEnabledFor(logging.DEBUG):
         debug('Tracing program with the following non-deterministic events:')
-        for event in gdb._deterministic_events.events():
+        for event in gdb._log_matcher.events():
             debug(event)
 
     # Skip to start

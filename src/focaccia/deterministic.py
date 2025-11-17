@@ -2,7 +2,7 @@ from .arch import Arch
 from .snapshot import ReadableProgramState
 
 from reprlib import repr as alt_repr
-from typing import Callable
+from typing import Callable, Tuple, Optional
 
 class MemoryWriteHole:
     def __init__(self, offset: int, size: int):
@@ -285,60 +285,136 @@ except Exception:
         def tasks(self) -> list[Task]: return []
         def mmaps(self) -> list[MemoryMapping]: return []
 finally:
-    class DeterministicEventIterator:
-        def __init__(self, deterministic_log: DeterministicLog, match_fn: Callable):
-            self._detlog = deterministic_log
-            self._events = self._detlog.events()
-            self._pc_to_event = {}
-            self._match = match_fn
-            self._idx: int | None = None # None represents no current event
-            self._in_event: bool = False
+    class EventMatcher:
+        def __init__(self, 
+                     events: list[Event], 
+                     match_fn: Callable,
+                     from_state: ReadableProgramState | None = None):
+            self.events = events
+            self.matcher = match_fn
 
-            idx = 0
-            for event in self._events:
-                self._pc_to_event.setdefault(event.pc, []).append((event, idx))
+            self.matched_count = None
+            if from_state:
+                self.match(from_state)
 
-        def events(self) -> list[Event]:
-            return self._events
+        def match(self, state: ReadableProgramState) -> Event | None:
+            if self.matched_count is None:
+                # Need to synchronize
+                # Search for match
+                for idx in range(len(self.events)):
+                    event = self.events[idx]
+                    if self.matcher(event, state):
+                        self.matched_count = idx + 1
+                        return event
 
-        def current_event(self) -> Event | None:
-            # No event when not synchronized
-            if self._idx is None or not self._in_event:
-                return None
-            return self._events[self._idx]
+                if self.matched_count is None:
+                    return None
 
-        def next_event(self) -> Event | None:
-            if self._idx is None:
-                raise ValueError('Attempted to get next event without synchronizing')
-            if self._idx + 1 >= len(self._events):
-                return None
-            return self._events[self._idx+1]
+            event = self.events[self.matched_count]
+            if self.matcher(event, state):
+                self.matched_count += 1 # proceed to next
+                return event
+            
+            return None
 
-        def update(self, target: ReadableProgramState) -> Event | None:
-            # Quick check
-            candidates = self._pc_to_event.get(target.read_pc(), [])
-            if len(candidates) == 0:
-                self._in_event = False
-                return None
+        def next(self):
+            if self.matched_count is None:
+                raise ValueError('Cannot get next event with unsynchronized event matcher')
+            if self.matched_count < len(self.events):
+                return self.events[self.matched_count]
+            return None
 
-            # Find synchronization point
-            if self._idx is None:
-                for event, idx in candidates:
-                    if self._match(event, target):
-                        self._idx = idx
-                        self._in_event = True
-                        return self.current_event()
-
-            return self.update_to_next()
-
-        def update_to_next(self, count: int = 1) -> Event | None:
-            if self._idx is None:
-                raise ValueError('Attempted to get next event without synchronizing')
-
-            self._in_event = True
-            self._idx += count
-            return self.current_event()
+        def match_pair(self, state: ReadableProgramState):
+            event = self.match(state)
+            if event is None:
+                return None, None
+            if isinstance(event, SyscallEvent) and event.syscall_state == 'exiting':
+                self.matched_count = None
+                return None, None
+            assert(self.matched_count is not None)
+            post_event = self.events[self.matched_count]
+            self.matched_count += 1
+            return event, post_event
 
         def __bool__(self) -> bool:
-            return len(self.events()) > 0
+            return len(self.events) > 0
+
+    class MappingMatcher:
+        def __init__(self, memory_mappings: list[MemoryMapping]):
+            self.memory_mappings = memory_mappings
+            self.matched_count = None
+
+        def match(self, event_count: int) -> MemoryMapping | None:
+            if self.matched_count is None:
+                # Need to synchronize
+                # Search for match
+                for idx in range(len(self.memory_mappings)):
+                    mapping = self.memory_mappings[idx]
+                    if mapping.event_count == event_count:
+                        self.matched_count = idx + 1
+                        return mapping
+
+                if self.matched_count is None:
+                    return None
+
+            mapping = self.memory_mappings[self.matched_count]
+            if mapping.event_count == event_count:
+                self.matched_count += 1 # proceed to next
+                return mapping
+            
+            return None
+
+        def next(self):
+            if self.matched_count is None:
+                raise ValueError('Cannot get next mapping with unsynchronized mapping matcher')
+            if self.matched_count < len(self.memory_mappings):
+                return self.memory_mappings[self.matched_count]
+            return None
+
+        def __bool__(self) -> bool:
+            return len(self.memory_mappings) > 0
+
+    class LogStateMatcher:
+        def __init__(self, 
+                     events: list[Event], 
+                     memory_mappings: list[MemoryMapping],
+                     event_match_fn: Callable,
+                     from_state: ReadableProgramState | None = None):
+            self.event_matcher = EventMatcher(events, event_match_fn, from_state)
+            self.mapping_matcher = MappingMatcher(memory_mappings)
+
+        def events(self) -> list[Event]:
+            return self.event_matcher.events
+
+        def mappings(self) -> list[MemoryMapping]:
+            return self.mapping_matcher.memory_mappings
+
+        def matched_events(self) -> Optional[int]:
+            return self.event_matcher.matched_count
+
+        def match(self, state: ReadableProgramState) -> Tuple[Optional[Event], Optional[MemoryMapping]]:
+            event = self.event_matcher.match(state)
+            if not event:
+                return None, None
+            assert(self.event_matcher.matched_count is not None)
+            mapping = self.mapping_matcher.match(self.event_matcher.matched_count)
+            return event, mapping
+
+        def match_pair(self, state: ReadableProgramState) -> Tuple[Optional[Event], Optional[Event], Optional[MemoryMapping]]:
+            event, post_event = self.event_matcher.match_pair(state)
+            if not event:
+                return None, None, None
+            assert(self.event_matcher.matched_count is not None)
+            mapping = self.mapping_matcher.match(self.event_matcher.matched_count-1)
+            return event, post_event, mapping
+
+        def next(self) -> Tuple[Optional[Event], Optional[MemoryMapping]]:
+            next_event = self.event_matcher.next()
+            if not next_event:
+                return None, None
+            assert(self.event_matcher.matched_count is not None)
+            return next_event, self.mapping_matcher.match(self.event_matcher.matched_count)
+
+        def __bool__(self) -> bool:
+            return bool(self.event_matcher)
 
