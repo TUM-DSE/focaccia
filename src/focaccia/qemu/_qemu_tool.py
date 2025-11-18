@@ -22,8 +22,8 @@ from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
 from focaccia.deterministic import (
     DeterministicLog,
-    LogStateMatcher,
     Event,
+    EventMatcher,
     SyscallEvent,
     MemoryMapping,
 )
@@ -158,11 +158,10 @@ class GDBServerStateIterator:
         self.binary = self._process.progspace.filename
 
         first_state = self.current_state()
-        self._log_matcher = LogStateMatcher(self._deterministic_log.events(),
-                                            self._deterministic_log.mmaps(),
-                                            match_event,
-                                            from_state=first_state)
-        event, _ = self._log_matcher.match(first_state)
+        self._events = EventMatcher(self._deterministic_log.events(),
+                                    match_event,
+                                    from_state=first_state)
+        event = self._events.match(first_state)
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
 
     def current_state(self) -> ReadableProgramState:
@@ -228,7 +227,7 @@ class GDBServerStateIterator:
             self._first_next = False
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-        event, post_event, _ = self._log_matcher.match_pair(self.current_state())
+        event, post_event = self._events.match_pair(self.current_state())
         if event:
             state = self._handle_event(event, post_event)
             if self._is_exited():
@@ -249,7 +248,7 @@ class GDBServerStateIterator:
 
     def run_until(self, addr: int) -> ReadableProgramState:
         events_handled = 0
-        event, _ = self._log_matcher.next()
+        event = self._events.next()
         while event:
             state = self._run_until_any([addr, event.pc])
             if state.read_pc() == addr:
@@ -257,10 +256,10 @@ class GDBServerStateIterator:
                 self._first_next = events_handled == 0
                 return state
 
-            event, post_event, _ = self._log_matcher.match_pair(self.current_state())
+            event, post_event = self._events.match_pair(self.current_state())
             self._handle_event(event, post_event)
 
-            event, _ = self._log_matcher.next()
+            event = self._events.next()
             events_handled += 1
         return self._run_until_any([addr])
 
@@ -452,7 +451,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
 
     if logger.isEnabledFor(logging.DEBUG):
         debug('Tracing program with the following non-deterministic events:')
-        for event in gdb._log_matcher.events():
+        for event in gdb._events.events:
             debug(event)
 
     # Skip to start
