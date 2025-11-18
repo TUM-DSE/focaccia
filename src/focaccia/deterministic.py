@@ -180,7 +180,8 @@ class MemoryMapping:
                  source: str,
                  offset: int,
                  mmap_prot: int,
-                 mmap_flags: int):
+                 mmap_flags: int,
+                 name: str | None = None):
         self.event_count = event_count
         self.start_address = start_address
         self.length = end_address - self.start_address
@@ -188,10 +189,13 @@ class MemoryMapping:
         self.offset = offset
         self.mmap_prot = mmap_prot
         self.mmap_flags = mmap_flags
+        self.name = name
 
     def __repr__(self) -> str:
-        return f'Memory mapping at event {self.event_count}\n' \
-               f'start = {hex(self.start_address)}\n' \
+        header = f'Memory mapping at event {self.event_count}\n'
+        if self.name:
+            header += f'name = {self.name}\n'
+        return header + f'start = {hex(self.start_address)}\n' \
                f'length = {self.length}\n' \
                f'source = {self.source}\n' \
                f'offset = {self.offset}\n' \

@@ -6,6 +6,7 @@ But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
+import re
 import gdb
 import logging
 import traceback
@@ -156,11 +157,13 @@ class GDBServerStateIterator:
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
 
+        first_state = self.current_state()
         self._log_matcher = LogStateMatcher(self._deterministic_log.events(),
                                             self._deterministic_log.mmaps(),
                                             match_event,
-                                            from_state=self.current_state())
-        info(f'Synchronizing at PC {hex(self.current_state().read_pc())} with {self._log_matcher.matched_events()}')
+                                            from_state=first_state)
+        event, _ = self._log_matcher.match(first_state)
+        info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
 
     def current_state(self) -> ReadableProgramState:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
@@ -271,6 +274,66 @@ class GDBServerStateIterator:
 
     def _step(self):
         gdb.execute('si', to_string=True)
+
+    def get_sections(self) -> list[MemoryMapping]:
+        mappings = []
+
+        # Skip everything until the header line
+        started = False
+
+        text = gdb.execute('info proc mappings', to_string=True)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Detect header line once
+            if line.startswith("Start Addr"):
+                started = True
+                continue
+
+            if not started:
+                continue
+
+            # Lines look like:
+            # 0x0000000000400000 0x0000000000401000 0x1000 0x0 r--p /path
+            # or:
+            # 0x... 0x... 0x... 0x... rw-p  [vdso]
+            parts = line.split(None, 6)
+
+            if len(parts) < 5:
+                continue
+
+            start   = int(parts[0], 16)
+            end     = int(parts[1], 16)
+            size    = int(parts[2], 16)
+            offset  = int(parts[3], 16)
+            perms   = parts[4]
+
+            file_or_tag = None
+            is_special = False
+
+            if len(parts) >= 6:
+                tail = parts[5]
+
+                # If it's [tag], mark as special
+                if tail.startswith("[") and tail.endswith("]"):
+                    file_or_tag = tail.strip()
+                    is_special = True
+                else:
+                    # Might be a filename or absent
+                    file_or_tag = tail
+
+            mapping = MemoryMapping(0,
+                                    start,
+                                    end,
+                                    '',
+                                    offset,
+                                    0,
+                                    0)
+            mappings.append(mapping)
+
+        return mappings
 
 def record_minimal_snapshot(prev_state: ReadableProgramState,
                             cur_state: ReadableProgramState,
