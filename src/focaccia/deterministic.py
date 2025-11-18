@@ -344,25 +344,26 @@ finally:
             self.memory_mappings = memory_mappings
             self.matched_count = None
 
-        def match(self, event_count: int) -> MemoryMapping | None:
+        def match(self, event_count: int) -> list[MemoryMapping]:
             if self.matched_count is None:
                 # Need to synchronize
                 # Search for match
+                mappings = []
                 for idx in range(len(self.memory_mappings)):
                     mapping = self.memory_mappings[idx]
                     if mapping.event_count == event_count:
                         self.matched_count = idx + 1
-                        return mapping
+                        mappings.append(mapping)
+                return mappings
 
-                if self.matched_count is None:
-                    return None
+            mappings = []
+            while self.matched_count < len(self.memory_mappings):
+                mapping = self.memory_mappings[self.matched_count]
+                if mapping.event_count == event_count:
+                    self.matched_count += 1 # proceed to next
+                    mappings.append(mapping)
 
-            mapping = self.memory_mappings[self.matched_count]
-            if mapping.event_count == event_count:
-                self.matched_count += 1 # proceed to next
-                return mapping
-            
-            return None
+            return mappings
 
         def next(self):
             if self.matched_count is None:
@@ -392,26 +393,26 @@ finally:
         def matched_events(self) -> Optional[int]:
             return self.event_matcher.matched_count
 
-        def match(self, state: ReadableProgramState) -> Tuple[Optional[Event], Optional[MemoryMapping]]:
+        def match(self, state: ReadableProgramState) -> Tuple[Optional[Event], list[MemoryMapping]]:
             event = self.event_matcher.match(state)
             if not event:
-                return None, None
+                return None, []
             assert(self.event_matcher.matched_count is not None)
             mapping = self.mapping_matcher.match(self.event_matcher.matched_count)
             return event, mapping
 
-        def match_pair(self, state: ReadableProgramState) -> Tuple[Optional[Event], Optional[Event], Optional[MemoryMapping]]:
+        def match_pair(self, state: ReadableProgramState) -> Tuple[Optional[Event], Optional[Event], list[MemoryMapping]]:
             event, post_event = self.event_matcher.match_pair(state)
             if not event:
-                return None, None, None
+                return None, None, []
             assert(self.event_matcher.matched_count is not None)
             mapping = self.mapping_matcher.match(self.event_matcher.matched_count-1)
             return event, post_event, mapping
 
-        def next(self) -> Tuple[Optional[Event], Optional[MemoryMapping]]:
+        def next(self) -> Tuple[Optional[Event], list[MemoryMapping]]:
             next_event = self.event_matcher.next()
             if not next_event:
-                return None, None
+                return None, []
             assert(self.event_matcher.matched_count is not None)
             return next_event, self.mapping_matcher.match(self.event_matcher.matched_count)
 
