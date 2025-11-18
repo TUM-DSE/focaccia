@@ -172,21 +172,30 @@ class GDBServerStateIterator:
         call = event.registers.get(self.arch.get_syscall_reg())
 
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
-        if syscall is not None and False:
+        if syscall is not None:
             info(f'Replaying system call number {hex(call)}')
 
             self.skip(post_event.pc)
-            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+            next_state = self.current_state()
 
             patchup_regs = [self.arch.get_syscall_reg(), *(syscall.patchup_registers or [])]
             for reg in patchup_regs:
-                next_state.write_register(reg, post_event.registers.get(reg))
+                gdb.parse_and_eval(f'${reg}={post_event.registers.get(reg)}')
 
             for mem in post_event.mem_writes:
-                # TODO: handle holes
-                # TODO: address mapping
                 addr, data = mem.address, mem.data
-                next_state.write_memory(addr, data)
+                for reg, value in post_event.registers.items():
+                    if value == addr:
+                        addr = next_state.read_register(reg)
+                        break
+
+                info(f'Replaying write to {hex(addr)} with data:\n{data.hex(" ")}')
+
+                # Insert holes into data
+                for hole in mem.holes:
+                    data[hole.offset:hole.offset] = b'\x00' * hole.size
+                self._process.write_memory(addr, data)
+                return next_state
 
             return next_state
 
