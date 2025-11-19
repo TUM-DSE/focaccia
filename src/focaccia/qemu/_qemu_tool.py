@@ -145,6 +145,7 @@ class GDBServerStateIterator:
         self._deterministic_log = deterministic_log
         self._process = gdb.selected_inferior()
         self._first_next = True
+        self._thread_num = 1
 
         # Try to determine the guest architecture. This is a bit hacky and
         # tailored to GDB's naming for the x86-64 architecture.
@@ -282,6 +283,10 @@ class GDBServerStateIterator:
 
     def _step(self):
         gdb.execute('si', to_string=True)
+
+    def context_switch(self, thread_number: int) -> None:
+        gdb.execute(f'thread {thread_number}')
+        self._thread_num = thread_number
 
     def get_sections(self) -> list[MemoryMapping]:
         mappings = []
