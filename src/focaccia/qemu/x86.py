@@ -8,3 +8,7 @@ emulated_system_calls = {
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
 
+passthrough_system_calls = {
+    56:  SyscallInfo('clone', patchup_address_registers=['rdx', 'r10'], creates_thread=True),
+}
+

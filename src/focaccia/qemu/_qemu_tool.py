@@ -27,7 +27,7 @@ from focaccia.deterministic import (
     SyscallEvent,
     MemoryMapping,
 )
-from focaccia.qemu.deterministic import emulated_system_calls
+from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls
 
 from focaccia.tools.validate_qemu import make_argparser, verbosity
 
@@ -198,6 +198,19 @@ class GDBServerStateIterator:
                 return next_state
 
             return next_state
+
+        syscall = passthrough_system_calls[self.arch.archname].get(call, None)
+        if syscall is not None:
+            info(f'System call number {hex(call)} passed through')
+            self._step()
+            if self._is_exited():
+                raise StopIteration
+            # Check if new thread was created
+            if syscall.creates_thread:
+                new_tid = self.current_state().read_register(self.arch.get_syscall_reg())
+                info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event.tid)}')
+
+            return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
         info(f'System call number {hex(call)} not replayed')
         self._step()
