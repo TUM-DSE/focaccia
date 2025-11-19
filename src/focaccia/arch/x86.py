@@ -1,6 +1,6 @@
 """Architecture-specific configuration."""
 
-from .arch import Arch, RegisterDescription as _Reg
+from .arch import Arch, RegisterDescription as _Reg, SyscallInfo as _Sc
 
 archname = 'x86_64'
 
@@ -214,4 +214,13 @@ class ArchX86(Arch):
         if instr.upper().startswith("INT"):
             return True
         return False
+
+    def get_em_syscalls(self) -> dict[int, str]:
+        return emulatedSyscalls
+
+    def get_pasthru_syscalls(self) -> dict[int, str]:
+        return passthruSyscalls
+
+    def get_syscall_reg(self) -> str:
+        return 'rax'
 

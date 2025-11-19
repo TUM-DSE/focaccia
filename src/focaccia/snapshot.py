@@ -92,6 +92,13 @@ class ReadableProgramState:
         self.arch = arch
         self.strict = True
 
+    def read_pc(self) -> int:
+        """Read the PC value.
+
+        :raise RegisterAccessError: If the register has not value.
+        """
+        return self.read_register('pc')
+
     def read_register(self, reg: str) -> int:
         """Read a register's value.
 
@@ -154,7 +161,7 @@ class ProgramState(ReadableProgramState):
 
         return (regval & acc.mask) >> acc.start
 
-    def set_register(self, reg: str, value: int):
+    def write_register(self, reg: str, value: int):
         """Assign a value to a register.
 
         :raise RegisterAccessError: If `reg` is not a register name.

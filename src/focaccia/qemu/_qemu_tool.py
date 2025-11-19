@@ -6,10 +6,11 @@ But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
+import re
 import gdb
 import logging
 import traceback
-from typing import Iterable
+from typing import Iterable, Optional
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
@@ -19,8 +20,16 @@ from focaccia.snapshot import ProgramState, ReadableProgramState, \
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
 from focaccia.trace import Trace, TraceEnvironment
 from focaccia.utils import print_result
+from focaccia.deterministic import (
+    DeterministicLog,
+    Event,
+    EventMatcher,
+    SyscallEvent,
+    MemoryMapping,
+)
+from focaccia.qemu.deterministic import emulated_system_calls
 
-from validate_qemu import make_argparser, verbosity
+from focaccia.tools.validate_qemu import make_argparser, verbosity
 
 logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
@@ -36,7 +45,14 @@ qemu_crash = {
         'snap': None,
 }
 
-class GDBProgramState(ReadableProgramState):
+def match_event(event: Event, target: ReadableProgramState) -> bool:
+    # Match just on PC
+    debug(f'Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}')
+    if event.pc == target.read_pc():
+        return True
+    return False
+
+class GDBProgramState(ProgramState):
     from focaccia.arch import aarch64, x86
 
     flag_register_names = {
@@ -121,11 +137,12 @@ class GDBProgramState(ReadableProgramState):
             raise MemoryAccessError(addr, size, str(err))
 
 class GDBServerStateIterator:
-    def __init__(self, remote: str):
+    def __init__(self, remote: str, deterministic_log: DeterministicLog):
         gdb.execute('set pagination 0')
         gdb.execute('set sysroot')
         gdb.execute('set python print-stack full') # enable complete Python tracebacks
         gdb.execute(f'target remote {remote}')
+        self._deterministic_log = deterministic_log
         self._process = gdb.selected_inferior()
         self._first_next = True
 
@@ -135,39 +152,196 @@ class GDBServerStateIterator:
         archname = split[1] if len(split) > 1 else split[0]
         archname = archname.replace('-', '_')
         if archname not in supported_architectures:
-            print(f'Error: Current platform ({archname}) is not'
-                  f' supported by Focaccia. Exiting.')
-            exit(1)
+            raise NotImplementedError(f'Platform {archname} is not supported by Focaccia')
 
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
 
+        first_state = self.current_state()
+        self._events = EventMatcher(self._deterministic_log.events(),
+                                    match_event,
+                                    from_state=first_state)
+        event = self._events.match(first_state)
+        info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+
+    def current_state(self) -> ReadableProgramState:
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
+    def _handle_syscall(self, event: Event, post_event: Event) -> GDBProgramState:
+        call = event.registers.get(self.arch.get_syscall_reg())
+
+        syscall = emulated_system_calls[self.arch.archname].get(call, None)
+        if syscall is not None:
+            info(f'Replaying system call number {hex(call)}')
+
+            self.skip(post_event.pc)
+            next_state = self.current_state()
+
+            patchup_regs = [self.arch.get_syscall_reg(), *(syscall.patchup_registers or [])]
+            for reg in patchup_regs:
+                gdb.parse_and_eval(f'${reg}={post_event.registers.get(reg)}')
+
+            for mem in post_event.mem_writes:
+                addr, data = mem.address, mem.data
+                for reg, value in post_event.registers.items():
+                    if value == addr:
+                        addr = next_state.read_register(reg)
+                        break
+
+                info(f'Replaying write to {hex(addr)} with data:\n{data.hex(" ")}')
+
+                # Insert holes into data
+                for hole in mem.holes:
+                    data[hole.offset:hole.offset] = b'\x00' * hole.size
+                self._process.write_memory(addr, data)
+                return next_state
+
+            return next_state
+
+        info(f'System call number {hex(call)} not replayed')
+        self._step()
+        if self._is_exited():
+            raise StopIteration
+        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+
+    def _handle_event(self, event: Event | None, post_event: Event | None) -> GDBProgramState:
+        if not event:
+            return self.current_state()
+
+        if isinstance(event, SyscallEvent):
+            return self._handle_syscall(event, post_event)
+
+        warn(f'Event handling for events of type {event.event_type} not implemented')
+        return self.current_state()
+
+    def _is_exited(self) -> bool:
+        return not self._process.is_valid() or len(self._process.threads()) == 0
+
     def __iter__(self):
         return self
 
-    def __next__(self):
+    def __next__(self) -> ReadableProgramState:
         # The first call to __next__ should yield the first program state,
         # i.e. before stepping the first time
         if self._first_next:
             self._first_next = False
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
+        event, post_event = self._events.match_pair(self.current_state())
+        if event:
+            state = self._handle_event(event, post_event)
+            if self._is_exited():
+                raise StopIteration
+
+            return state
+
         # Step
         pc = gdb.selected_frame().read_register('pc')
         new_pc = pc
         while pc == new_pc:  # Skip instruction chains from REP STOS etc.
-            gdb.execute('si', to_string=True)
-            if not self._process.is_valid() or len(self._process.threads()) == 0:
+            self._step()
+            if self._is_exited():
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register('pc')
 
+        return self.current_state()
+
+    def run_until(self, addr: int) -> ReadableProgramState:
+        events_handled = 0
+        event = self._events.next()
+        while event:
+            state = self._run_until_any([addr, event.pc])
+            if state.read_pc() == addr:
+                # Check if we started at the very _start
+                self._first_next = events_handled == 0
+                return state
+
+            event, post_event = self._events.match_pair(self.current_state())
+            self._handle_event(event, post_event)
+
+            event = self._events.next()
+            events_handled += 1
+        return self._run_until_any([addr])
+
+    def _run_until_any(self, addresses: list[int]) -> ReadableProgramState:
+        info(f'Executing until {[hex(x) for x in addresses]}')
+
+        breakpoints = []
+        for addr in addresses:
+            breakpoints.append(gdb.Breakpoint(f'*{addr:#x}'))
+
+        gdb.execute('continue')
+
+        for bp in breakpoints:
+            bp.delete()
+
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-    def run_until(self, addr: int):
-        breakpoint = gdb.Breakpoint(f'*{addr:#x}')
-        gdb.execute('continue')
-        breakpoint.delete()
-        return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
+    def skip(self, new_pc: int):
+        gdb.execute(f'set $pc = {hex(new_pc)}')
+
+    def _step(self):
+        gdb.execute('si', to_string=True)
+
+    def get_sections(self) -> list[MemoryMapping]:
+        mappings = []
+
+        # Skip everything until the header line
+        started = False
+
+        text = gdb.execute('info proc mappings', to_string=True)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Detect header line once
+            if line.startswith("Start Addr"):
+                started = True
+                continue
+
+            if not started:
+                continue
+
+            # Lines look like:
+            # 0x0000000000400000 0x0000000000401000 0x1000 0x0 r--p /path
+            # or:
+            # 0x... 0x... 0x... 0x... rw-p  [vdso]
+            parts = line.split(None, 6)
+
+            if len(parts) < 5:
+                continue
+
+            start   = int(parts[0], 16)
+            end     = int(parts[1], 16)
+            size    = int(parts[2], 16)
+            offset  = int(parts[3], 16)
+            perms   = parts[4]
+
+            file_or_tag = None
+            is_special = False
+
+            if len(parts) >= 6:
+                tail = parts[5]
+
+                # If it's [tag], mark as special
+                if tail.startswith("[") and tail.endswith("]"):
+                    file_or_tag = tail.strip()
+                    is_special = True
+                else:
+                    # Might be a filename or absent
+                    file_or_tag = tail
+
+            mapping = MemoryMapping(0,
+                                    start,
+                                    end,
+                                    '',
+                                    offset,
+                                    0,
+                                    0)
+            mappings.append(mapping)
+
+        return mappings
 
 def record_minimal_snapshot(prev_state: ReadableProgramState,
                             cur_state: ReadableProgramState,
@@ -211,7 +385,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
         for regname in regs:
             try:
                 regval = cur_state.read_register(regname)
-                out_state.set_register(regname, regval)
+                out_state.write_register(regname, regval)
             except RegisterAccessError:
                 pass
         for mem in mems:
@@ -224,7 +398,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
                 pass
 
     state = ProgramState(cur_transform.arch)
-    state.set_register('PC', cur_transform.addr)
+    state.write_register('PC', cur_transform.addr)
 
     set_values(prev_transform.changed_regs.keys(),
                get_written_addresses(prev_transform),
@@ -275,24 +449,33 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     cur_state = next(state_iter)
     symb_i = 0
 
+    if logger.isEnabledFor(logging.DEBUG):
+        debug('Tracing program with the following non-deterministic events:')
+        for event in gdb._events.events:
+            debug(event)
+
     # Skip to start
+    pc = cur_state.read_register('pc')
+    start_addr = start_addr if start_addr else pc
     try:
-        pc = cur_state.read_register('pc')
-        if start_addr and pc != start_addr:
-            info(f'Tracing QEMU from starting address: {hex(start_addr)}')
+        if pc != start_addr:
+            info(f'Executing until starting address {hex(start_addr)}')
             cur_state = state_iter.run_until(start_addr)
     except Exception as e:
-        if start_addr:
+        if pc != start_addr:
             raise Exception(f'Unable to reach start address {hex(start_addr)}: {e}')
         raise Exception(f'Unable to trace: {e}')
 
     # An online trace matching algorithm.
+    info(f'Tracing QEMU between {hex(start_addr)}:{hex(stop_addr) if stop_addr else "end"}')
     while True:
         try:
             pc = cur_state.read_register('pc')
+            if stop_addr and pc == stop_addr:
+                break
 
             while pc != strace[symb_i].addr:
-                info(f'PC {hex(pc)} does not match next symbolic reference {hex(strace[symb_i].addr)}')
+                warn(f'PC {hex(pc)} does not match next symbolic reference {hex(strace[symb_i].addr)}')
 
                 next_i = find_index(strace[symb_i+1:], pc, lambda t: t.addr)
 
@@ -341,17 +524,22 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
     # Note: this may occur when symbolic traces were gathered with a stop address
     if symb_i >= len(strace):
         warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace)-1}')
-        
+
     return states, matched_transforms
 
 def main():
     args = make_argparser().parse_args()
-    
+
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
 
+    detlog = DeterministicLog(args.deterministic_log)
+    if args.deterministic_log and detlog.base_directory is None:
+        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
+                                   'Focaccia built without deterministic log support')
+
     try:
-        gdb_server = GDBServerStateIterator(args.remote)
+        gdb_server = GDBServerStateIterator(args.remote, detlog)
     except Exception as e:
         raise Exception(f'Unable to perform basic GDB setup: {e}')
 

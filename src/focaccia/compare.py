@@ -34,7 +34,7 @@ def _calc_transformation(previous: ProgramState, current: ProgramState):
         try:
             prev_val = previous.read_register(reg)
             cur_val = current.read_register(reg)
-            transformation.set_register(reg, cur_val - prev_val)
+            transformation.write_register(reg, cur_val - prev_val)
         except RegisterAccessError:
             # Register is not set in either state
             pass
