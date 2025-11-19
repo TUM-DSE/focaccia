@@ -10,5 +10,8 @@ emulated_system_calls = {
 
 passthrough_system_calls = {
     56:  SyscallInfo('clone', patchup_address_registers=['rdx', 'r10'], creates_thread=True),
+    57:  SyscallInfo('fork', creates_thread=True),
+    58:  SyscallInfo('vfork', creates_thread=True),
+    435:  SyscallInfo('clone3', patchup_address_registers=['rdi'], creates_thread=True),
 }
 
