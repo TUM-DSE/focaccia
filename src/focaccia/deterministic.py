@@ -300,6 +300,7 @@ finally:
             self.matched_count = None
             if from_state:
                 self.match(from_state)
+                self.matched_count -= 1
 
         def match(self, state: ReadableProgramState) -> Event | None:
             if self.matched_count is None:
