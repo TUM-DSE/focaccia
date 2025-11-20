@@ -293,14 +293,17 @@ finally:
         def __init__(self, 
                      events: list[Event], 
                      match_fn: Callable,
-                     from_state: ReadableProgramState | None = None):
+                     from_state: ReadableProgramState | None = None,
+                     skipped_events: list[int] = []):
             self.events = events
             self.matcher = match_fn
+            self.skipped_events = skipped_events
 
             self.matched_count = None
             if from_state:
-                self.match(from_state)
-                self.matched_count -= 1
+                if self.match(from_state):
+                    assert(self.matched_count is not None)
+                    self.matched_count -= 1
 
         def match(self, state: ReadableProgramState) -> Event | None:
             if self.matched_count is None:
@@ -314,6 +317,11 @@ finally:
 
                 if self.matched_count is None:
                     return None
+
+            # Don't match skipped events
+            if self.matched_count in self.skipped_events:
+                self.matched_count += 1 # proceed to next
+                return None
 
             event = self.events[self.matched_count]
             if self.matcher(event, state):

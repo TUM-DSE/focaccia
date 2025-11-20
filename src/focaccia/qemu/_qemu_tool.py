@@ -27,7 +27,7 @@ from focaccia.deterministic import (
     SyscallEvent,
     MemoryMapping,
 )
-from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls
+from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls, vdso_system_calls
 
 from focaccia.tools.validate_qemu import make_argparser, verbosity
 
@@ -158,10 +158,24 @@ class GDBServerStateIterator:
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
 
+        events = self._deterministic_log.events()
+        skipped_events = []
+        for idx in range(len(events)):
+            event = events[idx]
+            if not isinstance(event, SyscallEvent):
+                continue
+
+            if event.syscall_number in vdso_system_calls[archname]:
+                skipped_events.append(idx)
+
+        for idx in skipped_events:
+            debug(f'Skip {events[idx]}')
+
         first_state = self.current_state()
-        self._events = EventMatcher(self._deterministic_log.events(),
+        self._events = EventMatcher(events,
                                     match_event,
-                                    from_state=first_state)
+                                    from_state=first_state,
+                                    skipped_events=skipped_events)
         event = self._events.match(first_state)
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
 

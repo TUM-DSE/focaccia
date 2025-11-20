@@ -1,5 +1,6 @@
 from focaccia.qemu.x86 import emulated_system_calls as x86_emu_syscalls
 from focaccia.qemu.x86 import passthrough_system_calls as x86_pass_syscalls
+from focaccia.qemu.x86 import vdso_system_calls as x86_vdso_syscalls
 
 emulated_system_calls = {
     'x86_64': x86_emu_syscalls,
@@ -14,3 +15,11 @@ passthrough_system_calls = {
     'aarch64l': { },
     'aarch64b': { }
 }
+
+vdso_system_calls = {
+    'x86_64': x86_vdso_syscalls,
+    'aarch64': { },
+    'aarch64l': { },
+    'aarch64b': { }
+}
+
