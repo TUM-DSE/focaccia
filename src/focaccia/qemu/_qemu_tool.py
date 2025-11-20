@@ -234,9 +234,9 @@ class GDBServerStateIterator:
                 event_new_tid = post_event.registers[self.arch.get_syscall_reg()]
                 self._thread_count += 1
                 self._thread_map[event_new_tid] = (new_tid, self._thread_count)
-                info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event.tid)}')
+                info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event_new_tid)}')
                 debug('Thread mapping at this point:')
-                for event_tid, (tid, num) in self._thread_map.items():
+                for event_tid, (tid, _) in self._thread_map.items():
                     debug(f'{hex(event_tid)}: {hex(tid)}')
 
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
@@ -268,7 +268,7 @@ class GDBServerStateIterator:
                 tid, num = self._thread_map[self._current_event_id]
                 self.context_switch(num)
                 state = self.current_state()
-                debug(f'Scheduled native TID {post_event.tid} as {tid}')
+                debug(f'Scheduled {hex(tid)} that corresponds to native {hex(post_event.tid)}')
 
                 if self._current_event_id in self._thread_context:
                     event = self._thread_context.pop(self._current_event_id)
@@ -276,8 +276,10 @@ class GDBServerStateIterator:
                     event = post_event
                     post_event = self._events.match_pair(event)
                 else:
+                    debug(f'New thread {hex(tid)} started at non-event instruction')
                     self._events.unmatch()
                     self._step()
+                    print(hex(self.current_state().read_pc()))
                     return self.current_state()
 
             return self._handle_syscall(event, post_event)
