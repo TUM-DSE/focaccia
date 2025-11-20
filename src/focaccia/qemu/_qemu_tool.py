@@ -177,7 +177,12 @@ class GDBServerStateIterator:
                                     from_state=first_state,
                                     skipped_events=skipped_events)
         event = self._events.match(first_state)
+        
+        self._thread_map = {
+            event.tid: self.current_tid()
+        }
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+        debug(f'Thread mapping at this point: {hex(event.tid)}: {hex(self.current_tid())}')
 
     def current_state(self) -> ReadableProgramState:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
@@ -219,10 +224,16 @@ class GDBServerStateIterator:
             self._step()
             if self._is_exited():
                 raise StopIteration
+
             # Check if new thread was created
             if syscall.creates_thread:
                 new_tid = self.current_state().read_register(self.arch.get_syscall_reg())
+                event_new_tid = post_event.registers[self.arch.get_syscall_reg()]
+                self._thread_map[event_new_tid] = new_tid
                 info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event.tid)}')
+                debug('Thread mapping at this point:')
+                for event_tid, tid in self._thread_map.items():
+                    debug(f'{hex(event_tid)}: {hex(tid)}')
 
             return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
@@ -310,6 +321,9 @@ class GDBServerStateIterator:
 
     def _step(self):
         gdb.execute('si', to_string=True)
+
+    def current_tid(self) -> int:
+        return gdb.selected_inferior().threads()[0].ptid[1]
 
     def context_switch(self, thread_number: int) -> None:
         gdb.execute(f'thread {thread_number}')
