@@ -304,14 +304,7 @@ class GDBServerStateIterator:
 
         if not state:
             # Step
-            pc = gdb.selected_frame().read_register('pc')
-            new_pc = pc
-            while pc == new_pc:  # Skip instruction chains from REP STOS etc.
-                self._step()
-                if self._is_exited():
-                    raise StopIteration
-                new_pc = gdb.selected_frame().read_register('pc')
-            state = self.current_state()
+            state = self._step()
 
         return state
 
@@ -351,7 +344,14 @@ class GDBServerStateIterator:
         gdb.execute(f'set $pc = {hex(new_pc)}')
 
     def _step(self):
-        gdb.execute('si', to_string=True)
+        pc = gdb.selected_frame().read_register('pc')
+        new_pc = pc
+        while pc == new_pc:  # Skip instruction chains from REP STOS etc.
+            gdb.execute('si', to_string=True)
+            if self._is_exited():
+                raise StopIteration
+            new_pc = gdb.selected_frame().read_register('pc')
+        return self.current_state()
 
     def current_tid(self) -> int:
         return gdb.selected_inferior().threads()[0].ptid[1]
