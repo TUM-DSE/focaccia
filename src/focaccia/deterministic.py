@@ -337,17 +337,18 @@ finally:
                 return self.events[self.matched_count]
             return None
 
-        def match_pair(self, state: ReadableProgramState):
-            event = self.match(state)
-            if event is None:
-                return None, None
-            if isinstance(event, SyscallEvent) and event.syscall_state == 'exiting':
-                self.matched_count = None
-                return None, None
+        def match_pair(self, event: Event | None):
+            if event is None or not isinstance(event, SyscallEvent):
+                return None
             assert(self.matched_count is not None)
             post_event = self.events[self.matched_count]
             self.matched_count += 1
-            return event, post_event
+            return post_event
+
+        def unmatch(self, count: int = 1) -> None:
+            if self.matched_count is None:
+                raise ValueError('Cannot get unmatch event with unsynchronized event matcher')
+            self.matched_count -= count
 
         def __bool__(self) -> bool:
             return len(self.events) > 0
