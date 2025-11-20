@@ -305,7 +305,7 @@ class DeterministicLog:
                 raise NotImplementedError(f'Cannot support system call buffer events yet: {event}')
             if event_type == 'signal':
                 signal = raw_event.event.signal
-                signal_descriptor = SignalDescriptor(signal.arch,
+                signal_descriptor = SignalDescriptor(signal.siginfoArch,
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)
@@ -314,7 +314,7 @@ class DeterministicLog:
 
             if event_type == 'signalDelivery':
                 signal = raw_event.event.signalDelivery
-                signal_descriptor = SignalDescriptor(signal.arch,
+                signal_descriptor = SignalDescriptor(signal.siginfoArch,
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)
@@ -323,7 +323,7 @@ class DeterministicLog:
 
             if event_type == 'signalHandler':
                 signal = raw_event.event.signalHandler
-                signal_descriptor = SignalDescriptor(signal.arch,
+                signal_descriptor = SignalDescriptor(signal.siginfoArch,
                                                      signal.siginfo,
                                                      signal.deterministic,
                                                      signal.disposition)

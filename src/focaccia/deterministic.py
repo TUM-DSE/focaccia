@@ -160,7 +160,7 @@ class SignalEvent(Event):
         self.signal_delivery = signal_delivery
         self.signal_handler = signal_handler
 
-        if [self.signal_number, self.signal_delivery, self.signal_handler].count(None) != 1:
+        if [self.signal_number, self.signal_delivery, self.signal_handler].count(None) != 2:
             raise ValueError(f'A signal event may be either a signal number, delivery or handler event')
 
     def __repr__(self) -> str:
@@ -300,6 +300,7 @@ finally:
             self.matched_count = None
             if from_state:
                 self.match(from_state)
+                self.matched_count -= 1
 
         def match(self, state: ReadableProgramState) -> Event | None:
             if self.matched_count is None:
