@@ -47,7 +47,7 @@ class DeterministicLogReader(io.RawIOBase):
 
     def __init__(self, filename: str):
         super().__init__()
-        self._f = open(filename, "rb", buffering=0)
+        self._f = open(filename, "rb", buffering=0) if filename else None
         self._data_buffer = memoryview(b"")
         self._pos = 0
         self._eof = False
@@ -182,6 +182,8 @@ class DeterministicLog:
         self.base_directory = log_dir
 
     def _get_file(self, file_name: str) -> str | None:
+        if self.base_directory = None:
+            return None
         candidate = os.path.join(self.base_directory, file_name)
         if os.path.isfile(candidate):
             return candidate
