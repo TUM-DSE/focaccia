@@ -1,6 +1,6 @@
 """Invocable like this:
 
-    gdb -n --batch -x qemu_tool.py
+    gdb -n --batch -x _qemu_tool.py
 
 But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.

@@ -18,6 +18,7 @@ dependencies = [
 	"brotli",
 	"pycapnp",
 	"setuptools",
+	"python-ptrace",
 	"cpuid @ git+https://github.com/taugoust/cpuid.py.git@master",
 ]
 

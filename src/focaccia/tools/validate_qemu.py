@@ -84,6 +84,9 @@ memory, and stepping forward by single instructions.
                       type=str,
                       default='gdb',
                       help='GDB binary to invoke.')
+    prog.add_argument('--qemu-pid',
+                      type=int,
+                      help='PID of QEMU.')
     prog.add_argument('--deterministic-log', default=None,
                       help='The directory containing rr traces')
     return prog
@@ -123,7 +126,7 @@ def main():
     else:
         # QEMU GDB interface
         script_dirname = os.path.dirname(focaccia.qemu.__file__)
-        qemu_tool_path = os.path.join(script_dirname, '_qemu_tool.py')
+        qemu_tool_path = os.path.join(script_dirname, '_qemu_threads.py')
 
         # We have to remove all arguments we don't want to pass to the qemu tool
         # manually here. Not nice, but what can you do..

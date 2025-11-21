@@ -275,19 +275,23 @@ class DetachTask(Task):
     def __repr__(self) -> str:
         return f'Detach task\n{super().__repr__()}'
 
+class NullDeterministicLog:
+    def __init__(self, log_dir: str): 
+        self.base_directory = None
+
+    def events_file(self) -> str | None: return None
+    def tasks_file(self) -> str | None: return None
+    def mmaps_file(self) -> str | None: return None
+    def events(self) -> list[Event]: return []
+    def tasks(self) -> list[Task]: return []
+    def mmaps(self) -> list[MemoryMapping]: return []
+
 try:
     from ._deterministic_impl import DeterministicLog
 except Exception:
-    class DeterministicLog:
+    class DeterministicLog(NullDeterministicLog):
         def __init__(self, log_dir: str): 
-            self.base_directory = None
-
-        def events_file(self) -> str | None: return None
-        def tasks_file(self) -> str | None: return None
-        def mmaps_file(self) -> str | None: return None
-        def events(self) -> list[Event]: return []
-        def tasks(self) -> list[Task]: return []
-        def mmaps(self) -> list[MemoryMapping]: return []
+            super().__init__(log_dir)
 finally:
     class EventMatcher:
         def __init__(self, 
