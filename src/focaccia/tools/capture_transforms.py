@@ -4,7 +4,7 @@ import sys
 import argparse
 import logging
 
-from focaccia import parser, utils
+from focaccia import parser, utils, benchmark
 from focaccia.trace import TraceEnvironment
 from focaccia.native.tracer import SymbolicTracer
 from focaccia.deterministic import DeterministicLog
@@ -51,6 +51,10 @@ def main():
                       type=utils.to_num,
                       help='Set a time limit for executing an instruction symbolically, skip'
                            'instruction when limit is exceeded')
+    prog.add_argument('--benchmark',
+                      default=False,
+                      action='store_true',
+                      help='Benchmark the trace function')
     args = prog.parse_args()
 
     if args.debug:
@@ -75,7 +79,10 @@ def main():
     tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.debug,
                             force=args.force)
 
-    trace = tracer.trace(time_limit=args.insn_time_limit)
+    timer = benchmark.Timer("Native tracing", iterations=10, enabled=args.benchmark)
+    for i in range(timer.iterations):
+        trace = tracer.trace(time_limit=args.insn_time_limit)
+    timer.log_time()
 
     with open(args.output, 'w') as file:
         parser.serialize_transformations(trace, file)

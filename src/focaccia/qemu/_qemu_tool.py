@@ -10,8 +10,11 @@ import re
 import gdb
 import logging
 import traceback
+import subprocess
+import time
 from typing import Iterable, Optional
 
+from focaccia.benchmark import Timer
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_symbolic, Error, ErrorTypes
@@ -538,10 +541,54 @@ def main():
         raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
                                    'Focaccia built without deterministic log support')
 
-    try:
-        gdb_server = GDBServerStateIterator(args.remote, detlog)
-    except Exception as e:
-        raise Exception(f'Unable to perform basic GDB setup: {e}')
+    # Benchmark native QEMU execution
+    if args.benchmark_execution_continue:
+        try:
+            timer = Timer("Emulator execution", paused=True, iterations=10)
+            for i in range(timer.iterations):
+                qemu_process = subprocess.Popen(
+                    [f"qemu-{args.guest_arch}", "-singlestep", "-g", args.remote.split(':')[1], args.executable],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                time.sleep(0.5)
+                timer.unpause()
+                gdb_server = GDBServerStateIterator(args.remote, detlog)
+                gdb.execute("continue")
+                qemu_process.wait()
+                timer.pause()
+            timer.log_time()
+            exit(0)
+        except Exception as e:
+            raise Exception(f'Unable to benchmark QEMU: {e}')
+    if args.benchmark_execution_stepping:
+        try:
+            timer = Timer("Emulator execution", paused=True, iterations=10)
+            for i in range(timer.iterations):
+                try:
+                    qemu_process = subprocess.Popen(
+                            [f"qemu-{args.guest_arch}", "-g", args.remote.split(':')[1], args.executable],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    time.sleep(0.5)
+                    timer.unpause()
+                    gdb_server = GDBServerStateIterator(args.remote, detlog)
+                    state_iter = iter(gdb_server)
+                    while True:
+                        cur_state = next(state_iter)
+                except StopIteration:
+                    timer.pause()
+            timer.log_time()
+            exit(0)
+        except Exception as e:
+            raise Exception(f'Unable to benchmark QEMU: {e}')
+
+    if not args.benchmark_trace_test:
+        try:
+            gdb_server = GDBServerStateIterator(args.remote, detlog)
+        except Exception as e:
+            raise Exception(f'Unable to perform basic GDB setup: {e}')
 
     try:
         executable: str | None = None
@@ -565,26 +612,43 @@ def main():
 
     # Use symbolic trace to collect concrete trace from QEMU
     try:
-        conc_states, matched_transforms = collect_conc_trace(
-            gdb_server,
-            symb_transforms.states,
-            symb_transforms.env.start_address,
-            symb_transforms.env.stop_address)
+        timer = Timer("Emulator tracing", iterations=10, paused=True, enabled=args.benchmark_trace_test)
+        for i in range(timer.iterations):
+            if timer.enabled:
+                qemu_process = subprocess.Popen(
+                        [f"qemu-{args.guest_arch}", "-g", args.remote.split(':')[1], executable],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                time.sleep(0.5)
+                timer.unpause()
+                gdb_server = GDBServerStateIterator(args.remote, detlog)
+
+            conc_states, matched_transforms = collect_conc_trace(
+                gdb_server,
+                symb_transforms.states,
+                symb_transforms.env.start_address,
+                symb_transforms.env.stop_address)
+            timer.pause()
+        timer.log_time()
     except Exception as e:
         raise Exception(f'Failed to collect concolic trace from QEMU: {e}')
 
     # Verify and print result
     if not args.quiet:
         try:
-            res = compare_symbolic(conc_states, matched_transforms)
-            if qemu_crash["crashed"]:
-                res.append({
-                    'pc': qemu_crash["pc"],
-                    'txl': None,
-                    'ref': qemu_crash["ref"],
-                    'errors': qemu_crash["errors"],
-                    'snap': qemu_crash["snap"],
-                })
+            timer = Timer("Emulator testing", iterations=10, enabled=args.benchmark_trace_test)
+            for i in range(timer.iterations):
+                res = compare_symbolic(conc_states, matched_transforms)
+                if qemu_crash["crashed"]:
+                    res.append({
+                        'pc': qemu_crash["pc"],
+                        'txl': None,
+                        'ref': qemu_crash["ref"],
+                        'errors': qemu_crash["errors"],
+                        'snap': qemu_crash["snap"],
+                    })
+            timer.log_time()
             print_result(res, verbosity[args.error_level])
         except Exception as e:
             raise Exception('Error occured when comparing with symbolic equations: {e}')
