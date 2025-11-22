@@ -76,7 +76,7 @@ memory, and stepping forward by single instructions.
                       type=str,
                       choices=supported_architectures.keys(),
                       help='Architecture of the emulated guest'
-                           '(Only required when using --use-socket or --benchmark-executioe)')
+                           '(Only required when using --use-socket)')
     prog.add_argument('--remote',
                       type=str,
                       help='The hostname:port pair at which to find a QEMU GDB server.')
@@ -94,12 +94,6 @@ memory, and stepping forward by single instructions.
                       default=False,
                       action='store_true',
                       help='Enables scheduling (experimental)')
-    prog.add_argument('--benchmark-execution-continue', default=False, action='store_true',
-                      help="Benchmark QEMU's execution of binary without tracing (continue mode) (overrides other flags)")
-    prog.add_argument('--benchmark-execution-stepping', default=False, action='store_true',
-                      help="Benchmark QEMU's execution of binary without tracing (stepping mode) (overrides other flags)")
-    prog.add_argument('--benchmark-trace-test', default=False, action='store_true',
-                      help="Benchmark Focaccia's tracing and testing of QEMU")
     return prog
 
 def quoted(s: str) -> str:
@@ -119,7 +113,7 @@ def main():
     env = os.environ.copy()
 
     # Differentiate between the QEMU GDB server and QEMU plugin interfaces
-    if args.use_socket and not args.benchmark_execution:
+    if args.use_socket:
         if not args.guest_arch:
             argparser.error('--guest-arch is required when --use-socket is specified')
 
