@@ -37,6 +37,7 @@ focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
 validate-qemu = "focaccia.tools.validate_qemu:main"
 capture-transforms = "focaccia.tools.capture_transforms:main"
+benchmark-focaccia = "focaccia.tools.benchmark_focaccia:main"
 
 [build-system]
 requires = ["hatchling"]

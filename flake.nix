@@ -356,6 +356,18 @@
 				};
 			};
 
+			benchmark-focaccia = {
+				type = "app";
+				program = let
+					wrapper = pkgs.writeShellScriptBin "benchmark-focaccia" ''
+						exec ${packages.focaccia}/bin/benchmark-focaccia --gdb "${gdbInternal}/bin/gdb" "$@"
+					'';
+				in "${wrapper}/bin/benchmark-focaccia";
+				meta = {
+					description = "Benchmark focaccia";
+				};
+			};
+
 			# Useful for synchronize the uv lockfile
 			uv-sync = {
 				type = "app";
