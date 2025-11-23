@@ -3,6 +3,9 @@ import signal
 import socket
 import subprocess
 import sys
+import termios
+import tty
+import select
 
 import ptrace.debugger
 from ptrace.debugger import (
@@ -11,35 +14,61 @@ from ptrace.debugger import (
     NewProcessEvent,
 )
 
+# ----------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------
 
-# -------- scheduler via unix socket --------
+# Scheduler timeout in seconds.
+# 0 => purely non-blocking (never waits for scheduler input).
+SCHED_TIMEOUT = 0.1
 
-def read_next_tid(sock, processes):
+
+# ----------------------------------------------------------------------
+# Scheduler logic via non-blocking UNIX socket
+# ----------------------------------------------------------------------
+
+def schedule_next_nonblocking(sock, processes, current_proc):
     """
-    Read the next thread ID to schedule from a controller over a socket.
-    Blocks until a valid TID is received.
+    Try to read the next TID from 'sock' within SCHED_TIMEOUT.
+    If valid and present in 'processes', return that PtraceProcess.
+    Otherwise return current_proc.
     """
-    while True:
-        data = sock.recv(64)
-        if not data:
-            continue  # ignore empty reads
 
-        try:
-            tid = int(data.strip())
-        except ValueError:
-            print(f"Invalid scheduler value: {data!r}")
-            continue
+    # Handle timeout = 0 (purely non-blocking)
+    timeout = SCHED_TIMEOUT if SCHED_TIMEOUT > 0 else 0
 
-        if tid in processes:
-            print(f"Scheduler selected TID {tid}")
-            return processes[tid]
+    r, _, _ = select.select([sock], [], [], timeout)
+    if not r:
+        # No scheduler input
+        return current_proc
 
-        print(f"TID {tid} not active, waiting for a valid one …")
+    data = sock.recv(64)
+    if not data:
+        return current_proc
+
+    try:
+        tid = int(data.strip())
+    except ValueError:
+        print(f"Scheduler sent invalid data: {data!r}")
+        return current_proc
+
+    if tid in processes:
+        print(f"Scheduler selected TID {tid}")
+        return processes[tid]
+
+    print(f"TID {tid} not active; ignoring")
+    return current_proc
 
 
-# -------- wait until first clone --------
+# ----------------------------------------------------------------------
+# First clone handling
+# ----------------------------------------------------------------------
 
 def run_until_first_clone(debugger, process):
+    """
+    Continue execution until the first clone (new thread/process) event occurs.
+    """
+
     process.cont()
 
     while True:
@@ -57,7 +86,9 @@ def run_until_first_clone(debugger, process):
             raise
 
 
-# -------- main tracer --------
+# ----------------------------------------------------------------------
+# Main Trace Function
+# ----------------------------------------------------------------------
 
 def trace(pid, sched_socket_path):
     debugger = ptrace.debugger.PtraceDebugger()
@@ -69,7 +100,9 @@ def trace(pid, sched_socket_path):
     print(f"Attach process {pid}")
     proc0 = debugger.addProcess(pid, False)
 
-    # Create listening scheduling socket
+    # ------------------------------------------------------------------
+    # Create Unix scheduling socket
+    # ------------------------------------------------------------------
     if os.path.exists(sched_socket_path):
         os.unlink(sched_socket_path)
 
@@ -81,10 +114,14 @@ def trace(pid, sched_socket_path):
     conn, _ = srv.accept()
     print("Scheduler connected")
 
-    # 1) run until clone
+    # ------------------------------------------------------------------
+    # 1) Run until the first clone happens
+    # ------------------------------------------------------------------
     run_until_first_clone(debugger, proc0)
 
-    # 2) attach all existing threads after clone
+    # ------------------------------------------------------------------
+    # 2) Attach all threads in the process
+    # ------------------------------------------------------------------
     for tid_str in os.listdir(f"/proc/{pid}/task"):
         tid = int(tid_str)
         if tid not in debugger.dict:
@@ -93,38 +130,61 @@ def trace(pid, sched_socket_path):
             except Exception as e:
                 print(f"Failed to attach TID {tid}: {e}")
 
-    # 3) main loop: scheduler picks TID → run it to next syscall
+    # Choose an initial thread arbitrarily
+    tids = list(debugger.dict.keys())
+    if not tids:
+        print("No threads to trace")
+        return
+    proc = debugger.dict[tids[0]]
+
+    # ------------------------------------------------------------------
+    # 3) Main scheduling / syscall loop
+    # ------------------------------------------------------------------
     while len(debugger.list) != 0:
-        proc = read_next_tid(conn, debugger.dict)
+        # Obtain next thread to schedule (possibly the same one)
+        proc = schedule_next_nonblocking(conn, debugger.dict, proc)
         tid = proc.pid
 
         try:
-            proc.syscall()         # continue until syscall entry/exit
+            # Continue execution until next syscall entry or exit
+            proc.syscall()
             proc.waitSyscall()
 
             ip = proc.getInstrPointer()
             print(f"TID {tid} syscall-stop at {hex(ip)}")
 
         except ProcessSignal as ev:
+            # Forward non-TRAP signals
             ev.process.cont(ev.signum)
 
         except ProcessExit as ev:
             print(f"Thread {ev.process.pid} exited (exitcode={ev.exitcode})")
+
             try:
                 ev.process.detach()
             except Exception:
                 pass
+
             debugger.deleteProcess(ev.process)
+
+            # If the thread was the current one, pick another
+            if proc not in debugger.list and len(debugger.list) > 0:
+                proc = debugger.list[0]
 
         except Exception as e:
             print(f"TID {tid} exception: {e}")
+
             try:
                 proc.detach()
             except Exception:
                 pass
+
             debugger.deleteProcess(proc)
 
-        # detect new threads
+            if len(debugger.list) > 0:
+                proc = debugger.list[0]
+
+        # Attach new threads created while tracing
         for p in list(debugger.list):
             t = p.pid
             if t not in debugger.dict:
@@ -135,7 +195,9 @@ def trace(pid, sched_socket_path):
     debugger.quit()
 
 
-# -------- entry point --------
+# ----------------------------------------------------------------------
+# Entry point
+# ----------------------------------------------------------------------
 
 def quoted(s: str) -> str:
     return f'"{s}"'
