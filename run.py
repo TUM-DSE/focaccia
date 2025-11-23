@@ -3,8 +3,6 @@ import signal
 import socket
 import subprocess
 import sys
-import termios
-import tty
 import select
 
 import ptrace.debugger
@@ -14,33 +12,26 @@ from ptrace.debugger import (
     NewProcessEvent,
 )
 
+
 # ----------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------
 
-# Scheduler timeout in seconds.
-# 0 => purely non-blocking (never waits for scheduler input).
+# If scheduler does not provide input within this time (seconds),
+# continue running the last chosen thread.
 SCHED_TIMEOUT = 0.1
 
 
 # ----------------------------------------------------------------------
-# Scheduler logic via non-blocking UNIX socket
+# Scheduler (non-blocking)
 # ----------------------------------------------------------------------
 
 def schedule_next_nonblocking(sock, processes, current_proc):
-    """
-    Try to read the next TID from 'sock' within SCHED_TIMEOUT.
-    If valid and present in 'processes', return that PtraceProcess.
-    Otherwise return current_proc.
-    """
-
-    # Handle timeout = 0 (purely non-blocking)
     timeout = SCHED_TIMEOUT if SCHED_TIMEOUT > 0 else 0
 
     r, _, _ = select.select([sock], [], [], timeout)
     if not r:
-        # No scheduler input
-        return current_proc
+        return current_proc  # no input → continue with current
 
     data = sock.recv(64)
     if not data:
@@ -61,14 +52,15 @@ def schedule_next_nonblocking(sock, processes, current_proc):
 
 
 # ----------------------------------------------------------------------
-# First clone handling
+# Run proc0 until first clone, but ignore (detach) the clone child
 # ----------------------------------------------------------------------
 
-def run_until_first_clone(debugger, process):
+def run_until_first_clone_and_ignore_child(debugger, process):
     """
-    Continue execution until the first clone (new thread/process) event occurs.
+    Run until first clone event.
+    Detach the cloned thread so it runs untraced.
+    Return after clone child is removed.
     """
-
     process.cont()
 
     while True:
@@ -77,9 +69,21 @@ def run_until_first_clone(debugger, process):
             sig.process.cont(sig.signum)
 
         except NewProcessEvent as event:
-            new_proc = event.process
-            print(f"First clone: TID {new_proc.pid}")
-            return
+            child = event.process
+            parent = child.parent
+
+            print(f"First clone: created TID {child.pid} — IGNORING it")
+
+            # Detach so it runs untraced
+            try:
+                child.detach()
+            except Exception:
+                pass
+
+            # Remove it from debugger
+            debugger.deleteProcess(child)
+
+            return  # stop after first ignored clone
 
         except ProcessExit as event:
             print(f"Process {event.process.pid} exited before cloning")
@@ -87,12 +91,11 @@ def run_until_first_clone(debugger, process):
 
 
 # ----------------------------------------------------------------------
-# Main Trace Function
+# Main tracing logic
 # ----------------------------------------------------------------------
 
 def trace(pid, sched_socket_path):
     debugger = ptrace.debugger.PtraceDebugger()
-
     debugger.traceClone()
     debugger.traceFork()
     debugger.traceExec()
@@ -101,7 +104,7 @@ def trace(pid, sched_socket_path):
     proc0 = debugger.addProcess(pid, False)
 
     # ------------------------------------------------------------------
-    # Create Unix scheduling socket
+    # Create scheduler socket
     # ------------------------------------------------------------------
     if os.path.exists(sched_socket_path):
         os.unlink(sched_socket_path)
@@ -115,12 +118,12 @@ def trace(pid, sched_socket_path):
     print("Scheduler connected")
 
     # ------------------------------------------------------------------
-    # 1) Run until the first clone happens
+    # 1) Run proc0 until first clone, detach the child
     # ------------------------------------------------------------------
-    run_until_first_clone(debugger, proc0)
+    run_until_first_clone_and_ignore_child(debugger, proc0)
 
     # ------------------------------------------------------------------
-    # 2) Attach all threads in the process
+    # 2) Attach ALL threads EXCEPT the ignored clone
     # ------------------------------------------------------------------
     for tid_str in os.listdir(f"/proc/{pid}/task"):
         tid = int(tid_str)
@@ -130,23 +133,24 @@ def trace(pid, sched_socket_path):
             except Exception as e:
                 print(f"Failed to attach TID {tid}: {e}")
 
-    # Choose an initial thread arbitrarily
+    # Choose initial thread to run
     tids = list(debugger.dict.keys())
     if not tids:
-        print("No threads to trace")
+        print("No traceable threads left after first clone.")
         return
     proc = debugger.dict[tids[0]]
 
     # ------------------------------------------------------------------
-    # 3) Main scheduling / syscall loop
+    # 3) Main loop: scheduler chooses next thread, run to syscall
     # ------------------------------------------------------------------
     while len(debugger.list) != 0:
-        # Obtain next thread to schedule (possibly the same one)
+
+        # possibly switch threads according to scheduler
         proc = schedule_next_nonblocking(conn, debugger.dict, proc)
         tid = proc.pid
 
         try:
-            # Continue execution until next syscall entry or exit
+            # run until next syscall
             proc.syscall()
             proc.waitSyscall()
 
@@ -154,7 +158,6 @@ def trace(pid, sched_socket_path):
             print(f"TID {tid} syscall-stop at {hex(ip)}")
 
         except ProcessSignal as ev:
-            # Forward non-TRAP signals
             ev.process.cont(ev.signum)
 
         except ProcessExit as ev:
@@ -167,7 +170,6 @@ def trace(pid, sched_socket_path):
 
             debugger.deleteProcess(ev.process)
 
-            # If the thread was the current one, pick another
             if proc not in debugger.list and len(debugger.list) > 0:
                 proc = debugger.list[0]
 
@@ -184,7 +186,7 @@ def trace(pid, sched_socket_path):
             if len(debugger.list) > 0:
                 proc = debugger.list[0]
 
-        # Attach new threads created while tracing
+        # handle new threads (they *are* traced normally)
         for p in list(debugger.list):
             t = p.pid
             if t not in debugger.dict:
@@ -208,10 +210,9 @@ if __name__ == "__main__":
 
     qemu = [
         "qemu-x86_64",
-        "/nix/store/dmpq06y392i752zwhcna07kb2x5l58l5-memcached-static-x86_64-unknown-linux-musl-1.6.37/bin/memcached",
-        "-p", "11211",
-        "-t", "4",
-        "-vv",
+        "-g",
+        "12348",
+        "./reproducers/issue-508.static-musl.rr.out/mmap_clone_4_issue-508.static-musl.out"
     ]
 
     sched_path = "/tmp/memcached_scheduler.sock"
