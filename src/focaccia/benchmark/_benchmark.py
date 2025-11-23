@@ -23,7 +23,7 @@ def main():
         timer = Timer("Emulator execution (continue)", paused=True, iterations=args.iterations)
         for i in range(timer.iterations):
             qemu_process = subprocess.Popen(
-                [f"qemu-{args.guest_arch}", "-singlestep", "-g", args.port, args.binary],
+                [f"qemu-{args.guest_arch}", "-g", args.port, args.binary],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
