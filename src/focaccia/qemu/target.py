@@ -407,5 +407,6 @@ class GDBServerStateIterator(GDBServerConnector):
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
     def context_switch(self, thread_number: int) -> None:
-        self.sock.send(bytes([thread_number]))
+        data = thread_number.to_bytes(8, byteorder='little', signed=False)
+        self.sock.send(data)
 

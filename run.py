@@ -2,7 +2,6 @@ import os
 import signal
 import socket
 import subprocess
-import sys
 import select
 
 import ptrace.debugger
@@ -33,12 +32,12 @@ def schedule_next_nonblocking(sock, processes, current_proc):
     if not r:
         return current_proc  # no input → continue with current
 
-    data = sock.recv(64)
+    data = sock.recv(8)
     if not data:
         return current_proc
 
     try:
-        tid = int(data.strip())
+        tid = int.from_bytes(data, byteorder='little', signed=False)
     except ValueError:
         print(f"Scheduler: invalid data {data!r}")
         return current_proc
