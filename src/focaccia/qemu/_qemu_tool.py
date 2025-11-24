@@ -19,7 +19,7 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.trace import Trace, TraceContainer, TraceEnvironment
 from focaccia.utils import print_result
 from focaccia.deterministic import DeterministicLog, Event
 
@@ -112,7 +112,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
     return state
 
 def collect_conc_trace(gdb: GDBServerStateIterator, \
-                       strace: list[SymbolicTransform],
+                       strace: TraceContainer,
                        start_addr: int | None = None,
                        stop_addr: int | None = None) \
         -> tuple[list[ProgramState], list[SymbolicTransform]]:
@@ -264,7 +264,7 @@ def main():
     try:
         conc_states, matched_transforms = collect_conc_trace(
             gdb_server,
-            symb_transforms.states,
+            symb_transforms,
             symb_transforms.env.start_address,
             symb_transforms.env.stop_address)
     except Exception as e:

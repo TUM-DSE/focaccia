@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, Iterable
 
 from .utils import file_hash
 
@@ -68,21 +68,28 @@ class TraceEnvironment:
 
 class Trace(Generic[T]):
     def __init__(self,
-                 trace_states: list[T],
+                 states: Iterable[T],
                  env: TraceEnvironment):
         self.env = env
-        self.states = trace_states
-
-    def __len__(self) -> int:
-        return len(self.states)
-
-    def __getitem__(self, i: int) -> T:
-        return self.states[i]
+        self._iter = states
 
     def __iter__(self):
-        return iter(self.states)
+        return iter(self._iter)
+
+class TraceContainer(Trace[T]):
+    def __init__(self,
+                 states: list[T],
+                 env: TraceEnvironment):
+        self._state_list = states
+        super().__init__(iter(states), env)
+
+    def __len__(self) -> int:
+        return len(self._state_list)
+
+    def __getitem__(self, i: int) -> T:
+        return self._state_list[i]
 
     def __repr__(self) -> str:
-        return f'Trace with {len(self.states)} trace points.' \
+        return f'Trace with {len(self._state_list)} trace points.' \
                f' Environment: {repr(self.env)}'
 
