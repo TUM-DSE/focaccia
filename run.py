@@ -20,31 +20,35 @@ from ptrace.debugger import (
 # continue running the last chosen thread.
 SCHED_TIMEOUT = 0
 
-
 # ----------------------------------------------------------------------
 # Scheduler (non-blocking)
 # ----------------------------------------------------------------------
 
 def schedule_next_nonblocking(sock, processes, current_proc):
+    """
+    processes: dict[tid] -> PtraceProcess
+    current_proc: PtraceProcess or None
+    """
     timeout = SCHED_TIMEOUT if SCHED_TIMEOUT > 0 else 0
 
     r, _, _ = select.select([sock], [], [], timeout)
     if not r:
         return current_proc  # no input → continue with current
 
-    data = sock.recv(8)
+    data = sock.recv(64)
     if not data:
         return current_proc
 
     try:
-        tid = int.from_bytes(data, byteorder='little', signed=False)
+        tid = int(data.strip())
     except ValueError:
         print(f"Scheduler: invalid data {data!r}")
         return current_proc
 
-    if tid in processes:
+    proc = processes.get(tid)
+    if proc is not None:
         print(f"Scheduler picked TID {tid}")
-        return processes[tid]
+        return proc
 
     print(f"Scheduler sent inactive TID {tid}, ignoring")
     return current_proc
@@ -82,22 +86,22 @@ def trace(pid, sched_socket_path):
     # ------------------------------------------------------------------
     current_proc = proc0
 
-    # Arm the first process: run until its first event/syscall
+    # ignore-first-clone state
+    first_clone_ignored = False
+    ignored_tid = None
+
+    # Arm first process: run until its first event/syscall
     current_proc.syscall()
 
-    # Flag for ignoring the first clone
-    ignored_tid = None
-    first_clone_ignored = False
-
     # ------------------------------------------------------------------
-    # Global event loop — always resume one tracee after every event
+    # Global event loop
     # ------------------------------------------------------------------
     while debugger.list:
         try:
             event = debugger.waitSyscall()
 
         # --------------------------------------------------------------
-        # New traced process (clone/fork/vfork)
+        # New process / thread via clone/fork/vfork
         # --------------------------------------------------------------
         except NewProcessEvent as ev:
             child = ev.process
@@ -105,7 +109,7 @@ def trace(pid, sched_socket_path):
             child_tid = child.pid
 
             if not first_clone_ignored:
-                # FIRST CLONE is ignored completely
+                # FIRST clone is ignored
                 first_clone_ignored = True
                 ignored_tid = child_tid
 
@@ -121,30 +125,52 @@ def trace(pid, sched_socket_path):
                 debugger.deleteProcess(child)
 
                 # Resume parent so clone() completes
-                parent.syscall()
-
+                try:
+                    parent.syscall()
+                except Exception as e:
+                    print(f"Error resuming parent {parent.pid} after ignored clone: {e}")
             else:
-                # LATER CLONES ARE TRACED
+                # LATER clones are traced
                 print(f"New traced thread {child_tid} (parent {parent.pid})")
 
-                debugger.dict[child_tid] = child
+                # Both child and parent should be armed again
+                try:
+                    child.syscall()
+                except Exception as e:
+                    print(f"Error arming child {child_tid}: {e}")
+                    try:
+                        debugger.deleteProcess(child)
+                    except Exception:
+                        pass
 
-                # Arm both child and parent
-                child.syscall()
-                parent.syscall()
+                try:
+                    parent.syscall()
+                except Exception as e:
+                    print(f"Error arming parent {parent.pid}: {e}")
+                    try:
+                        debugger.deleteProcess(parent)
+                    except Exception:
+                        pass
 
             continue
 
         # --------------------------------------------------------------
-        # When a process gets a non-SIGTRAP signal
+        # Signal delivered to a traced task
         # --------------------------------------------------------------
         except ProcessSignal as ev:
-            ev.process.syscall(ev.signum)
-
+            proc = ev.process
+            try:
+                proc.syscall(ev.signum)
+            except Exception as e:
+                print(f"Error arming TID {proc.pid} after signal {ev.signum}: {e}")
+                try:
+                    debugger.deleteProcess(proc)
+                except Exception:
+                    pass
             continue
 
         # --------------------------------------------------------------
-        # A traced thread died
+        # A traced task exited
         # --------------------------------------------------------------
         except ProcessExit as ev:
             dead_proc = ev.process
@@ -156,12 +182,24 @@ def trace(pid, sched_socket_path):
             except Exception:
                 pass
 
-            debugger.deleteProcess(dead_proc)
+            try:
+                debugger.deleteProcess(dead_proc)
+            except Exception:
+                pass
 
-            # If the one that died was the current process, pick another
-            if debugger.list:
-                current_proc = debugger.list[0]
+            if not debugger.list:
+                break
 
+            # Choose a new current_proc and arm it
+            current_proc = debugger.list[0]
+            try:
+                current_proc.syscall()
+            except Exception as e:
+                print(f"Error arming new current TID {current_proc.pid}: {e}")
+                try:
+                    debugger.deleteProcess(current_proc)
+                except Exception:
+                    pass
             continue
 
         # --------------------------------------------------------------
@@ -171,31 +209,42 @@ def trace(pid, sched_socket_path):
         tid = proc.pid
 
         if tid == ignored_tid:
-            # Should never happen (ignored child not traced)
-            print(f"WARNING: ignored TID {tid} hit a syscall-stop??")
+            # Should not happen; just log and continue
+            print(f"WARNING: ignored TID {tid} hit a syscall-stop")
         else:
-            ip = proc.getInstrPointer()
-            print(f"TID {tid} syscall-stop at {hex(ip)}")
+            try:
+                ip = proc.getInstrPointer()
+                print(f"TID {tid} syscall-stop at {hex(ip)}")
+            except Exception as e:
+                print(f"Error reading IP for TID {tid}: {e}")
 
-        # Ensure all traced threads appear in debugger.dict
-        for p in debugger.list:
-            t = p.pid
-            if t not in debugger.dict:
-                debugger.dict[t] = p
+        # Build a fresh pid->process map from the debugger
+        processes = {p.pid: p for p in debugger.list}
 
-        # Ask scheduler which thread to run next
-        current_proc = schedule_next_nonblocking(conn, debugger.dict, proc)
-
-        if current_proc not in debugger.list:
-            # If scheduler picked a dead or detached thread, pick any alive one
+        # Scheduler decides what to run next
+        current_proc = schedule_next_nonblocking(conn, processes, proc)
+        if current_proc is None or current_proc not in debugger.list:
+            # Fallback: pick any alive one
+            if not debugger.list:
+                break
             current_proc = debugger.list[0]
 
         # Resume chosen thread
-        current_proc.syscall()
+        try:
+            current_proc.syscall()
+        except Exception as e:
+            print(f"Error arming TID {current_proc.pid}: {e}")
+            try:
+                debugger.deleteProcess(current_proc)
+            except Exception:
+                pass
+            # We don't immediately re-arm here; next loop iteration will
+            # pick another process (if any) and arm it.
 
     conn.close()
     srv.close()
     debugger.quit()
+
 
 # ----------------------------------------------------------------------
 # Entry point
