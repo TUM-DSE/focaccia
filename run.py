@@ -112,14 +112,14 @@ def trace(pid, sched_socket_path):
     srv.bind(sched_socket_path)
     srv.listen(1)
 
-    print(f"Waiting for scheduler connection on {sched_socket_path}")
-    conn, _ = srv.accept()
-    print("Scheduler connected")
-
     # ------------------------------------------------------------------
     # 1) Run proc0 until first clone, detach the child
     # ------------------------------------------------------------------
     run_until_first_clone_and_ignore_child(debugger, proc0)
+
+    print(f"Waiting for scheduler connection on {sched_socket_path}")
+    conn, _ = srv.accept()
+    print("Scheduler connected")
 
     # ------------------------------------------------------------------
     # 2) Attach ALL threads EXCEPT the ignored clone
@@ -211,7 +211,12 @@ if __name__ == "__main__":
         "qemu-x86_64",
         "-g",
         "12348",
-        "./reproducers/issue-508.static-musl.rr.out/mmap_clone_4_issue-508.static-musl.out"
+        "/nix/store/dmpq06y392i752zwhcna07kb2x5l58l5-memcached-static-x86_64-unknown-linux-musl-1.6.37/bin/memcached",
+        "-p",
+        "11211",
+        "-t",
+        "4",
+        "-vv"
     ]
 
     sched_path = "/tmp/memcached_scheduler.sock"
