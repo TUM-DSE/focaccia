@@ -21,6 +21,7 @@ from ptrace.debugger import (
 # continue running the last chosen thread.
 SCHED_TIMEOUT = 0
 
+
 # ----------------------------------------------------------------------
 # Scheduler (non-blocking)
 # ----------------------------------------------------------------------
@@ -39,54 +40,15 @@ def schedule_next_nonblocking(sock, processes, current_proc):
     try:
         tid = int(data.strip())
     except ValueError:
-        print(f"Scheduler sent invalid data: {data!r}")
+        print(f"Scheduler: invalid data {data!r}")
         return current_proc
 
     if tid in processes:
-        print(f"Scheduler selected TID {tid}")
+        print(f"Scheduler picked TID {tid}")
         return processes[tid]
 
-    print(f"TID {tid} not active; ignoring")
+    print(f"Scheduler sent inactive TID {tid}, ignoring")
     return current_proc
-
-
-# ----------------------------------------------------------------------
-# Run proc0 until first clone, but ignore (detach) the clone child
-# ----------------------------------------------------------------------
-
-def run_until_first_clone_and_ignore_child(debugger, process):
-    """
-    Run until first clone event.
-    Detach the cloned thread so it runs untraced.
-    Return after clone child is removed.
-    """
-    process.cont()
-
-    while True:
-        try:
-            sig = debugger.waitSignals()
-            sig.process.cont(sig.signum)
-
-        except NewProcessEvent as event:
-            child = event.process
-            parent = child.parent
-
-            print(f"First clone: created TID {child.pid} — IGNORING it")
-
-            # Detach so it runs untraced
-            try:
-                child.detach()
-            except Exception:
-                pass
-
-            # Remove it from debugger
-            debugger.deleteProcess(child)
-
-            return  # stop after first ignored clone
-
-        except ProcessExit as event:
-            print(f"Process {event.process.pid} exited before cloning")
-            raise
 
 
 # ----------------------------------------------------------------------
@@ -112,89 +74,129 @@ def trace(pid, sched_socket_path):
     srv.bind(sched_socket_path)
     srv.listen(1)
 
-    # ------------------------------------------------------------------
-    # 1) Run proc0 until first clone, detach the child
-    # ------------------------------------------------------------------
-    run_until_first_clone_and_ignore_child(debugger, proc0)
-
     print(f"Waiting for scheduler connection on {sched_socket_path}")
     conn, _ = srv.accept()
     print("Scheduler connected")
 
     # ------------------------------------------------------------------
-    # 2) Attach ALL threads EXCEPT the ignored clone
+    # Prime the very first thread
     # ------------------------------------------------------------------
-    for tid_str in os.listdir(f"/proc/{pid}/task"):
-        tid = int(tid_str)
-        if tid not in debugger.dict:
+    current_proc = proc0
+
+    # Arm the first process: run until its first event/syscall
+    current_proc.syscall()
+
+    # Flag for ignoring the first clone
+    ignored_tid = None
+    first_clone_ignored = False
+
+    # ------------------------------------------------------------------
+    # Global event loop — always resume one tracee after every event
+    # ------------------------------------------------------------------
+    while debugger.list:
+        try:
+            event = debugger.waitSyscall()
+
+        # --------------------------------------------------------------
+        # New traced process (clone/fork/vfork)
+        # --------------------------------------------------------------
+        except NewProcessEvent as ev:
+            child = ev.process
+            parent = child.parent
+            child_tid = child.pid
+
+            if not first_clone_ignored:
+                # FIRST CLONE is ignored completely
+                first_clone_ignored = True
+                ignored_tid = child_tid
+
+                print(f"First clone: created TID {child_tid} — IGNORING it")
+
+                # Detach ignored child so it runs untraced
+                try:
+                    child.detach()
+                except Exception:
+                    pass
+
+                # Remove from debugger
+                debugger.deleteProcess(child)
+
+                # Resume parent so clone() completes
+                parent.syscall()
+
+            else:
+                # LATER CLONES ARE TRACED
+                print(f"New traced thread {child_tid} (parent {parent.pid})")
+
+                debugger.dict[child_tid] = child
+
+                # Arm both child and parent
+                child.syscall()
+                parent.syscall()
+
+            continue
+
+        # --------------------------------------------------------------
+        # When a process gets a non-SIGTRAP signal
+        # --------------------------------------------------------------
+        except ProcessSignal as ev:
+            ev.process.syscall(ev.signum)
+
+            continue
+
+        # --------------------------------------------------------------
+        # A traced thread died
+        # --------------------------------------------------------------
+        except ProcessExit as ev:
+            dead_proc = ev.process
+            tid = dead_proc.pid
+            print(f"TID {tid} exited (exitcode={ev.exitcode})")
+
             try:
-                debugger.addProcess(tid, False)
-            except Exception as e:
-                print(f"Failed to attach TID {tid}: {e}")
+                dead_proc.detach()
+            except Exception:
+                pass
 
-    # Choose initial thread to run
-    tids = list(debugger.dict.keys())
-    if not tids:
-        print("No traceable threads left after first clone.")
-        return
-    proc = debugger.dict[tids[0]]
+            debugger.deleteProcess(dead_proc)
 
-    # ------------------------------------------------------------------
-    # 3) Main loop: scheduler chooses next thread, run to syscall
-    # ------------------------------------------------------------------
-    while len(debugger.list) != 0:
+            # If the one that died was the current process, pick another
+            if debugger.list:
+                current_proc = debugger.list[0]
 
-        # possibly switch threads according to scheduler
-        proc = schedule_next_nonblocking(conn, debugger.dict, proc)
+            continue
+
+        # --------------------------------------------------------------
+        # NORMAL SYSCALL STOP
+        # --------------------------------------------------------------
+        proc = event.process
         tid = proc.pid
 
-        try:
-            # run until next syscall
-            proc.syscall()
-            proc.waitSyscall()
-
+        if tid == ignored_tid:
+            # Should never happen (ignored child not traced)
+            print(f"WARNING: ignored TID {tid} hit a syscall-stop??")
+        else:
             ip = proc.getInstrPointer()
             print(f"TID {tid} syscall-stop at {hex(ip)}")
 
-        except ProcessSignal as ev:
-            ev.process.cont(ev.signum)
-
-        except ProcessExit as ev:
-            print(f"Thread {ev.process.pid} exited (exitcode={ev.exitcode})")
-
-            try:
-                ev.process.detach()
-            except Exception:
-                pass
-
-            debugger.deleteProcess(ev.process)
-
-            if proc not in debugger.list and len(debugger.list) > 0:
-                proc = debugger.list[0]
-
-        except Exception as e:
-            print(f"TID {tid} exception: {e}")
-
-            try:
-                proc.detach()
-            except Exception:
-                pass
-
-            debugger.deleteProcess(proc)
-
-            if len(debugger.list) > 0:
-                proc = debugger.list[0]
-
-        # handle new threads (they *are* traced normally)
-        for p in list(debugger.list):
+        # Ensure all traced threads appear in debugger.dict
+        for p in debugger.list:
             t = p.pid
             if t not in debugger.dict:
                 debugger.dict[t] = p
 
+        # Ask scheduler which thread to run next
+        current_proc = schedule_next_nonblocking(conn, debugger.dict, proc)
+
+        if current_proc not in debugger.list:
+            # If scheduler picked a dead or detached thread, pick any alive one
+            current_proc = debugger.list[0]
+
+        # Resume chosen thread
+        current_proc.syscall()
+
     conn.close()
     srv.close()
     debugger.quit()
-
 
 # ----------------------------------------------------------------------
 # Entry point
