@@ -10,7 +10,6 @@ import subprocess
 import time
 
 def main():
-    print("Benchmarking focaccia")
     args = make_argparser().parse_args()
 
     detlog = DeterministicLog(args.deterministic_log)
@@ -30,6 +29,7 @@ def main():
             time.sleep(0.5)
             timer.unpause()
             gdb_server = _qemu_tool.GDBServerStateIterator(f"localhost:{args.port}", detlog)
+            gdb.execute("si")
             gdb.execute("continue")
             qemu_process.wait()
             timer.pause()
