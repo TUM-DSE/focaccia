@@ -270,7 +270,8 @@ class SymbolicTracer:
                         continue
                     raise # forward exception
 
-            event, post_event = event_matcher.match_pair(self.target)
+            event = event_matcher.match(self.target)
+            post_event = event_matcher.match_pair(event)
             in_event = (event and event_matcher) or self.target.arch.is_instr_syscall(str(instruction))
 
             # Run instruction
