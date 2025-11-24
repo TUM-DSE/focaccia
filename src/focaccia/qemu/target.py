@@ -1,5 +1,6 @@
 import re
 import gdb
+import socket
 import logging
 from typing import Optional
 
@@ -23,6 +24,8 @@ logger = logging.getLogger('focaccia-qemu-target')
 debug = logger.debug
 info = logger.info
 warn = logger.warning
+
+DEST = "/tmp/memcached_scheduler.sock"
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     # Match just on PC
@@ -217,7 +220,12 @@ class GDBServerConnector:
 
 
 class GDBServerStateIterator(GDBServerConnector):
-    def __init__(self, remote: str, deterministic_log: DeterministicLog):
+    def __init__(self, remote: str, deterministic_log: DeterministicLog, schedule: bool = False):
+        self.sock = None
+        if schedule:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(DEST)
+
         super().__init__(remote)
 
         self._deterministic_log = deterministic_log
@@ -328,7 +336,7 @@ class GDBServerStateIterator(GDBServerConnector):
                 self._thread_context[self._current_event_id] = event
                 self._current_event_id = post_event.tid
                 tid, num = self._thread_map[self._current_event_id]
-                self.context_switch(num)
+                self.context_switch(tid)
                 state = self.current_state()
                 debug(f'Scheduled {hex(tid)} that corresponds to native {hex(post_event.tid)}')
 
@@ -402,5 +410,7 @@ class GDBServerStateIterator(GDBServerConnector):
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
     def context_switch(self, thread_number: int) -> None:
-        gdb.execute(f'thread {thread_number}')
+        if self.sock is None:
+            raise NotImplementedError('Scheduling disabled')
+        self.sock.send(bytes([thread_number]))
 
