@@ -58,6 +58,8 @@ def main():
     argparser = make_argparser()
     args = argparser.parse_args()
 
+    logging.basicConfig(level=logging.ERROR)
+
     # Test native tracing
     detlog = DeterministicLog(args.deterministic_log)
     if args.deterministic_log and detlog.base_directory is None:
@@ -78,6 +80,32 @@ def main():
 
     with open(f"/tmp/benchmark-{args.binary.split('/')[-1]}-symbolic.trace", 'w') as file:
         parser.serialize_transformations(trace, file)
+
+    # Emu exec plain
+    try:
+        timer = Timer("Emulator execution (plain)", iterations=args.iterations)
+        for i in range(timer.iterations):
+            qemu_process = subprocess.run(
+                [f"qemu-{args.guest_arch}", args.binary],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        timer.log_time()
+    except Exception as e:
+        raise Exception(f'Unable to benchmark QEMU: {e}')
+
+    # Emu exec one instruction per block
+    try:
+        timer = Timer("Emulator execution (-one-insn-per-tb)", iterations=args.iterations)
+        for i in range(timer.iterations):
+            qemu_process = subprocess.run(
+                [f"qemu-{args.guest_arch}", "-one-insn-per-tb", args.binary],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        timer.log_time()
+    except Exception as e:
+        raise Exception(f'Unable to benchmark QEMU: {e}')
 
     # Get environment
     env = os.environ.copy()
