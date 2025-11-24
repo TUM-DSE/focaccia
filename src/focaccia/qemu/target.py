@@ -412,5 +412,6 @@ class GDBServerStateIterator(GDBServerConnector):
     def context_switch(self, thread_number: int) -> None:
         if self.sock is None:
             raise NotImplementedError('Scheduling disabled')
-        self.sock.send(bytes([thread_number]))
+        data = thread_number.to_bytes(8, byteorder='little', signed=False)
+        self.sock.send(data)
 
