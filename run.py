@@ -19,8 +19,7 @@ from ptrace.debugger import (
 
 # If scheduler does not provide input within this time (seconds),
 # continue running the last chosen thread.
-SCHED_TIMEOUT = 0.1
-
+SCHED_TIMEOUT = 0
 
 # ----------------------------------------------------------------------
 # Scheduler (non-blocking)
