@@ -64,7 +64,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
                       snapshot. Input values to this transformation are
                       included in the snapshot.
     """
-    assert(cur_state.read_register('pc') == cur_transform.addr)
+    assert(cur_state.read_pc() == cur_transform.addr)
     assert(prev_transform.arch == cur_transform.arch)
 
     def get_written_addresses(t: SymbolicTransform):
@@ -111,10 +111,7 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
                state)
     return state
 
-def collect_conc_trace(gdb: GDBServerStateIterator, \
-                       strace: TraceContainer,
-                       start_addr: int | None = None,
-                       stop_addr: int | None = None) \
+def collect_conc_trace(gdb: GDBServerStateIterator, strace: TraceContainer) \
         -> tuple[list[ProgramState], list[SymbolicTransform]]:
     """Collect a trace of concrete states from GDB.
 
@@ -152,8 +149,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
             debug(event)
 
     # Skip to start
-    pc = cur_state.read_register('pc')
-    start_addr = start_addr if start_addr else pc
+    pc = cur_state.read_pc()
+    start_addr = strace.env.start_address if strace.env.start_address else pc
     try:
         if pc != start_addr:
             info(f'Executing until starting address {hex(start_addr)}')
@@ -164,11 +161,11 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
         raise Exception(f'Unable to trace: {e}')
 
     # An online trace matching algorithm.
-    info(f'Tracing QEMU between {hex(start_addr)}:{hex(stop_addr) if stop_addr else "end"}')
+    info(f'Tracing QEMU between {hex(start_addr)}:{hex(strace.env.stop_address) if strace.env.stop_address else "end"}')
     while True:
         try:
-            pc = cur_state.read_register('pc')
-            if stop_addr and pc == stop_addr:
+            pc = cur_state.read_pc()
+            if strace.env.stop_address and pc == strace.env.stop_address:
                 break
 
             while pc != strace[symb_i].addr:
@@ -183,7 +180,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
                          f' matching instruction can be found in the symbolic'
                          f' reference trace.')
                     cur_state = next(state_iter)
-                    pc = cur_state.read_register('pc')
+                    pc = cur_state.read_pc()
                     continue
 
                 # Otherwise, jump to the next matching symbolic state
@@ -191,7 +188,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
                 if symb_i >= len(strace):
                     break
 
-            assert(cur_state.read_register('pc') == strace[symb_i].addr)
+            assert(cur_state.read_pc() == strace[symb_i].addr)
             info(f'Validating instruction at address {hex(pc)}')
             states.append(record_minimal_snapshot(
                 states[-1] if states else cur_state,
@@ -205,9 +202,9 @@ def collect_conc_trace(gdb: GDBServerStateIterator, \
                 break
         except StopIteration:
             # TODO: The conditions may test for the same
-            if stop_addr and pc != stop_addr:
+            if strace.env.stop_address and pc != strace.env.stop_address:
                 raise Exception(f'QEMU stopped at {hex(pc)} before reaching the stop address'
-                                f' {hex(stop_addr)}')
+                                f' {hex(strace.env.stop_address)}')
             if symb_i+1 < len(strace):
                 qemu_crash["crashed"] = True
                 qemu_crash["pc"] = strace[symb_i].addr
@@ -264,9 +261,7 @@ def main():
     try:
         conc_states, matched_transforms = collect_conc_trace(
             gdb_server,
-            symb_transforms,
-            symb_transforms.env.start_address,
-            symb_transforms.env.stop_address)
+            symb_transforms)
     except Exception as e:
         raise Exception(f'Failed to collect concolic trace from QEMU: {e}')
 
