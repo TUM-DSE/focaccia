@@ -6,6 +6,7 @@ emulated_system_calls = {
     1: SyscallInfo('write'),
     19: SyscallInfo('readv', patchup_address_registers=['rsi']),
     20: SyscallInfo('writev'),
+    21: SyscallInfo('access'),
     34:  SyscallInfo('pause', []),
     39:  SyscallInfo('getpid', []),
     102: SyscallInfo('getuid', []),
