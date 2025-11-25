@@ -279,7 +279,8 @@ class GDBServerStateIterator(GDBServerConnector):
 
             for mem in post_event.mem_writes:
                 addr, data = mem.address, mem.data
-                for reg, value in post_event.registers.items():
+                for reg in syscall.patchup_address_registers:
+                    value = post_event.registers[reg]
                     if value == addr:
                         addr = next_state.read_register(reg)
                         break

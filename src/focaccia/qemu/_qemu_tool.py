@@ -164,6 +164,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
     # An online trace matching algorithm.
     info(f'Tracing QEMU between {hex(start_addr)}:{hex(strace.env.stop_address) if strace.env.stop_address else "end"}')
+    traced_address_set = frozenset(strace.addresses)
 
     transform: Optional[SymbolicTransform] = None
     while True:
@@ -181,7 +182,9 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
             while pc != transform.addr:
                 warn(f'PC {hex(pc)} does not match next symbolic reference {hex(transform.addr)}')
 
-                next_i = find_index(strace.addresses[symb_i:], pc)
+                next_i = None
+                if pc in traced_address_set:
+                    next_i = find_index(strace.addresses[symb_i:], pc)
 
                 # Drop the concrete state if no address in the symbolic trace
                 # matches
