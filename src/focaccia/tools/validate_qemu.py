@@ -90,6 +90,10 @@ memory, and stepping forward by single instructions.
                       default='json',
                       choices=['msgpack', 'json'],
                       help='The format of the input symbolic trace')
+    prog.add_argument('--schedule',
+                      default=False,
+                      action='store_true',
+                      help='Enables scheduling (experimental)')
     return prog
 
 def quoted(s: str) -> str:

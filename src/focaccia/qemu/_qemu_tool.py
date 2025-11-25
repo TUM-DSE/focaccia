@@ -242,7 +242,7 @@ def main():
                                    'Focaccia built without deterministic log support')
 
     try:
-        gdb_server = GDBServerStateIterator(args.remote, detlog)
+        gdb_server = GDBServerStateIterator(args.remote, detlog, args.schedule)
     except Exception as e:
         raise Exception(f'Unable to perform basic GDB setup: {e}')
 
