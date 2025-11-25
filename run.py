@@ -26,9 +26,6 @@ class Scheduler:
         self.debugger.traceFork()
         self.debugger.traceExec()
 
-        self._first_clone_ignored = True
-        self._ignored_tid = None
-
         if os.path.exists(sched_socket_path):
             os.unlink(sched_socket_path)
 
@@ -81,42 +78,27 @@ class Scheduler:
         parent = child.parent
         child_tid = child.pid
 
-        if not self._first_clone_ignored:
-            self._first_clone_ignored = True
-            self._ignored_tid = child_tid
+        # LATER clones are traced
+        print(f"New traced thread {child_tid} (parent {parent.pid})")
 
-            print(f"First clone: created TID {child_tid} — IGNORING it")
+        # Arm both child and parent again
+        try:
+            child.syscall()
+        except Exception as e:
+            print(f"Error arming child {child_tid}: {e}")
+            try:
+                self.debugger.deleteProcess(child)
+            except Exception:
+                pass
 
-            # Detach ignored child so it runs untraced
-            child.detach()
-
-            # Remove from debugger
-            self.debugger.deleteProcess(child)
-
-            # Resume parent so clone() completes
+        try:
             parent.syscall()
-        else:
-            # LATER clones are traced
-            print(f"New traced thread {child_tid} (parent {parent.pid})")
-
-            # Arm both child and parent again
+        except Exception as e:
+            print(f"Error arming parent {parent.pid}: {e}")
             try:
-                child.syscall()
-            except Exception as e:
-                print(f"Error arming child {child_tid}: {e}")
-                try:
-                    self.debugger.deleteProcess(child)
-                except Exception:
-                    pass
-
-            try:
-                parent.syscall()
-            except Exception as e:
-                print(f"Error arming parent {parent.pid}: {e}")
-                try:
-                    self.debugger.deleteProcess(parent)
-                except Exception:
-                    pass
+                self.debugger.deleteProcess(parent)
+            except Exception:
+                pass
 
     def _handle_exit(self, event: ProcessExit):
         dead_proc: PtraceProcess = event.process
