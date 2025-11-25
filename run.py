@@ -1,14 +1,16 @@
 import os
 import signal
 import socket
-import subprocess
 import select
+import subprocess
+from typing import Optional
 
 import ptrace.debugger
 from ptrace.debugger import (
     ProcessExit,
     ProcessEvent,
     ProcessSignal,
+    PtraceProcess,
     NewProcessEvent,
     ProcessExecution,
 )
@@ -24,7 +26,7 @@ class Scheduler:
         self.debugger.traceFork()
         self.debugger.traceExec()
 
-        self._first_clone_ignored = False
+        self._first_clone_ignored = True
         self._ignored_tid = None
 
         if os.path.exists(sched_socket_path):
@@ -39,7 +41,7 @@ class Scheduler:
         print("Scheduler connected")
 
 
-    def _next(self, processes, current_proc):
+    def _next(self, processes, current_proc: Optional[PtraceProcess]) -> Optional[PtraceProcess]:
         """
         processes: dict[tid] -> PtraceProcess
         current_proc: PtraceProcess or None
@@ -60,6 +62,8 @@ class Scheduler:
             print(f"Scheduler: invalid data {data!r}")
             return current_proc
 
+        print(f'All processes:\n{processes}')
+
         proc = processes.get(tid)
         if proc is not None:
             print(f"Scheduler picked TID {tid}")
@@ -70,14 +74,7 @@ class Scheduler:
 
     def _handle_signal(self, event: ProcessSignal):
         proc: PtraceProcess = event.process
-        try:
-            proc.syscall(event.signum)
-        except Exception as e:
-            print(f"Error arming TID {proc.pid} after signal {event.signum}: {e}")
-            try:
-                self.debugger.deleteProcess(proc)
-            except Exception:
-                pass
+        proc.syscall(event.signum)
 
     def _handle_clone(self, event: NewProcessEvent):
         child = event.process
@@ -85,29 +82,19 @@ class Scheduler:
         child_tid = child.pid
 
         if not self._first_clone_ignored:
-            # FIRST clone is ignored
             self._first_clone_ignored = True
             self._ignored_tid = child_tid
 
             print(f"First clone: created TID {child_tid} — IGNORING it")
 
             # Detach ignored child so it runs untraced
-            try:
-                child.detach()
-            except Exception:
-                pass
+            child.detach()
 
             # Remove from debugger
-            try:
-                self.debugger.deleteProcess(child)
-            except Exception:
-                pass
+            self.debugger.deleteProcess(child)
 
             # Resume parent so clone() completes
-            try:
-                parent.syscall()
-            except Exception as e:
-                print(f"Error resuming parent {parent.pid} after ignored clone: {e}")
+            parent.syscall()
         else:
             # LATER clones are traced
             print(f"New traced thread {child_tid} (parent {parent.pid})")
@@ -140,49 +127,31 @@ class Scheduler:
         self.debugger.deleteProcess(dead_proc)
 
     def _handle_syscall(self, event: ProcessExecution):
-        proc = event.process
-        tid = proc.pid
-
         try:
-            ip = proc.getInstrPointer()
-            print(f"TID {tid} syscall-stop at {hex(ip)}")
+            ip = event.process.getInstrPointer()
+            print(f"TID {self.current_proc.pid} syscall-stop at {hex(ip)}")
         except Exception as e:
-            print(f"Error reading IP for TID {tid}: {e}")
-
-        # Build fresh pid->process map from debugger.list
-        processes = {p.pid: p for p in self.debugger.list}
+            print(f"Error reading IP for TID {self.current_proc.pid}: {e}")
 
         # Scheduler decides what to run next
-        current_proc = self._next(processes, proc)
-        if current_proc is None or current_proc not in self.debugger.list:
+        self.current_proc = self._next(self.debugger.dict, event.process)
+        if self.current_proc is None or self.current_proc not in self.debugger.list:
             if self.is_exited():
                 return
-            current_proc = self.debugger.list[0]
+            self.current_proc = self.debugger.list[0]
 
         # Resume chosen thread
-        try:
-            current_proc.syscall()
-        except Exception as e:
-            print(f"Error arming TID {current_proc.pid}: {e}")
-            try:
-                self.debugger.deleteProcess(current_proc)
-            except Exception:
-                pass
+        self.current_proc.syscall()
 
     def is_exited(self):
         return len(self.debugger.list) == 0
 
     def schedule(self, pid: int):
         print(f"Attach process {pid}")
-        proc0 = self.debugger.addProcess(pid, False)
-
-        # ------------------------------------------------------------------
-        # Initial state
-        # ------------------------------------------------------------------
-        current_proc = proc0
+        self.current_proc = self.debugger.addProcess(pid, False)
 
         # Arm the first process: run until its first event/syscall
-        current_proc.syscall()
+        self.current_proc.syscall()
 
         while not self.is_exited():
             try:
