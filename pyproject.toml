@@ -16,6 +16,7 @@ dependencies = [
 	"miasm",
 	"orjson",
 	"brotli",
+	'msgpack',
 	"pycapnp",
 	"setuptools",
 	"python-ptrace",

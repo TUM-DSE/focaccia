@@ -2,8 +2,9 @@
 
 import re
 import base64
+import msgpack
 import orjson as json
-from typing import TextIO
+from typing import TextIO, Literal
 
 from .arch import supported_architectures, Arch
 from .snapshot import ProgramState
@@ -30,15 +31,49 @@ def parse_transformations(json_stream: TextIO) -> TraceContainer[SymbolicTransfo
 
     return TraceContainer(strace, env)
 
-def serialize_transformations(transforms: Trace[SymbolicTransform],
-                              out_stream: TextIO):
+def stream_transformation(stream) -> Trace[SymbolicTransform]:
+    unpacker = msgpack.Unpacker(stream, raw=False)
+
+    # First object always contains env
+    header = next(unpacker)
+    env = TraceEnvironment.from_json(header['env'])
+    addresses = header.get('addresses')
+
+    def state_iter():
+        for obj in unpacker:
+            t = SymbolicTransform.from_json(obj['state'])
+            yield t
+
+    return Trace(state_iter(), addresses, env)
+
+def serialize_transformations(trace: Trace[SymbolicTransform],
+                              out_file: str,
+                              out_type: Literal['msgpack', 'json'] = 'json'):
     """Serialize symbolic transformations to a text stream."""
-    data = json.dumps({
-        'env': transforms.env.to_json(),
-        'addrs': transforms.addresses,
-        'states': [t.to_json() for t in transforms],
-    }, option=json.OPT_INDENT_2).decode()
-    out_stream.write(data)
+    if out_type == 'json':
+        with open(out_file, 'w') as out_stream:
+            data = json.dumps({
+                'env': trace.env.to_json(),
+                'addrs': trace.addresses,
+                'states': [t.to_json() for t in trace],
+            }, option=json.OPT_INDENT_2).decode()
+            out_stream.write(data)
+    elif out_type == 'msgpack':
+        with open(out_file, 'wb') as out_stream:
+            pack = msgpack.Packer()
+
+            # Header: env + addresses (list[int])
+            header = {
+                "env": trace.env.to_json(),
+                "addresses": getattr(trace, "addresses", None),
+            }
+            out_stream.write(pack.pack(header))
+
+            # States streamed one by one
+            for state in trace:
+                out_stream.write(pack.pack({"state": state.to_json()}))
+    else:
+        raise NotImplementedError(f'Unable to write transformations to type {out_type}')
 
 def parse_snapshots(json_stream: TextIO) -> TraceContainer[ProgramState]:
     """Parse snapshots from our JSON format."""

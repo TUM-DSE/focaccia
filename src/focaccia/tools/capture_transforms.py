@@ -51,6 +51,10 @@ def main():
                       type=utils.to_num,
                       help='Set a time limit for executing an instruction symbolically, skip'
                            'instruction when limit is exceeded')
+    prog.add_argument('--out-type',
+                      default='json',
+                      choices=['json', 'msgpack'],
+                      help='Symbolic trace output format')
     args = prog.parse_args()
 
     if args.debug:
@@ -77,6 +81,5 @@ def main():
 
     trace = tracer.trace(time_limit=args.insn_time_limit)
 
-    with open(args.output, 'w') as file:
-        parser.serialize_transformations(trace, file)
+    parser.serialize_transformations(trace, args.output, args.out_type)
 

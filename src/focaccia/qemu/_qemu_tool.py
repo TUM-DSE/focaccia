@@ -261,8 +261,12 @@ def main():
 
     # Read pre-computed symbolic trace
     try:
-        with open(args.symb_trace, 'r') as strace:
-            symb_transforms = parser.parse_transformations(strace)
+        if args.trace_type == 'json':
+            file = open(args.symb_trace, 'r')
+            symb_transforms = parser.parse_transformations(file)
+        else:
+            file = open(args.symb_trace, 'rb')
+            symb_transforms = parser.stream_transformation(file)
     except Exception as e:
         raise Exception(f'Failed to parse state transformations from native trace: {e}')
 
