@@ -30,7 +30,7 @@ class MemoryWrite:
         self.data = data
 
     def __repr__(self) -> str:
-        return f'{{ tid: {hex(self.tid)}, addr: {hex(self.address)}:{hex(self.address+self.size)}\n' \
+        return f'{{ tid: {self.tid}, addr: {hex(self.address)}:{hex(self.address+self.size)}\n' \
                f'   conservative? {self.is_conservative}, holes: {self.holes}\n' \
                f'   data: {self.data} }}'
 

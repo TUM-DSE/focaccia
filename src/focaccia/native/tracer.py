@@ -33,9 +33,12 @@ def match_event(event: Event, target: ReadableProgramState) -> bool:
         for reg, value in event.registers.items():
             if value == event.pc:
                 continue
-            if target.read_register(reg) != value:
-                print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
-                return False
+            try:
+                if target.read_register(reg) != value:
+                    print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
+                    return False
+            except Exception as e:
+                warn(f'Unable to read register: {e}')
         return True
     return False
 

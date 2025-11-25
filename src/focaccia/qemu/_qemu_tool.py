@@ -8,6 +8,7 @@ work to do.
 
 import logging
 import traceback
+import pyroaring
 from typing import Iterable, Optional
 
 import focaccia.parser as parser
@@ -164,7 +165,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
     # An online trace matching algorithm.
     info(f'Tracing QEMU between {hex(start_addr)}:{hex(strace.env.stop_address) if strace.env.stop_address else "end"}')
-    traced_address_set = frozenset(strace.addresses)
+    traced_address_set = pyroaring.BitMap64(strace.addresses)
 
     transform: Optional[SymbolicTransform] = None
     while True:

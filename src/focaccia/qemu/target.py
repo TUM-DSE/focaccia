@@ -260,7 +260,7 @@ class GDBServerStateIterator(GDBServerConnector):
         self._thread_context = {
         }
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
-        debug(f'Thread mapping at this point: {hex(event.tid)}: {hex(self.current_tid())}')
+        debug(f'Thread mapping at this point: {event.tid}: {self.current_tid()}')
 
     def _handle_syscall(self, event: Event, post_event: Event) -> ReadableProgramState:
         call = event.registers.get(self.arch.get_syscall_reg())
@@ -308,7 +308,7 @@ class GDBServerStateIterator(GDBServerConnector):
                 info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event_new_tid)}')
                 debug('Thread mapping at this point:')
                 for event_tid, (tid, _) in self._thread_map.items():
-                    debug(f'{hex(event_tid)}: {hex(tid)}')
+                    debug(f'{event_tid}: {tid}')
 
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
