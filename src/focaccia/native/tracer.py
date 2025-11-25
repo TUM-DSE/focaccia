@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 from focaccia.utils import timebound, TimeoutError
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.trace import Trace, TraceContainer, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform, DisassemblyContext, run_instruction
@@ -318,5 +318,5 @@ class SymbolicTracer:
 
                 debug(f'Completed handling event: {post_event}')
 
-        return Trace(strace, self.env)
+        return TraceContainer(strace, self.env)
 

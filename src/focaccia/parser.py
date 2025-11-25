@@ -35,6 +35,7 @@ def serialize_transformations(transforms: Trace[SymbolicTransform],
     """Serialize symbolic transformations to a text stream."""
     data = json.dumps({
         'env': transforms.env.to_json(),
+        'addrs': transforms.addresses,
         'states': [t.to_json() for t in transforms],
     }, option=json.OPT_INDENT_2).decode()
     out_stream.write(data)

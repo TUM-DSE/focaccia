@@ -69,9 +69,11 @@ class TraceEnvironment:
 class Trace(Generic[T]):
     def __init__(self,
                  states: Iterable[T],
+                 addresses: list[int],
                  env: TraceEnvironment):
         self.env = env
         self._iter = states
+        self.addresses = addresses
 
     def __iter__(self):
         return iter(self._iter)
@@ -81,7 +83,10 @@ class TraceContainer(Trace[T]):
                  states: list[T],
                  env: TraceEnvironment):
         self._state_list = states
-        super().__init__(iter(states), env)
+        addr_list = []
+        for t in self._state_list:
+            addr_list.append(t.addr)
+        super().__init__(iter(states), addr_list, env)
 
     def __len__(self) -> int:
         return len(self._state_list)
