@@ -9,9 +9,7 @@ import gdb
 import subprocess
 import time
 
-def main():
-    args = make_argparser().parse_args()
-
+def runtime():
     detlog = DeterministicLog(args.deterministic_log)
     if args.deterministic_log and detlog.base_directory is None:
         raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
@@ -31,6 +29,10 @@ def main():
             gdb_server = _qemu_tool.GDBServerStateIterator(f"localhost:{args.port}", detlog)
             gdb.execute("si")
             gdb.execute("continue")
+            try:
+                gdb.execute("continue")
+            except:
+                pass
             qemu_process.wait()
             timer.pause()
         timer.log_time()
@@ -97,6 +99,12 @@ def main():
         timer.log_time()
     except Exception as e:
         raise Exception('Error occured when comparing with symbolic equations: {e}')
+
+def main():
+    args = make_argparser().parse_args()
+
+    if args.runtime:
+        runtime()
 
 if __name__ == "__main__":
     main()

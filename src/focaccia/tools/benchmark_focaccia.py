@@ -34,6 +34,12 @@ def make_argparser():
     prog.add_argument('-n', '--iterations',
                       default='10',
                       help='Number of iterations per benchmark')
+    prog.add_argument('--runtime',
+                      action='store_true',
+                      help='Split runtime breakdown benchmarks')
+    prog.add_argument('--tracing',
+                      action='store_true',
+                      help='Tracing benchmarks')
     prog.add_argument('-l', '--deterministic-log',
                       help='Path of the directory storing the deterministic log produced by RR')
     prog.add_argument('--gdb',
@@ -54,12 +60,7 @@ def try_remove(l: list, v):
     except ValueError:
         pass
 
-def main():
-    argparser = make_argparser()
-    args = argparser.parse_args()
-
-    logging.basicConfig(level=logging.ERROR)
-
+def runtime_benchmark():
     # Test native tracing
     detlog = DeterministicLog(args.deterministic_log)
     if args.deterministic_log and detlog.base_directory is None:
@@ -106,6 +107,18 @@ def main():
         timer.log_time()
     except Exception as e:
         raise Exception(f'Unable to benchmark QEMU: {e}')
+
+def tracing_benchmarks():
+    pass
+
+def main():
+    argparser = make_argparser()
+    args = argparser.parse_args()
+
+    logging.basicConfig(level=logging.ERROR)
+
+    if args.runtime:
+        runtime_benchmark()
 
     # Get environment
     env = os.environ.copy()
