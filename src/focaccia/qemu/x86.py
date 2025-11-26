@@ -102,6 +102,7 @@ emulated_system_calls = {
     233: SyscallInfo('epoll_ctl', patchup_address_registers=['r10']),
     281: SyscallInfo('epoll_pwait', patchup_address_registers=['rsi', 'r8']),
     284: SyscallInfo('eventfd'),
+    288: SyscallInfo('accept4', patchup_address_registers=['rsi', 'rdx']),
     290: SyscallInfo('eventfd2'),
     291: SyscallInfo('epoll_create1'),
     292: SyscallInfo('dup3'),
