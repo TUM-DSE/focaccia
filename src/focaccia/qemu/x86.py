@@ -96,6 +96,8 @@ emulated_system_calls = {
     232: SyscallInfo('epoll_wait', patchup_address_registers=['rsi']),
     233: SyscallInfo('epoll_ctl', patchup_address_registers=['r10']),
     281: SyscallInfo('epoll_pwait', patchup_address_registers=['rsi', 'r8']),
+    284: SyscallInfo('eventfd'),
+    290: SyscallInfo('eventfd2'),
     297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
