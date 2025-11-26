@@ -23,6 +23,7 @@ emulated_system_calls = {
     19: SyscallInfo('readv', patchup_address_registers=['rsi']),
     20: SyscallInfo('writev'),
     21: SyscallInfo('access'),
+    22: SyscallInfo('pipe', patchup_address_registers=['rdi']),
     24: SyscallInfo('sched_yield'),
     34:  SyscallInfo('pause'),
     35:  SyscallInfo('nanosleep', patchup_address_registers=['rdi', 'rsi']),
@@ -98,6 +99,7 @@ emulated_system_calls = {
     281: SyscallInfo('epoll_pwait', patchup_address_registers=['rsi', 'r8']),
     284: SyscallInfo('eventfd'),
     290: SyscallInfo('eventfd2'),
+    293: SyscallInfo('pipe2', patchup_address_registers=['rdi']),
     297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
