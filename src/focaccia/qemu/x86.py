@@ -90,6 +90,7 @@ emulated_system_calls = {
     129: SyscallInfo('rt_sigqueueinfo', patchup_address_registers=['rdx']),
     130: SyscallInfo('rt_sigsuspend'),
     200: SyscallInfo('tkill'),
+    202: SyscallInfo('futex', patchup_address_registers=['rdi', 'r8']), 
     213: SyscallInfo('epoll_create'),
     219: SyscallInfo('restart_syscall'),
     232: SyscallInfo('epoll_wait', patchup_address_registers=['rsi']),
