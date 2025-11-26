@@ -249,6 +249,7 @@ class GDBServerStateIterator(GDBServerConnector):
             debug(f'Skip {events[idx]}')
 
         self._signal_frames = []
+        self._signal_restorers = {}
 
         first_state = self.current_state()
         self._events = EventMatcher(events,
@@ -269,6 +270,7 @@ class GDBServerStateIterator(GDBServerConnector):
 
     def _handle_syscall(self, event: Event, post_event: Event) -> ReadableProgramState:
         call = event.registers.get(self.arch.get_syscall_reg())
+        state = self.current_state()
         next_state = None
 
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
@@ -298,12 +300,38 @@ class GDBServerStateIterator(GDBServerConnector):
                 self._process.write_memory(addr, data)
 
             if syscall.return_from_signal:
-                # TODO: restore frame
                 frame = self._signal_frames.pop()
-                info(f'Handling return from signal with frame: {frame}')
+                debug(f'Handling return from signal with frame: {frame}')
+
+                sc = frame.uctx.mcontext
+                gdb.parse_and_eval(f'$r8 ={sc.r8}')
+                gdb.parse_and_eval(f'$r9 ={sc.r9}')
+                gdb.parse_and_eval(f'$r10 ={sc.r10}')
+                gdb.parse_and_eval(f'$r11 ={sc.r11}')
+                gdb.parse_and_eval(f'$r12 ={sc.r12}')
+                gdb.parse_and_eval(f'$r13 ={sc.r13}')
+                gdb.parse_and_eval(f'$r14 ={sc.r14}')
+                gdb.parse_and_eval(f'$r15 ={sc.r15}')
+                gdb.parse_and_eval(f'$rdi ={sc.rdi}')
+                gdb.parse_and_eval(f'$rsi ={sc.rsi}')
+                gdb.parse_and_eval(f'$rbp ={sc.rbp}')
+                gdb.parse_and_eval(f'$rdx ={sc.rdx}')
+                gdb.parse_and_eval(f'$rax ={sc.rax}')
+                gdb.parse_and_eval(f'$rcx ={sc.rcx}')
+                gdb.parse_and_eval(f'$rsp ={sc.rsp}')
+                gdb.parse_and_eval(f'$rip ={sc.rip}')
+                return self.current_state()
+
+                # TODO: restart syscall
+
+            if syscall.sets_signal_restorer:
+                restorer_addr = self._process.read_memory(state.read_register('rsi') + 0x10, 8)
+                restorer_addr = int.from_bytes(restorer_addr, byteorder='little')
+                self._signal_restorers[event.registers['rdi']] = restorer_addr
 
         syscall = passthrough_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
+            assert(call is not None)
             info(f'System call number {hex(call)} passed through')
             self._step()
             if self.is_exited():
@@ -363,7 +391,9 @@ class GDBServerStateIterator(GDBServerConnector):
         si_signo, si_errno, si_code = struct.unpack_from("<iii", event.signal_number.siginfo, 0)
         siginfo = SigInfo(si_signo=si_signo, si_errno=si_errno, si_code=si_code,
                           si_pid=post_event.tid, si_uid=0)
-        frame = SigFrame(sp_new=rsp - 0xd78, pretcode=0x401824, uctx=uctx, siginfo=siginfo)
+
+        restorer_addr = self._signal_restorers[si_signo]
+        frame = SigFrame(sp_new=rsp - 0xd78, pretcode=restorer_addr, uctx=uctx, siginfo=siginfo)
         self._process.write_memory(rsp - 0xd78, frame.to_bytes())
 
         gdb.execute(f'set $pc = {hex(sighandler_pc)}')

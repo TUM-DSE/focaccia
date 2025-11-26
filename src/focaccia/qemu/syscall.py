@@ -4,7 +4,8 @@ class SyscallInfo:
                  patchup_registers: list[str] | None = None,
                  patchup_address_registers: list[str] | None = None,
                  creates_thread: bool = False,
-                 return_from_signal: bool = False):
+                 return_from_signal: bool = False,
+                 sets_signal_restorer: bool = False):
         """Describes a syscall by its name and outputs.
 
         :param name: The name of a system call.
@@ -18,4 +19,5 @@ class SyscallInfo:
         self.patchup_address_registers = patchup_address_registers
         self.creates_thread = creates_thread
         self.return_from_signal = return_from_signal
+        self.sets_signal_restorer = sets_signal_restorer
 

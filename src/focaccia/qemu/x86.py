@@ -14,7 +14,7 @@ emulated_system_calls = {
     5: SyscallInfo('fstat', patchup_address_registers=['rsi']),
     6: SyscallInfo('lstat', patchup_address_registers=['rsi']),
     8: SyscallInfo('lseek'),
-    13: SyscallInfo('rt_sigaction', patchup_address_registers=['rdx']),
+    13: SyscallInfo('rt_sigaction', patchup_address_registers=['rdx'], sets_signal_restorer=True),
     14: SyscallInfo('rt_sigprocmask', patchup_address_registers=['rdx']),
     15: SyscallInfo('rt_sigreturn', return_from_signal=True),
     16: SyscallInfo('ioctl', patchup_address_registers=['rdx']),
