@@ -10,6 +10,9 @@ emulated_system_calls = {
     5: SyscallInfo('fstat', patchup_address_registers=['rsi']),
     6: SyscallInfo('lstat', patchup_address_registers=['rsi']),
     8: SyscallInfo('lseek'),
+    13: SyscallInfo('rt_sigaction', patchup_address_registers=['rdx']),
+    14: SyscallInfo('rt_sigprocmask', patchup_address_registers=['rdx']),
+    15: SyscallInfo('rt_sigreturn'),
     16: SyscallInfo('ioctl', patchup_address_registers=['rdx']),
     17: SyscallInfo('pread64', patchup_address_registers=['rsi']),
     18: SyscallInfo('pwrite64'),
@@ -77,10 +80,16 @@ emulated_system_calls = {
     122: SyscallInfo('setfsuid'),
     123: SyscallInfo('setfsgid'),
     124: SyscallInfo('getsid'),
+    127: SyscallInfo('rt_sigpending', patchup_address_registers=['rdi']),
+    128: SyscallInfo('rt_sigtimedwait', patchup_address_registers=['rsi']),
+    129: SyscallInfo('rt_sigqueueinfo', patchup_address_registers=['rdx']),
+    130: SyscallInfo('rt_sigsuspend'),
     213: SyscallInfo('epoll_create'),
+    219: SyscallInfo('restart_syscall'),
     232: SyscallInfo('epoll_wait', patchup_address_registers=['rsi']),
     233: SyscallInfo('epoll_ctl', patchup_address_registers=['r10']),
     281: SyscallInfo('epoll_pwait', patchup_address_registers=['rsi', 'r8']),
+    297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
 
