@@ -69,6 +69,8 @@ emulated_system_calls = {
     93:  SyscallInfo('fchown'),
     94:  SyscallInfo('lchown'),
     95:  SyscallInfo('umask'),
+    97:  SyscallInfo('getrlimit', patchup_address_registers=['rsi']),
+    98:  SyscallInfo('getrusage', patchup_address_registers=['rsi']),
     102: SyscallInfo('getuid'),
     107: SyscallInfo('geteuid'),
     108: SyscallInfo('getegid'),
@@ -105,6 +107,7 @@ emulated_system_calls = {
     292: SyscallInfo('dup3'),
     293: SyscallInfo('pipe2', patchup_address_registers=['rdi']),
     297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
+    302: SyscallInfo('prlimit64', patchup_address_registers=['r10']),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
 
