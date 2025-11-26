@@ -86,6 +86,10 @@ memory, and stepping forward by single instructions.
                       help='GDB binary to invoke.')
     prog.add_argument('--deterministic-log', default=None,
                       help='The directory containing rr traces')
+    prog.add_argument('--reproducer',
+                        type=str,
+                        help='Generate repoducer executables for detected'
+                             ' errors.')
     return prog
 
 def quoted(s: str) -> str:

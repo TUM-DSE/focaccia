@@ -1,5 +1,5 @@
 
-from .lldb_target import LLDBConcreteTarget
+from .native.lldb_target import LLDBLocalTarget
 from .snapshot import ProgramState
 from .symbolic import SymbolicTransform, eval_symbol
 from .arch import x86
@@ -12,9 +12,9 @@ class ReproducerRegisterError(Exception):
     pass
 
 class Reproducer():
-    def __init__(self, oracle: str, argv: str, snap: ProgramState, sym: SymbolicTransform) -> None:
+    def __init__(self, oracle: str, argv: str, envp: str, snap: ProgramState, sym: SymbolicTransform) -> None:
 
-        target = LLDBConcreteTarget(oracle)
+        target = LLDBLocalTarget(oracle, argv, envp)
 
         self.pc = snap.read_register("pc")
         self.bb = target.get_basic_block_inst(self.pc)
@@ -140,7 +140,6 @@ class Reproducer():
         asm += f'.section .text\n'
         asm += f'.global _start\n'
         asm += f'\n'
-        asm += f'.org {hex(self.pc)}\n'
         asm += self.get_bb()
         asm += self.get_start()
         asm += self.get_exit()

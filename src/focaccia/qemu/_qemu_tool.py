@@ -45,6 +45,12 @@ qemu_crash = {
         'snap': None,
 }
 
+verbosity = {
+    'info':    ErrorTypes.INFO,
+    'warning': ErrorTypes.POSSIBLE,
+    'error':   ErrorTypes.CONFIRMED,
+}
+
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     # Match just on PC
     debug(f'Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}')
@@ -596,6 +602,20 @@ def main():
                 serialize_snapshots(Trace(conc_states, env), file)
         except Exception as e:
             raise Exception(f'Unable to serialize snapshots to file {args.output}: {e}')
+
+    if args.reproducer:
+        from focaccia.reproducer import Reproducer
+        try:
+            for r in res:
+                errs = [e for e in r['errors'] if e.severity >= verbosity[args.error_level]]
+                if not errs:
+                    continue
+
+                rep = Reproducer(symb_transforms.env.binary_name, symb_transforms.env.argv, symb_transforms.env.envp, r['snap'], r['ref'])
+                with open(args.reproducer, 'w') as file:
+                    file.write(rep.asm())
+        except Exception as e:
+            raise Exception(f'Unable to generate reproducer: {e}')
 
 if __name__ == "__main__":
     main()
