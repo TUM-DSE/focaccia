@@ -338,7 +338,7 @@ finally:
             return None
 
         def match_pair(self, event: Event | None):
-            if event is None or not isinstance(event, SyscallEvent):
+            if event is None:
                 return None
             assert(self.matched_count is not None)
             post_event = self.events[self.matched_count]

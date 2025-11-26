@@ -1,3 +1,7 @@
+import struct
+from typing import Optional
+from dataclasses import dataclass, field
+
 from focaccia.qemu.syscall import SyscallInfo
 
 # Incomplete, only the most common ones
@@ -12,7 +16,7 @@ emulated_system_calls = {
     8: SyscallInfo('lseek'),
     13: SyscallInfo('rt_sigaction', patchup_address_registers=['rdx']),
     14: SyscallInfo('rt_sigprocmask', patchup_address_registers=['rdx']),
-    15: SyscallInfo('rt_sigreturn'),
+    15: SyscallInfo('rt_sigreturn', return_from_signal=True),
     16: SyscallInfo('ioctl', patchup_address_registers=['rdx']),
     17: SyscallInfo('pread64', patchup_address_registers=['rsi']),
     18: SyscallInfo('pwrite64'),
@@ -108,4 +112,192 @@ vdso_system_calls = {
     228: SyscallInfo('clock_gettime', patchup_address_registers=['rdi']),
     309: SyscallInfo('getcpu', patchup_address_registers=['rdi', 'rsi', 'rdx'])
 }
+
+@dataclass
+class SigContext:
+    """
+    Represents struct sigcontext on Linux x86-64.
+    You fill these like ctx.r8 = 123, ctx.rip = 0x400abc, etc.
+    """
+
+    # GPRs in kernel-defined order
+    r8: int = 0
+    r9: int = 0
+    r10: int = 0
+    r11: int = 0
+    r12: int = 0
+    r13: int = 0
+    r14: int = 0
+    r15: int = 0
+    rdi: int = 0
+    rsi: int = 0
+    rbp: int = 0
+    rbx: int = 0
+    rdx: int = 0
+    rax: int = 0
+    rcx: int = 0
+    rsp: int = 0  # OLD rsp before signal
+    rip: int = 0  # OLD rip before signal
+
+    eflags: int = 0
+    cs: int = 0x33
+    ss: int = 0x2b
+
+    err: int = 0
+    trapno: int = 0
+    oldmask: int = 0
+    cr2: int = 0
+    fpstate: int = 0   # pointer (kernel uses this)
+
+    # Reserved padding space
+    reserved1: int = 0
+    reserved2: int = 0
+    reserved3: int = 0
+
+    def to_bytes(self) -> bytes:
+        """
+        Pack exactly like struct sigcontext on x86-64.
+        """
+        fields = [
+            self.r8, self.r9, self.r10, self.r11,
+            self.r12, self.r13, self.r14, self.r15,
+            self.rdi, self.rsi, self.rbp, self.rbx,
+            self.rdx, self.rax, self.rcx, self.rsp,
+            self.rip,
+            self.eflags,
+            self.cs, self.ss,
+            self.err, self.trapno, self.oldmask, self.cr2,
+            self.fpstate,
+            self.reserved1, self.reserved2, self.reserved3,
+        ]
+        # All fields are 64-bit except CS/SS (16-bit)
+        # But kernel packs everything on 8-byte boundaries anyway.
+        return struct.pack("<" + "Q"*len(fields), *fields)
+
+
+# ---------------------------------------------------------------------
+# 2. Minimal siginfo_t abstraction (128 bytes on x86-64)
+# ---------------------------------------------------------------------
+
+@dataclass
+class SigInfo:
+    """
+    Minimal representation. You can fill as needed.
+    Layout here is fixed to 128 bytes.
+    Only a few useful fields are exposed.
+    """
+
+    si_signo: int = 0
+    si_errno: int = 0
+    si_code: int = 0
+    si_pid: int = 0
+    si_uid: int = 0
+
+    def to_bytes(self) -> bytes:
+        # Linux siginfo is 128 bytes; real layout is complex.
+        # We place the common initial fields and pad the rest.
+        buf = bytearray(128)
+        struct.pack_into("<iii", buf, 0, self.si_signo, self.si_errno, self.si_code)
+        struct.pack_into("<II", buf, 16, self.si_pid, self.si_uid)
+        return bytes(buf)
+
+
+# ---------------------------------------------------------------------
+# 3. ucontext_t wrapper (only what matters for signal return)
+# ---------------------------------------------------------------------
+
+@dataclass
+class UContext:
+    """
+    Only the parts required for correct signal return.
+    """
+    sigmask: int = 0    # For simplicity; real sigset_t is 8*16 bytes
+    mcontext: SigContext = field(default_factory=SigContext)
+
+    UC_FLAGS: int = 1  # Usually UC_FP_XSTATE
+
+    def to_bytes(self) -> bytes:
+        """
+        Real ucontext_t is large. Here we pack:
+          - uc_flags (8 bytes)
+          - uc_link  (8 bytes, NULL)
+          - stack_t  (3 * 8 bytes)
+          - sigmask  (128 bytes normally; we use 8 bytes for simplicity)
+          - padding up to 0x2c0
+          - mcontext (struct sigcontext)
+        IMPORTANT: total size must be 0x2c0 on x86-64.
+        """
+        uc_buf = bytearray(0x2c0)
+
+        # uc_flags + uc_link(NULL)
+        struct.pack_into("<Q", uc_buf, 0, self.UC_FLAGS)
+        struct.pack_into("<Q", uc_buf, 8, 0)
+
+        # stack_t (ss_sp, ss_flags, ss_size)
+        struct.pack_into("<QQQ", uc_buf, 16, 0, 0, 0)
+
+        # sigmask (we store a minimal 8 bytes)
+        struct.pack_into("<Q", uc_buf, 40, self.sigmask)
+
+        # Now embed sigcontext at the end of ucontext
+        mctx_bytes = self.mcontext.to_bytes()
+        uc_buf[-len(mctx_bytes):] = mctx_bytes
+
+        return bytes(uc_buf)
+
+
+# ---------------------------------------------------------------------
+# 4. Full rt_sigframe abstraction
+# ---------------------------------------------------------------------
+
+@dataclass
+class SigFrame:
+    sp_new: int                      # RSP after signal delivery
+    pretcode: int                    # pointer to restorer trampoline
+    uctx: UContext                   # full ucontext (incl. sigcontext)
+    siginfo: SigInfo                 # siginfo_t
+    tail_size: int = 0               # optional xstate padding
+
+    PRETCODE_SIZE: int = 8
+    UCONTEXT_SIZE: int = 0x2c0
+    SIGINFO_SIZE: int = 128
+
+    @property
+    def uc_addr(self) -> int:
+        return self.sp_new + self.PRETCODE_SIZE
+
+    @property
+    def siginfo_addr(self) -> int:
+        return self.uc_addr + self.UCONTEXT_SIZE
+
+    @property
+    def tail_addr(self) -> int:
+        return self.siginfo_addr + self.SIGINFO_SIZE
+
+    @property
+    def rdx_uc(self) -> int:
+        """What to set in guest RDX."""
+        return self.uc_addr
+
+    @property
+    def rsi_siginfo(self) -> int:
+        """What to set in guest RSI."""
+        return self.siginfo_addr
+
+    def to_bytes(self) -> bytes:
+        buf = bytearray(self.PRETCODE_SIZE + self.UCONTEXT_SIZE +
+                        self.SIGINFO_SIZE + self.tail_size)
+
+        # pretcode
+        struct.pack_into("<Q", buf, 0, self.pretcode)
+
+        # ucontext
+        buf[self.PRETCODE_SIZE : self.PRETCODE_SIZE + self.UCONTEXT_SIZE] = \
+            self.uctx.to_bytes()
+
+        # siginfo
+        si_off = self.PRETCODE_SIZE + self.UCONTEXT_SIZE
+        buf[si_off : si_off + self.SIGINFO_SIZE] = self.siginfo.to_bytes()
+
+        return bytes(buf)
 

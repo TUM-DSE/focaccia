@@ -1,12 +1,14 @@
 import re
 import gdb
 import socket
+import struct
 import logging
 from typing import Optional
 
 from focaccia.deterministic import (
     DeterministicLog,
     Event,
+    SignalEvent,
     EventMatcher,
     SyscallEvent,
     MemoryMapping,
@@ -19,6 +21,7 @@ from focaccia.snapshot import (
 )
 from focaccia.arch import supported_architectures, Arch
 from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls, vdso_system_calls
+from focaccia.qemu.x86 import SigContext, SigInfo, UContext, SigFrame
 
 logger = logging.getLogger('focaccia-qemu-target')
 debug = logger.debug
@@ -245,6 +248,8 @@ class GDBServerStateIterator(GDBServerConnector):
         for idx in skipped_events:
             debug(f'Skip {events[idx]}')
 
+        self._signal_frames = []
+
         first_state = self.current_state()
         self._events = EventMatcher(events,
                                     match_event,
@@ -292,6 +297,11 @@ class GDBServerStateIterator(GDBServerConnector):
                     data[hole.offset:hole.offset] = b'\x00' * hole.size
                 self._process.write_memory(addr, data)
 
+            if syscall.return_from_signal:
+                # TODO: restore frame
+                frame = self._signal_frames.pop()
+                info(f'Handling return from signal with frame: {frame}')
+
         syscall = passthrough_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
             info(f'System call number {hex(call)} passed through')
@@ -321,6 +331,75 @@ class GDBServerStateIterator(GDBServerConnector):
 
         return next_state
 
+    def _handle_signal(self, event: SignalEvent, post_event: SignalEvent):
+        info('Handling signal event')
+        sighandler_pc = post_event.pc
+
+        state = self.current_state()
+        rsp = state.read_register('rsp')
+
+        sc = SigContext()
+        sc.r8 = state.read_register('r8')
+        sc.r9 = state.read_register('r9')
+        sc.r10 = state.read_register('r10')
+        sc.r11 = state.read_register('r11')
+        sc.r12 = state.read_register('r12')
+        sc.r13 = state.read_register('r13')
+        sc.r14 = state.read_register('r14')
+        sc.r15 = state.read_register('r15')
+        sc.rdi = state.read_register('rdi')
+        sc.rsi = state.read_register('rsi')
+        sc.rbp = state.read_register('rbp')
+        sc.rbx = state.read_register('rbx')
+        sc.rdx = state.read_register('rdx')
+        sc.rax = state.read_register('rax')
+        sc.rcx = state.read_register('rcx')
+        sc.rsp = state.read_register('rsp')
+        sc.rip = state.read_register('rip')
+        sc.eflags = state.read_register('eflags')
+
+        sigmask = 0
+        uctx = UContext(sigmask=sigmask, mcontext=sc)
+        si_signo, si_errno, si_code = struct.unpack_from("<iii", event.signal_number.siginfo, 0)
+        siginfo = SigInfo(si_signo=si_signo, si_errno=si_errno, si_code=si_code,
+                          si_pid=post_event.tid, si_uid=0)
+        frame = SigFrame(sp_new=rsp - 0xd78, pretcode=0x401824, uctx=uctx, siginfo=siginfo)
+        self._process.write_memory(rsp - 0xd78, frame.to_bytes())
+
+        gdb.execute(f'set $pc = {hex(sighandler_pc)}')
+        patchup_regs = ['rdi']
+        for reg in patchup_regs:
+            gdb.parse_and_eval(f'${reg}={post_event.registers.get(reg)}')
+
+        gdb.parse_and_eval('$rsp = $rsp - 0xd78')
+        gdb.parse_and_eval('$rdx = $rsp + 0x8')
+        gdb.parse_and_eval('$rsi = $rsp + 0x2c8')
+
+        self._signal_frames.append(frame)
+        return self.current_state()
+
+    def _handle_context_switch(self, event: SyscallEvent, post_event: SyscallEvent):
+        # Context switch
+        # TODO: handle return from pre-empt
+        self._thread_context[self._current_event_id] = event
+        self._current_event_id = post_event.tid
+        tid, num = self._thread_map[self._current_event_id]
+        self.context_switch(tid)
+        state = self.current_state()
+        debug(f'Scheduled {hex(tid)} that corresponds to native {hex(post_event.tid)}')
+
+        if self._current_event_id in self._thread_context:
+            event = self._thread_context.pop(self._current_event_id)
+        elif match_event(post_event, state):
+            event = post_event
+            post_event = self._events.match_pair(event)
+        else:
+            debug(f'New thread {hex(tid)} started at non-event instruction')
+            self._events.unmatch()
+            self._step()
+            print(hex(self.current_state().read_pc()))
+            return self.current_state()
+
     def _handle_event(self) -> ReadableProgramState | None:
         event = self._events.match(self.current_state())       
 
@@ -331,29 +410,15 @@ class GDBServerStateIterator(GDBServerConnector):
             post_event = self._events.match_pair(event)
             assert(post_event is not None)
 
-            # Context switch
-            # TODO: handle return from pre-empt
             if post_event.tid != self._current_event_id:
-                self._thread_context[self._current_event_id] = event
-                self._current_event_id = post_event.tid
-                tid, num = self._thread_map[self._current_event_id]
-                self.context_switch(tid)
-                state = self.current_state()
-                debug(f'Scheduled {hex(tid)} that corresponds to native {hex(post_event.tid)}')
-
-                if self._current_event_id in self._thread_context:
-                    event = self._thread_context.pop(self._current_event_id)
-                elif match_event(post_event, state):
-                    event = post_event
-                    post_event = self._events.match_pair(event)
-                else:
-                    debug(f'New thread {hex(tid)} started at non-event instruction')
-                    self._events.unmatch()
-                    self._step()
-                    print(hex(self.current_state().read_pc()))
-                    return self.current_state()
+                self._handle_context_switch(event, post_event)
 
             return self._handle_syscall(event, post_event)
+
+        if isinstance(event, SignalEvent):
+            post_event = self._events.match_pair(event)
+            assert(post_event is not None)
+            return self._handle_signal(event, post_event)
 
         warn(f'Event handling for events of type {event.event_type} not implemented')
         return None
