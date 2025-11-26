@@ -99,6 +99,7 @@ emulated_system_calls = {
     281: SyscallInfo('epoll_pwait', patchup_address_registers=['rsi', 'r8']),
     284: SyscallInfo('eventfd'),
     290: SyscallInfo('eventfd2'),
+    291: SyscallInfo('epoll_create1'),
     293: SyscallInfo('pipe2', patchup_address_registers=['rdi']),
     297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
