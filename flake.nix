@@ -450,6 +450,7 @@
 					pkgs.memtier-benchmark # needed to test memcached
 					musl-minimal-pkgs.pkgsStatic.gzip
 					musl-minimal-pkgs.pkgsStatic.file
+					musl-minimal-pkgs.pkgsStatic.darkhttpd
 				];
 
 				hardeningDisable = [ "pie" ];
