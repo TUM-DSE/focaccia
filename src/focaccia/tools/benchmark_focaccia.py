@@ -60,7 +60,7 @@ def try_remove(l: list, v):
     except ValueError:
         pass
 
-def runtime_benchmark():
+def runtime_benchmark(args):
     # Test native tracing
     detlog = DeterministicLog(args.deterministic_log)
     if args.deterministic_log and detlog.base_directory is None:
@@ -118,7 +118,7 @@ def main():
     logging.basicConfig(level=logging.ERROR)
 
     if args.runtime:
-        runtime_benchmark()
+        runtime_benchmark(args)
 
     # Get environment
     env = os.environ.copy()

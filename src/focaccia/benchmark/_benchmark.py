@@ -9,7 +9,7 @@ import gdb
 import subprocess
 import time
 
-def runtime():
+def runtime(args):
     detlog = DeterministicLog(args.deterministic_log)
     if args.deterministic_log and detlog.base_directory is None:
         raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
@@ -104,7 +104,7 @@ def main():
     args = make_argparser().parse_args()
 
     if args.runtime:
-        runtime()
+        runtime(args)
 
 if __name__ == "__main__":
     main()
