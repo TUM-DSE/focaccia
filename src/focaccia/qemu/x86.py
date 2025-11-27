@@ -123,6 +123,8 @@ emulated_system_calls = {
     291: SyscallInfo('epoll_create1'),
     292: SyscallInfo('dup3'),
     293: SyscallInfo('pipe2', patchup_address_registers=['rdi']),
+    295: SyscallInfo('preadv', patchup_address_registers=['rsi']),
+    296: SyscallInfo('pwritev'),
     297: SyscallInfo('rt_tgsigqueueinfo', patchup_address_registers=['r10']),
     302: SyscallInfo('prlimit64', patchup_address_registers=['r10']),
     303: SyscallInfo('name_to_handle_at', patchup_address_registers=['rdx', 'r10']),
