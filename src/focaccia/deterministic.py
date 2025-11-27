@@ -334,7 +334,12 @@ finally:
             if self.matched_count is None:
                 raise ValueError('Cannot get next event with unsynchronized event matcher')
             if self.matched_count < len(self.events):
-                return self.events[self.matched_count]
+                count = self.matched_count
+                while count in self.skipped_events:
+                    count += 1
+                if count < len(self.events):
+                    return self.events[count]
+                return None
             return None
 
         def match_pair(self, event: Event | None):
