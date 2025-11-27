@@ -31,6 +31,21 @@ def parse_transformations(json_stream: TextIO) -> TraceContainer[SymbolicTransfo
 
     return TraceContainer(strace, env)
 
+class SymbolicTransformStream:
+    def __init__(self, unpacker: msgpack.Unpacker):
+        self._unpacker = unpacker
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> SymbolicTransform:
+        obj = next(self._unpacker)
+        return SymbolicTransform.from_json(obj['state'])
+
+    def skip(self, n: int = 1) -> None:
+        for _ in range(n):
+            self._unpacker.skip()
+
 def stream_transformation(stream) -> Trace[SymbolicTransform]:
     unpacker = msgpack.Unpacker(stream, raw=False)
 
@@ -44,7 +59,8 @@ def stream_transformation(stream) -> Trace[SymbolicTransform]:
             t = SymbolicTransform.from_json(obj['state'])
             yield t
 
-    return Trace(state_iter(), addresses, env)
+    state_stream = SymbolicTransformStream(unpacker)
+    return Trace(iter(state_stream), addresses, env)
 
 def serialize_transformations(trace: Trace[SymbolicTransform],
                               out_file: str,

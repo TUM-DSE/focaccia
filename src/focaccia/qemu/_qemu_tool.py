@@ -175,7 +175,6 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                 break
 
             try:
-                symb_i += 1
                 transform = next(trace)
             except StopIteration:
                 break
@@ -185,7 +184,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
                 next_i = None
                 if pc in traced_address_set:
-                    next_i = find_index(strace.addresses[symb_i:], pc)
+                    next_i = find_index(strace.addresses[symb_i+1:], pc)
+                    print(f'Next {next_i}, current {symb_i}')
 
                 # Drop the concrete state if no address in the symbolic trace
                 # matches
@@ -198,13 +198,20 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                     continue
 
                 # Otherwise, jump to the next matching symbolic state
-                for _ in range(next_i+1):
-                    try:
-                        symb_i += 1
-                        transform = next(trace)
-                    except StopIteration:
-                        warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
-                        break
+                try:
+                    trace.skip(next_i)
+                    transform = next(trace)
+                    symb_i += next_i+1
+                except StopIteration:
+                    warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
+                    break
+                # for _ in range(next_i+1):
+                #     try:
+                #         symb_i += 1
+                #         transform = next(trace)
+                #     except StopIteration:
+                #         warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
+                #         break
 
             assert(cur_state.read_pc() == transform.addr)
             info(f'Validating instruction at address {hex(pc)}')
@@ -213,6 +220,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                 cur_state,
                 matched_transforms[-1] if matched_transforms else transform,
                 transform))
+            symb_i += 1
             matched_transforms.append(transform)
             cur_state = next(state_iter)
         except StopIteration:
