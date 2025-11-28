@@ -205,13 +205,6 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                 except StopIteration:
                     warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
                     break
-                # for _ in range(next_i+1):
-                #     try:
-                #         symb_i += 1
-                #         transform = next(trace)
-                #     except StopIteration:
-                #         warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
-                #         break
 
             assert(cur_state.read_pc() == transform.addr)
             info(f'Validating instruction at address {hex(pc)}')
