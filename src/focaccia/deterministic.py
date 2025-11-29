@@ -277,7 +277,8 @@ class DetachTask(Task):
 
 try:
     from ._deterministic_impl import DeterministicLog
-except Exception:
+except Exception as e:
+    print(f'Could not import deterministic log implementation: {e}')
     class DeterministicLog:
         def __init__(self, log_dir: str): 
             self.base_directory = None

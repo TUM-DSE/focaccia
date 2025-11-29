@@ -49,6 +49,14 @@ def make_argparser():
     prog.add_argument('-o', '--output',
                       default='./benchmark.txt',
                       help='Output file to save results')
+    prog.add_argument('--start-address',
+                      type=lambda x: int(x,0),
+                      default=None,
+                      help='Start address for tracing')
+    prog.add_argument('--stop-address',
+                      type=lambda x: int(x,0),
+                      default=None,
+                      help='Stop address for tracing')
     return prog
 
 def quoted(s: str) -> str:
@@ -72,8 +80,8 @@ def runtime_benchmark(args):
     for i in range(timer.iterations):
         env = TraceEnvironment(args.binary, args.args, utils.get_envp(),
                                nondeterminism_log=detlog,
-                               start_address=None,
-                               stop_address=None)
+                               start_address=args.start_address,
+                               stop_address=args.stop_address)
         tracer = SymbolicTracer(env, remote=args.remote, cross_validate=False,
                             force=True)
         trace = tracer.trace(time_limit=None)
