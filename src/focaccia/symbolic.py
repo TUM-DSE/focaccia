@@ -462,8 +462,7 @@ class DisassemblyContext:
 
 def run_instruction(instr: miasm_instr,
                     conc_state: MiasmSymbolResolver,
-                    lifter: Lifter,
-                    force: bool = False) \
+                    lifter: Lifter) \
         -> tuple[ExprInt | None, dict[Expr, Expr]]:
     """Compute the symbolic equation of a single instruction.
 

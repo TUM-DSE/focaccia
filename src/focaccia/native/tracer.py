@@ -286,6 +286,11 @@ class SymbolicTracer:
             except TimeoutError:
                 warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
                 new_pc, modified = None, {}
+            except Exception as e:
+                if not self.force:
+                    raise
+                warn(f'Unable to run instruction symbolically: {e}')
+                new_pc, modified = None, {}
 
             if self.cross_validate and new_pc:
                 # Predict next concrete state.
