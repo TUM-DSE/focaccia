@@ -46,7 +46,7 @@ class SpeculativeTracer(ReadableProgramState):
     def __init__(self, target: LLDBConcreteTarget):
         super().__init__(target.arch)
         self.target = target
-        self.pc = target.read_register('pc')
+        self.pc = target.read_register(target.arch.to_regname('pc'))
         self.speculative_pc: int | None = None
         self.speculative_count: int = 0
         
@@ -57,7 +57,7 @@ class SpeculativeTracer(ReadableProgramState):
         if new_pc is None:
             self.progress_execution()
             self.target.step()
-            self.pc = self.target.read_register('pc')
+            self.pc = self.target.read_register(target.arch.to_regname('pc'))
             self.speculative_pc = None
             self.speculative_count = 0
             return
@@ -91,7 +91,7 @@ class SpeculativeTracer(ReadableProgramState):
         if self.target.is_exited():
             return
         self.target.step()
-        self.pc = self.target.read_register('pc')
+        self.pc = self.target.read_register(self.target.arch.to_regname('pc'))
 
     def _cache(self, name: str, value):
         self.read_cache[name] = value

@@ -125,7 +125,7 @@ class LLDBConcreteTarget:
             self.run()
             if self.is_exited():
                 return
-            if self.read_register('pc') == address:
+            if self.read_register(self.arch.to_regname('pc')) == address:
                 break
         self.target.BreakpointDelete(bp.GetID())
 
@@ -207,6 +207,9 @@ class LLDBConcreteTarget:
                                       or the target is otherwise unable to read
                                       the register's value.
         """
+        if regname.upper() == self.arch.to_regname('pc'):
+            frame = self.process.GetSelectedThread().GetFrameAtIndex(0)
+            return frame.GetPC()
         try:
             reg = self._get_register(regname)
             assert(reg.IsValid())
