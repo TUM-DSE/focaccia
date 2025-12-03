@@ -290,6 +290,11 @@
 		musl-minimal-memcached-nocheck = musl-minimal-pkgs.pkgsStatic.memcached.overrideAttrs (old: {
 			doCheck = false;
 		});
+
+		musl-minimal-curl-nocheck = musl-minimal-pkgs.pkgsStatic.curl.overrideAttrs (old: {
+			doCheck = false;
+			configureFlags = (old.configureFlags or []) ++ [ "--disable-hyper" ];
+		});
 	in rec {
 		# Default package just builds Focaccia
 		packages = rec {
@@ -442,6 +447,8 @@
 					packages.dev
 					pkgs.rr
 					pkgs.capnproto
+					musl-pkgs.cmake
+					musl-pkgs.stdenv
 					musl-pkgs.gcc
 					musl-pkgs.pkg-config
 					musl-minimal-redis-nocheck
@@ -451,6 +458,8 @@
 					musl-minimal-pkgs.pkgsStatic.gzip
 					musl-minimal-pkgs.pkgsStatic.file
 					musl-minimal-pkgs.pkgsStatic.darkhttpd
+					musl-minimal-curl-nocheck
+					pkgs.lua51Packages.luarocks
 				];
 
 				hardeningDisable = [ "pie" ];
