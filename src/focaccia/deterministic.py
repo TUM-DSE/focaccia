@@ -319,9 +319,8 @@ finally:
                     return None
 
             # Don't match skipped events
-            if self.matched_count in self.skipped_events:
+            while self.matched_count in self.skipped_events:
                 self.matched_count += 1 # proceed to next
-                return None
 
             event = self.events[self.matched_count]
             if self.matcher(event, state):
