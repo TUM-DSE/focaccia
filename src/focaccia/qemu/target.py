@@ -20,7 +20,7 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.arch import supported_architectures, Arch
-from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls, vdso_system_calls
+from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls
 from focaccia.qemu.x86 import SigContext, SigInfo, UContext, SigFrame
 
 logger = logging.getLogger('focaccia-qemu-target')
@@ -236,17 +236,6 @@ class GDBServerStateIterator(GDBServerConnector):
         self._thread_num = 1
 
         events = self._deterministic_log.events()
-        skipped_events = []
-        for idx in range(len(events)):
-            event = events[idx]
-            if not isinstance(event, SyscallEvent):
-                continue
-
-            if event.syscall_number in vdso_system_calls[self.arch.archname]:
-                skipped_events.append(idx)
-
-        for idx in skipped_events:
-            debug(f'Skip {events[idx]}')
 
         self._signal_frames = []
         self._signal_restorers = {}
@@ -254,9 +243,14 @@ class GDBServerStateIterator(GDBServerConnector):
         first_state = self.current_state()
         self._events = EventMatcher(events,
                                     match_event,
-                                    from_state=first_state,
-                                    skipped_events=skipped_events)
+                                    from_state=first_state)
         event = self._events.match(first_state)
+
+        # TODO: handle AT_RANDOM correctly
+        # at_random = bytes([0xd1, 0x8f, 0x3a, 0x37, 0xb8, 0xba, 0x05, 0x54, 0x70, 0xdf, 0x3f, 0x89, 0x93, 0x64, 0xc2, 0x3c])
+        # self._process.write_memory(0x7ffff6165d20, at_random)
+        # actual_at_random = self._process.read_memory(0x7ffff6165d20, 16).tobytes()
+        # assert(at_random == actual_at_random)
         
         self._thread_count = 1
         self._current_event_id = event.tid
@@ -275,22 +269,28 @@ class GDBServerStateIterator(GDBServerConnector):
 
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
-            info(f'Replaying system call number {hex(call)}')
+            info(f'Replaying system call number {hex(call)}: {syscall.name}')
 
             self.skip(post_event.pc)
-            next_state = self.current_state()
+            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-            patchup_regs = [self.arch.get_syscall_reg(), *(syscall.patchup_registers or [])]
+            patchup_regs = [self.arch.get_syscall_reg(), 'rip', *(syscall.patchup_registers or [])]
             for reg in patchup_regs:
-                gdb.parse_and_eval(f'${reg}={post_event.registers.get(reg)}')
+                gdb.execute(f'set ${reg} = {post_event.registers.get(reg)}', to_string=True)
+                next_state.write_register(reg, post_event.registers.get(reg))
 
             for mem in post_event.mem_writes:
                 addr, data = mem.address, mem.data
+                done = False
                 for reg in syscall.patchup_address_registers:
                     value = post_event.registers[reg]
                     if value == addr:
                         addr = next_state.read_register(reg)
+                        done = True
                         break
+
+                if done is False:
+                    raise RuntimeError(f'Cannot translate address {hex(addr)}')
 
                 info(f'Replaying write to {hex(addr)} with data:\n{data.hex(" ")}')
 

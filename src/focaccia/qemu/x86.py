@@ -13,6 +13,7 @@ emulated_system_calls = {
     4: SyscallInfo('stat', patchup_address_registers=['rsi']),
     5: SyscallInfo('fstat', patchup_address_registers=['rsi']),
     6: SyscallInfo('lstat', patchup_address_registers=['rsi']),
+    7: SyscallInfo('poll', patchup_address_registers=['rdi']),
     8: SyscallInfo('lseek'),
     13: SyscallInfo('rt_sigaction', patchup_address_registers=['rdx'], sets_signal_restorer=True),
     14: SyscallInfo('rt_sigprocmask', patchup_address_registers=['rdx']),
@@ -30,7 +31,11 @@ emulated_system_calls = {
     33: SyscallInfo('dup2'),
     34:  SyscallInfo('pause'),
     35:  SyscallInfo('nanosleep', patchup_address_registers=['rdi', 'rsi']),
+    36:  SyscallInfo('getitimer', patchup_address_registers=['rsi']),
+    37:  SyscallInfo('alarm'),
+    38:  SyscallInfo('setitimer', patchup_address_registers=['rdx']),
     39:  SyscallInfo('getpid'),
+    40:  SyscallInfo('sendfile', patchup_address_registers=['rdx']),
     41:  SyscallInfo('socket'),
     42:  SyscallInfo('connect', patchup_address_registers=['rsi']),
     43:  SyscallInfo('accept', patchup_address_registers=['rsi', 'rdx']),
@@ -38,14 +43,30 @@ emulated_system_calls = {
     45:  SyscallInfo('recvfrom', patchup_address_registers=['rsi']),
     46:  SyscallInfo('sendmsg'),
     47:  SyscallInfo('recvmsg', patchup_address_registers=['rsi']),
+    # shutdown ignored
     49:  SyscallInfo('bind', patchup_address_registers=['rsi']),
     50:  SyscallInfo('listen'),
     51:  SyscallInfo('getsockname', patchup_address_registers=['rsi', 'rdx']),
     52:  SyscallInfo('getpeername', patchup_address_registers=['rsi', 'rdx']),
-    53:  SyscallInfo('sockpair', patchup_address_registers=['r10']),
+    53:  SyscallInfo('socketpair', patchup_address_registers=['r10']),
     54:  SyscallInfo('setsockopt'),
-    55:  SyscallInfo('getsockpair', patchup_address_registers=['r10', 'r8']),
+    55:  SyscallInfo('getsockopt', patchup_address_registers=['r10', 'r8']),
+    # clone
+    # fork
+    # vfork
+    # execve
+    # exit
+    61:  SyscallInfo('wait4', patchup_address_registers=['rsi', 'r10']),
     62:  SyscallInfo('kill'),
+    63:  SyscallInfo('uname', patchup_address_registers=['rdi']),
+    # semget
+    # semop
+    # semctl
+    # shmdt
+    # msgget
+    # msgsnd
+    # msgrcv
+    # msgctl
     72:  SyscallInfo('fcntl', patchup_address_registers=['rdx']),
     73:  SyscallInfo('flock'),
     74:  SyscallInfo('fsync'),
@@ -70,9 +91,17 @@ emulated_system_calls = {
     93:  SyscallInfo('fchown'),
     94:  SyscallInfo('lchown'),
     95:  SyscallInfo('umask'),
+    96:  SyscallInfo('gettimeofday',patchup_address_registers=['rdi', 'rsi']),
     97:  SyscallInfo('getrlimit', patchup_address_registers=['rsi']),
     98:  SyscallInfo('getrusage', patchup_address_registers=['rsi']),
+    99:  SyscallInfo('sysinfo', patchup_address_registers=['rdi']),
+    100: SyscallInfo('times', patchup_address_registers=['rdi']),
+    # ptrace
     102: SyscallInfo('getuid'),
+    103: SyscallInfo('syslog'),
+    104: SyscallInfo('getgid'),
+    105: SyscallInfo('setuid'),
+    106: SyscallInfo('setgid'),
     107: SyscallInfo('geteuid'),
     108: SyscallInfo('getegid'),
     109: SyscallInfo('setpgid'),
@@ -91,14 +120,42 @@ emulated_system_calls = {
     122: SyscallInfo('setfsuid'),
     123: SyscallInfo('setfsgid'),
     124: SyscallInfo('getsid'),
+    # capget
+    # capset
     127: SyscallInfo('rt_sigpending', patchup_address_registers=['rdi']),
     128: SyscallInfo('rt_sigtimedwait', patchup_address_registers=['rsi']),
     129: SyscallInfo('rt_sigqueueinfo', patchup_address_registers=['rdx']),
     130: SyscallInfo('rt_sigsuspend'),
+    131: SyscallInfo('sigaltstack'),
+    132: SyscallInfo('utime'),
+    133: SyscallInfo('mknod'),
+    # uselib
+    135: SyscallInfo('personality'),
+    # ustat
+    137: SyscallInfo('statfs', patchup_address_registers=['rsi']),
+    138: SyscallInfo('fstatfs', patchup_address_registers=['rsi']),
+    # sysfs
+    140: SyscallInfo('getpriority'),
+    141: SyscallInfo('setpriority'),
+    142: SyscallInfo('sched_setparam'),
+    143: SyscallInfo('sched_getparam', patchup_address_registers=['rsi']),
+    144: SyscallInfo('sched_setscheduler'),
+    145: SyscallInfo('sched_getscheduler'),
+    146: SyscallInfo('sched_get_priority_max'),
+    147: SyscallInfo('sched_get_priority_min'),
+    148: SyscallInfo('sched_rr_get_interval', patchup_address_registers=['rsi']),
+    # mlock
+    # munlock
+    # mlockall
+    # munlockall
+    # vhangup
+    # modify_ldt
     200: SyscallInfo('tkill'),
+    201: SyscallInfo('time', patchup_address_registers=['rdi']),
     202: SyscallInfo('futex', patchup_address_registers=['rdi', 'r8']), 
     213: SyscallInfo('epoll_create'),
     219: SyscallInfo('restart_syscall'),
+    228: SyscallInfo('clock_gettime', patchup_address_registers=['rsi']),
     232: SyscallInfo('epoll_wait', patchup_address_registers=['rsi']),
     233: SyscallInfo('epoll_ctl', patchup_address_registers=['r10']),
     257: SyscallInfo('openat'),
@@ -129,6 +186,7 @@ emulated_system_calls = {
     302: SyscallInfo('prlimit64', patchup_address_registers=['r10']),
     303: SyscallInfo('name_to_handle_at', patchup_address_registers=['rdx', 'r10']),
     304: SyscallInfo('open_by_handle_at', patchup_address_registers=['rsi']),
+    309: SyscallInfo('getcpu', patchup_address_registers=['rdi', 'rsi', 'rdx']),
     316: SyscallInfo('renameat2'),
     318: SyscallInfo('getrandom', patchup_address_registers=['rdi'])
 }
@@ -138,13 +196,6 @@ passthrough_system_calls = {
     57:   SyscallInfo('fork', creates_thread=True),
     58:   SyscallInfo('vfork', creates_thread=True),
     435:  SyscallInfo('clone3', patchup_address_registers=['rdi'], creates_thread=True),
-}
-
-vdso_system_calls = {
-    96: SyscallInfo('gettimeofday', patchup_address_registers=['rdi', 'rsi']),
-    201: SyscallInfo('time', patchup_address_registers=['rdi']),
-    228: SyscallInfo('clock_gettime', patchup_address_registers=['rdi']),
-    309: SyscallInfo('getcpu', patchup_address_registers=['rdi', 'rsi', 'rdx'])
 }
 
 @dataclass
