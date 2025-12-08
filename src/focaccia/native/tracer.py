@@ -13,6 +13,8 @@ from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform, DisassemblyContext, run_instruction
 from focaccia.deterministic import Event, EventMatcher
+import focaccia.benchmark
+from focaccia.benchmark.timer import Timer
 
 from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
 
@@ -23,6 +25,9 @@ warn = logger.warn
 
 # Disable Miasm's disassembly logger
 logging.getLogger('asmblock').setLevel(logging.CRITICAL)
+
+ITERATIONS = 1
+BENCH_FILE = "./benchmark-trace.txt"
 
 class ValidationError(Exception):
     pass
@@ -222,9 +227,14 @@ class SymbolicTracer:
         :param start_addr: Address from which to start tracing.
         :param stop_addr: Address until which to trace.
         """
+
+        timer_all = Timer("Whole trace function", iterations=ITERATIONS, file_path=BENCH_FILE)
+        timer_conc = Timer("Concrete trace", iterations=ITERATIONS, file_path=BENCH_FILE, paused=True)
         # Set up concrete reference state
         if self.env.start_address is not None:
+            timer_conc.unpause()
             self.target.run_until(self.env.start_address)
+            timer_conc.pause()
 
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
@@ -235,6 +245,8 @@ class SymbolicTracer:
             for event in event_matcher.events:
                 debug(event)
 
+        timer_symbolic = Timer("Symbolic trace", iterations=ITERATIONS, file_path=BENCH_FILE, paused=True)
+        timer_cross = Timer("Cross validation", iterations=ITERATIONS, file_path=BENCH_FILE, paused=True)
         # Trace concolically
         strace: list[SymbolicTransform] = []
         while not self.target.is_exited():
@@ -244,8 +256,11 @@ class SymbolicTracer:
                 info(f'Reached stop address at {hex(pc)}')
                 break
 
+
+            timer_symbolic.unpause()
             # Disassemble instruction at the current PC
             tid = self.target.get_current_tid()
+            alt_disas = 0
             try:
                 instruction = ctx.disassemble(pc)
                 info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
@@ -283,24 +298,39 @@ class SymbolicTracer:
                 warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
                 new_pc, modified = None, {}
 
+            timer_symbolic.pause()
+
             if self.cross_validate and new_pc:
                 # Predict next concrete state.
                 # We verify the symbolic execution backend on the fly for some
                 # additional protection from bugs in the backend.
-                new_pc = int(new_pc)
-                transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
-                pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                self.progress(new_pc, step=in_event)
+                try:
+                    new_pc = int(new_pc)
+                    transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+                    pred_regs, pred_mems = self.predict_next_state(instruction, transform)
+                    timer_conc.unpause()
+                    self.progress(new_pc, step=in_event)
+                    timer_conc.pause()
+                except Exception as e:
+                    if self.force:
+                        warn(f'Predicting next state failed: {e}')
+                        self.target.step() ## HMMM
+                        continue
+                    raise
 
                 try:
+                    timer_cross.unpause()
                     self.validate(instruction, transform, pred_regs, pred_mems)
+                    timer_cross.pause()
                 except ValidationError as e:
                     if self.force:
                         warn(f'Cross-validation failed: {e}')
                         continue
                     raise
             else:
+                timer_conc.unpause()
                 new_pc = self.progress(new_pc, step=in_event)
+                timer_conc.pause()
                 if new_pc is None:
                     transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
                     strace.append(transform)
@@ -317,5 +347,9 @@ class SymbolicTracer:
 
                 debug(f'Completed handling event: {post_event}')
 
+        timer_conc.log_time()
+        timer_symbolic.log_time()
+        timer_all.log_time()
+        timer_cross.log_time()
         return Trace(strace, self.env)
 

@@ -62,25 +62,25 @@ def try_remove(l: list, v):
 
 def runtime_benchmark(args):
     # Test native tracing
-    detlog = DeterministicLog(args.deterministic_log)
-    if args.deterministic_log and detlog.base_directory is None:
-        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
-                                   'Focaccia built without deterministic log support')
+    #detlog = DeterministicLog(args.deterministic_log)
+    #if args.deterministic_log and detlog.base_directory is None:
+    #    raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
+    #                               'Focaccia built without deterministic log support')
 
-    timer = Timer("Native tracing", iterations=args.iterations, file_path=args.output)
-    timer.write_binary(args.binary)
-    for i in range(timer.iterations):
-        env = TraceEnvironment(args.binary, args.args, utils.get_envp(),
-                               nondeterminism_log=detlog,
-                               start_address=None,
-                               stop_address=None)
-        tracer = SymbolicTracer(env, remote=args.remote, cross_validate=False,
-                            force=True)
-        trace = tracer.trace(time_limit=None)
-    timer.log_time()
+    #timer = Timer("Native tracing", iterations=args.iterations, file_path=args.output)
+    #timer.write_binary(args.binary)
+    #for i in range(timer.iterations):
+    #    env = TraceEnvironment(args.binary, args.args, utils.get_envp(),
+    #                           nondeterminism_log=detlog,
+    #                           start_address=None,
+    #                           stop_address=None)
+    #    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=False,
+    #                        force=True)
+    #    trace = tracer.trace(time_limit=None)
+    #timer.log_time()
 
-    with open(f"/tmp/benchmark-{args.binary.split('/')[-1]}-symbolic.trace", 'w') as file:
-        parser.serialize_transformations(trace, file)
+    #with open(f"/tmp/benchmark-{args.binary.split('/')[-1]}-symbolic.trace", 'w') as file:
+    #    parser.serialize_transformations(trace, file)
 
     # Emu exec plain
     try:
