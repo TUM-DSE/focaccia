@@ -4,6 +4,8 @@ from .snapshot import ProgramState
 from .symbolic import SymbolicTransform, eval_symbol
 from .arch import x86
 
+import re
+
 class ReproducerMemoryError(Exception):
     pass
 class ReproducerBasicBlockError(Exception):
@@ -22,12 +24,50 @@ class Reproducer():
         self.snap = snap
         self.sym = sym
 
+    def replace_mem_access(self, instruction) -> str:
+        instr = instruction.split(' ')
+        res = instr[0] + " "
+        pattern = r'^([^\(]*)?\(([^\)]+)\)$'
+        try:
+            for i in instr[1:]:
+                match = re.match(pattern, i.strip(','))
+                if not match:
+                    res += i.strip(',') + ", "
+                    continue
+                displacement_str = match.group(1)
+                if displacement_str == "":
+                    displacement = 0
+                elif displacement_str.startswith('0x'):
+                    displacement = int(displacement_str, 16)
+                elif displacement_str.startswith('-0x'):
+                    displacement = -int(displacement_str[1:], 16)
+                else:
+                    displacement = int(displacement_str)
+
+                inner_parts = match.group(2).split(',')
+                base_val = self.snap.read_register(inner_parts[0].strip(" %").upper())
+                index_val = 0
+                scale_val = 0
+
+                if len(inner_parts) > 1: # (base, index)
+                    index_val = self.snap.read_register(inner_parts[1].strip(" %").upper())
+
+                if len(inner_parts) > 2: # (base, index, scale)
+                    scale_val = int(inner_parts[2].strip())
+
+                address = displacement + base_val + (index_val * scale_val)
+                res += "_" + hex(address) + ", "
+        except:
+            raise ReproducerBasicBlockError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
+        return res[:-2]
+
     def get_bb(self) -> str:
         try:
             asm = ""
             asm += f'_bb_{hex(self.pc)}:\n'
             for i in self.bb[:-1]:
-                asm += f'{i}\n'
+                asm += f'{self.replace_mem_access(i)}\n'
+                break
             asm += f'ret\n'
             asm += f'\n'
 
@@ -36,7 +76,7 @@ class Reproducer():
             raise ReproducerBasicBlockError(f'{hex(self.pc)}\n{self.snap}\n{self.sym}\n{self.bb}')
 
     def get_regs(self) -> str:
-        general_regs = ['RIP', 'RAX', 'RBX','RCX','RDX', 'RSI','RDI','RBP','RSP','R8','R9','R10','R11','R12','R13','R14','R15',]
+        general_regs = ['RIP', 'RAX', 'RBX','RCX','RDX', 'RSI','RDI','RBP','R8','R9','R10','R11','R12','R13','R14','R15',]
         flag_regs = ['CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',]
         eflag_regs = ['RF', 'VM', 'AC', 'VIF', 'VIP', 'ID',]
 
@@ -62,15 +102,14 @@ class Reproducer():
     def get_mem(self) -> str:
         try:
             asm = ""
-            asm += f'_setup_mem:\n'
             for mem in self.sym.get_used_memory_addresses():
                 addr = eval_symbol(mem.ptr, self.snap)
                 val = self.snap.read_memory(addr, int(mem.size/8))
 
                 if addr < self.sl:
-                    asm += f'.org {hex(addr)}\n'
+                    asm += f'_{hex(addr)}:\n'
                     for b in val:
-                        asm += f'.byte ${hex(b)}\n'
+                        asm += f'\t.byte {hex(b)}\n'
             asm += f'\n'
 
             return asm
