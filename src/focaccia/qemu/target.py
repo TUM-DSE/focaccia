@@ -1,5 +1,6 @@
 import re
 import gdb
+import time
 import socket
 import struct
 import logging
@@ -235,7 +236,9 @@ class GDBServerStateIterator(GDBServerConnector):
         self._first_next = True
         self._thread_num = 1
 
+        self.event_start = time.time()
         events = self._deterministic_log.events()
+        self.event_time = time.time() - self.event_start 
 
         self._signal_frames = []
         self._signal_restorers = {}
@@ -261,6 +264,7 @@ class GDBServerStateIterator(GDBServerConnector):
         }
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
         debug(f'Thread mapping at this point: {event.tid}: {self.current_tid()}')
+
 
     def _handle_syscall(self, event: Event, post_event: Event) -> ReadableProgramState:
         call = event.registers.get(self.arch.get_syscall_reg())
@@ -327,7 +331,9 @@ class GDBServerStateIterator(GDBServerConnector):
             if syscall.sets_signal_restorer:
                 restorer_addr = self._process.read_memory(state.read_register('rsi') + 0x10, 8)
                 restorer_addr = int.from_bytes(restorer_addr, byteorder='little')
-                self._signal_restorers[event.registers['rdi']] = restorer_addr
+                signo = event.registers['rdi']
+                debug(f'System call {syscall.name} sets signal restorer for {signo} = {hex(restorer_addr)}')
+                self._signal_restorers[signo] = restorer_addr
 
         syscall = passthrough_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
@@ -353,8 +359,6 @@ class GDBServerStateIterator(GDBServerConnector):
         if not next_state:
             info(f'System call number {hex(call)} not replayed')
             self._step()
-            if self.is_exited():
-                raise StopIteration
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
         return next_state
@@ -389,6 +393,7 @@ class GDBServerStateIterator(GDBServerConnector):
         sigmask = 0
         uctx = UContext(sigmask=sigmask, mcontext=sc)
         si_signo, si_errno, si_code = struct.unpack_from("<iii", event.signal_number.siginfo, 0)
+        si_signo = 2
         siginfo = SigInfo(si_signo=si_signo, si_errno=si_errno, si_code=si_code,
                           si_pid=post_event.tid, si_uid=0)
 
@@ -436,6 +441,7 @@ class GDBServerStateIterator(GDBServerConnector):
         if not event:
             return None
 
+        self.event_start = time.time()
         if isinstance(event, SyscallEvent):
             post_event = self._events.match_pair(event)
             assert(post_event is not None)
@@ -443,11 +449,13 @@ class GDBServerStateIterator(GDBServerConnector):
             if post_event.tid != self._current_event_id:
                 self._handle_context_switch(event, post_event)
 
+            self.event_time += time.time() - self.event_start
             return self._handle_syscall(event, post_event)
 
         if isinstance(event, SignalEvent):
             post_event = self._events.match_pair(event)
             assert(post_event is not None)
+            self.event_time += time.time() - self.event_start
             return self._handle_signal(event, post_event)
 
         warn(f'Event handling for events of type {event.event_type} not implemented')
@@ -467,8 +475,9 @@ class GDBServerStateIterator(GDBServerConnector):
         if self.is_exited():
             raise StopIteration
 
-        if not state:
+        if state is None:
             # Step
+            debug('State is not provided; stepping')
             state = self._step()
 
         return state
@@ -510,4 +519,8 @@ class GDBServerStateIterator(GDBServerConnector):
             raise NotImplementedError('Scheduling disabled')
         data = thread_number.to_bytes(8, byteorder='little', signed=False)
         self.sock.send(data)
+
+    def __del__(self):
+        print(f'Replay time: {self.event_time}')
+
 

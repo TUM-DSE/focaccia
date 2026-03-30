@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import logging
 
 from pathlib import Path
@@ -157,6 +158,8 @@ class SymbolicTracer:
         self.cross_validate = cross_validate
         self.target = SpeculativeTracer(self.create_debug_target())
 
+        self.validation_time = 0
+
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
         if self.remote is False:
@@ -190,10 +193,12 @@ class SymbolicTracer:
         if self.target.is_exited():
             return
 
+        start = time.time()
         debug('Cross-validating symbolic transforms by comparing actual to predicted values')
         for reg, val in predicted_regs.items():
             conc_val = self.target.read_register(reg)
             if conc_val != val:
+                self.validation_time += time.time() - start
                 raise ValidationError(f'Symbolic execution backend generated false equation for'
                                       f' [{hex(instruction.addr)}]: {instruction}:'
                                       f' Predicted {reg} = {hex(val)}, but the'
@@ -202,12 +207,14 @@ class SymbolicTracer:
         for addr, data in predicted_mems.items():
             conc_data = self.target.read_memory(addr, len(data))
             if conc_data != data:
+                self.validation_time += time.time() - start
                 raise ValidationError(f'Symbolic execution backend generated false equation for'
                                       f' [{hex(instruction.addr)}]: {instruction}: Predicted'
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
                                       f' but the concrete state has value'
                                       f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
                                       f'\nFaulty transformation: {transform}')
+        self.validation_time += time.time() - start
 
     def progress(self, new_pc, step: bool = False) -> int | None:
         self.target.speculate(new_pc)
@@ -226,6 +233,9 @@ class SymbolicTracer:
         :param stop_addr: Address until which to trace.
         """
         # Set up concrete reference state
+        symbolic_time = 0
+
+        exec_start = time.time()
         if self.env.start_address is not None:
             self.target.run_until(self.env.start_address)
 
@@ -248,6 +258,7 @@ class SymbolicTracer:
                 break
 
             # Disassemble instruction at the current PC
+            symbolic_start = time.time()
             tid = self.target.get_current_tid()
             try:
                 instruction = ctx.disassemble(pc)
@@ -263,12 +274,8 @@ class SymbolicTracer:
                     info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
                 except:
                     if self.force:
-                        if alt_disas:
-                            warn(f'[{tid}] Unable to handle instruction {alt_disas} at {hex(pc)} in Miasm.'
-                                 f' Skipping.')
-                        else:
-                            warn(f'[{tid}] Unable to disassemble instruction {hex(pc)}: {err}.'
-                                 f' Skipping.')
+                        warn(f'[{tid}] Unable to disassemble instruction {hex(pc)}: {err}.'
+                             f' Skipping.')
                         self.target.step()
                         continue
                     raise # forward exception
@@ -292,31 +299,48 @@ class SymbolicTracer:
                 warn(f'Unable to run instruction symbolically: {e}')
                 new_pc, modified = None, {}
 
+            symbolic_time += time.time() - symbolic_start
+
             if self.cross_validate and new_pc:
                 # Predict next concrete state.
                 # We verify the symbolic execution backend on the fly for some
                 # additional protection from bugs in the backend.
                 new_pc = int(new_pc)
+                symbolic_start = time.time()
                 transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
-                pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                self.progress(new_pc, step=in_event)
+                symbolic_time += time.time() - symbolic_start
+                try:
+                    pred_regs, pred_mems = self.predict_next_state(instruction, transform)
+                except Exception as e:
+                    if self.force:
+                        warn(f'Cross-validation failed: {e}')
+                        continue
+                    raise
+                finally:
+                    self.progress(new_pc, step=True)
 
                 try:
                     self.validate(instruction, transform, pred_regs, pred_mems)
-                except ValidationError as e:
+                except Exception as e:
                     if self.force:
                         warn(f'Cross-validation failed: {e}')
                         continue
                     raise
             else:
                 new_pc = self.progress(new_pc, step=in_event)
+
+                symbolic_start = time.time()
                 if new_pc is None:
                     transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
                     strace.append(transform)
+                    symbolic_time += time.time() - symbolic_start
                     continue # we're done
                 transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+                symbolic_time += time.time() - symbolic_start
 
+            symbolic_start = time.time()
             strace.append(transform)
+            symbolic_time += time.time() - symbolic_start
 
             if post_event:
                 if post_event.pc == 0:
@@ -326,5 +350,8 @@ class SymbolicTracer:
 
                 debug(f'Completed handling event: {post_event}')
 
+        print(f'Execution time: {self.target.target.exec_time}')
+        print(f'Symbolic time: {symbolic_time}')
+        print(f'Validation time: {self.validation_time}')
         return TraceContainer(strace, self.env)
 

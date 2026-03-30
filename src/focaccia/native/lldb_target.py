@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 
 import lldb
@@ -81,6 +82,8 @@ class LLDBConcreteTarget:
         self.archname = self.determine_arch()
         self.arch = supported_architectures[self.archname]
 
+        self.exec_time = 0
+
     def determine_arch(self):
         archname = self.target.GetPlatform().GetTriple().split('-')[0]
         if archname not in supported_architectures:
@@ -115,19 +118,24 @@ class LLDBConcreteTarget:
 
     def step(self):
         """Step forward by a single instruction."""
+        start_time = time.time()
         thread: lldb.SBThread = self.process.GetSelectedThread()
         thread.StepInstruction(False)
+        self.exec_time += time.time() - start_time
 
     def run_until(self, address: int) -> None:
         """Continue execution until the address is arrived, ignores other breakpoints"""
+        start_time = time.time()
         bp = self.target.BreakpointCreateByAddress(address)
         while True:
             self.run()
             if self.is_exited():
+                self.exec_time += time.time() - start_time
                 return
             if self.read_register('pc') == address:
                 break
         self.target.BreakpointDelete(bp.GetID())
+        self.exec_time += time.time() - start_time
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""

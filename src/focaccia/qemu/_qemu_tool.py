@@ -6,6 +6,7 @@ But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
+import time
 import logging
 import traceback
 import pyroaring
@@ -144,6 +145,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
     cur_state = next(state_iter)
     symb_i = 0
 
+    execution_time = 0
+
     trace = iter(strace)
 
     if logger.isEnabledFor(logging.DEBUG):
@@ -154,6 +157,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
     # Skip to start
     pc = cur_state.read_pc()
     start_addr = strace.env.start_address if strace.env.start_address else pc
+    execution_start = time.time()
     try:
         if pc != start_addr:
             info(f'Executing until starting address {hex(start_addr)}')
@@ -162,10 +166,15 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
         if pc != start_addr:
             raise Exception(f'Unable to reach start address {hex(start_addr)}: {e}')
         raise Exception(f'Unable to trace: {e}')
+    execution_time += time.time() - execution_start
 
     # An online trace matching algorithm.
     info(f'Tracing QEMU between {hex(start_addr)}:{hex(strace.env.stop_address) if strace.env.stop_address else "end"}')
     traced_address_set = pyroaring.BitMap64(strace.addresses)
+
+    tracing_time = 0
+
+    validation_time = 0
 
     transform: Optional[SymbolicTransform] = None
     while True:
@@ -180,42 +189,54 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                 break
 
             while pc != transform.addr:
+                validation_start = time.time()
                 warn(f'PC {hex(pc)} does not match next symbolic reference {hex(transform.addr)}')
 
                 next_i = None
                 if pc in traced_address_set:
                     next_i = find_index(strace.addresses[symb_i+1:], pc)
-                    print(f'Next {next_i}, current {symb_i}')
+                    debug(f'Next {next_i}, current {symb_i}')
+
+                # Otherwise, jump to the next matching symbolic state
+                validation_time += time.time() - validation_start
 
                 # Drop the concrete state if no address in the symbolic trace
                 # matches
                 if next_i is None:
+                    execution_start = time.time()
                     warn(f'Dropping concrete state {hex(pc)}, as no'
                          f' matching instruction can be found in the symbolic'
                          f' reference trace.')
                     cur_state = next(state_iter)
                     pc = cur_state.read_pc()
+                    execution_time += time.time() - execution_start
                     continue
-
-                # Otherwise, jump to the next matching symbolic state
                 try:
+                    validation_start = time.time()
                     trace.skip(next_i)
                     transform = next(trace)
                     symb_i += next_i+1
+                    validation_time += time.time() - validation_start
                 except StopIteration:
                     warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
                     break
 
             assert(cur_state.read_pc() == transform.addr)
             info(f'Validating instruction at address {hex(pc)}')
-            states.append(record_minimal_snapshot(
+            tracing_start = time.time()
+            snapshot = record_minimal_snapshot(
                 states[-1] if states else cur_state,
                 cur_state,
                 matched_transforms[-1] if matched_transforms else transform,
-                transform))
+                transform)
+            states.append(snapshot)
+            tracing_time += time.time() - tracing_start
             symb_i += 1
             matched_transforms.append(transform)
+
+            execution_start = time.time()
             cur_state = next(state_iter)
+            execution_time += time.time() - execution_start
         except StopIteration:
             # TODO: The conditions may test for the same
             if strace.env.stop_address and pc != strace.env.stop_address:
@@ -233,6 +254,10 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
             print(traceback.format_exc())
             raise e
 
+    execution_time -= gdb.event_time
+    print(f'Execution time: {execution_time}')
+    print(f'Tracing time: {tracing_time}')
+    print(f'Mismatch validation time: {validation_time}')
     return states, matched_transforms
 
 def main():
@@ -286,6 +311,7 @@ def main():
     # Verify and print result
     if not args.quiet:
         try:
+            validation_start = time.time()
             res = compare_symbolic(conc_states, matched_transforms)
             if qemu_crash["crashed"]:
                 res.append({
@@ -295,6 +321,8 @@ def main():
                     'errors': qemu_crash["errors"],
                     'snap': qemu_crash["snap"],
                 })
+            validation_time = time.time() - validation_start
+            print(f'Validation time: {validation_time}')
             print_result(res, verbosity[args.error_level])
         except Exception as e:
             raise Exception('Error occured when comparing with symbolic equations: {e}')

@@ -21,7 +21,7 @@ emulated_system_calls = {
     16: SyscallInfo('ioctl', patchup_address_registers=['rdx']),
     17: SyscallInfo('pread64', patchup_address_registers=['rsi']),
     18: SyscallInfo('pwrite64'),
-    19: SyscallInfo('readv', patchup_address_registers=['rsi']),
+    19: SyscallInfo('readv', patchup_address_registers=['rsi', 'r12']), # r12 is a hack
     20: SyscallInfo('writev'),
     21: SyscallInfo('access'),
     22: SyscallInfo('pipe', patchup_address_registers=['rdi']),

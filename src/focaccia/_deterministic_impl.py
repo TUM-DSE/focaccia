@@ -180,6 +180,8 @@ def parse_aarch64_registers(enc_regs: bytes, order: str='little', signed: bool=F
 class DeterministicLog:
     def __init__(self, log_dir: str):
         self.base_directory = log_dir
+        if log_dir is None:
+            self.base_directory = ""
 
     def _get_file(self, file_name: str) -> str | None:
         candidate = os.path.join(self.base_directory, file_name)
