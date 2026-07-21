@@ -283,36 +283,154 @@
       ];
     };
 
-    staticUnitChecks = pkgs.stdenv.mkDerivation {
+    mkStaticUnitCheck = { name, ruffTargets, pytestTargets }:
+      pkgs.stdenv.mkDerivation {
+        inherit name;
+        src = staticUnitSource;
+
+        doCheck = true;
+        dontBuild = true;
+        nativeCheckInputs = [ pythonStaticUnitEnv pkgs.nodejs ];
+
+        checkPhase = ''
+          set -euo pipefail
+          export REPO_ROOT="$PWD"
+
+          ruff check ${pkgs.lib.escapeShellArgs ruffTargets}
+          python -m pyright
+          python -m pytest -q -m 'not integration' \
+            ${pkgs.lib.escapeShellArgs pytestTargets}
+
+          touch "$out"
+        '';
+
+        env = uvEnv;
+      };
+
+    staticUnitChecks = mkStaticUnitCheck {
       name = "static-unit-checks";
-      src = staticUnitSource;
+      ruffTargets = [
+        "src/focaccia/__init__.py"
+        "src/focaccia/arch/__init__.py"
+        "src/focaccia/arch/arch.py"
+        "src/focaccia/arch/aarch64.py"
+        "src/focaccia/cli.py"
+        "src/focaccia/compare.py"
+        "src/focaccia/match.py"
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/parser.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/reproducer.py"
+        "src/focaccia/snapshot.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "src/focaccia/trace.py"
+        "tests"
+      ];
+      pytestTargets = [ "tests" ];
+    };
 
-      doCheck = true;
-      dontBuild = true;
-      nativeCheckInputs = [ pythonStaticUnitEnv pkgs.nodejs ];
+    registerApiMigrationCheck = mkStaticUnitCheck {
+      name = "register-api-migration";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_api_migrations.py"
+        "tests/test_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_snapshot.py"
+        "tests/test_api_migrations.py"
+      ];
+    };
 
-      checkPhase = ''
-        set -euo pipefail
-        export REPO_ROOT="$PWD"
+    cliImportsCheck = mkStaticUnitCheck {
+      name = "cli-imports";
+      ruffTargets = [
+        "src/focaccia/cli.py"
+        "src/focaccia/reproducer.py"
+        "tests/test_cli.py"
+        "tests/test_core_imports.py"
+      ];
+      pytestTargets = [
+        "tests/test_core_imports.py"
+        "tests/test_cli.py"
+      ];
+    };
 
-        ruff check \
-          src/focaccia/__init__.py \
-          src/focaccia/arch/__init__.py \
-          src/focaccia/arch/arch.py \
-          src/focaccia/arch/aarch64.py \
-          src/focaccia/snapshot.py \
-          src/focaccia/trace.py \
-          src/focaccia/parser.py \
-          src/focaccia/compare.py \
-          src/focaccia/match.py \
-          tests
-        python -m pyright
-        python -m pytest -q -m 'not integration' tests
+    nativeReadPcCheck = mkStaticUnitCheck {
+      name = "native-read-pc";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "read_pc or speculative"
+      ];
+    };
 
-        touch "$out"
-      '';
+    localTargetSelectionCheck = mkStaticUnitCheck {
+      name = "local-target-selection";
+      ruffTargets = [
+        "src/focaccia/cli.py"
+        "src/focaccia/reproducer.py"
+        "src/focaccia/native/tracer.py"
+        "tests/test_cli.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_cli.py"
+        "tests/test_native_api.py"
+        "-k"
+        "local_target"
+      ];
+    };
 
-      env = uvEnv;
+    disassemblyFallbackCheck = mkStaticUnitCheck {
+      name = "disassembly-fallback";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "disassembly_fallback"
+      ];
+    };
+
+    remoteTargetSelectionCheck = mkStaticUnitCheck {
+      name = "remote-target-selection";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "remote_target or remote_default"
+      ];
+    };
+
+    oracleProgramRoutingCheck = mkStaticUnitCheck {
+      name = "oracle-program-routing";
+      ruffTargets = [
+        "src/focaccia/cli.py"
+        "src/focaccia/native/tracer.py"
+        "tests/test_cli.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_cli.py"
+        "tests/test_native_api.py"
+        "-k"
+        "oracle_program or missing_deterministic_log"
+      ];
     };
 
   in rec {
@@ -426,6 +544,13 @@
     checks = {
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
+      register-api-migration = registerApiMigrationCheck;
+      cli-imports = cliImportsCheck;
+      native-read-pc = nativeReadPcCheck;
+      local-target-selection = localTargetSelectionCheck;
+      disassembly-fallback = disassemblyFallbackCheck;
+      remote-target-selection = remoteTargetSelectionCheck;
+      oracle-program-routing = oracleProgramRoutingCheck;
     };
   });
 }

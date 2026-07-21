@@ -132,7 +132,7 @@ class LLDBConcreteTarget:
             if self.is_exited():
                 self.exec_time += time.time() - start_time
                 return
-            if self.read_register('pc') == address:
+            if self.read_pc() == address:
                 break
         self.target.BreakpointDelete(bp.GetID())
         self.exec_time += time.time() - start_time
@@ -145,7 +145,7 @@ class LLDBConcreteTarget:
         for regname in self.arch.regnames:
             try:
                 conc_val = self.read_register(regname)
-                state.set_register(regname, conc_val)
+                state.write_register(regname, conc_val)
             except KeyError:
                 pass
             except ConcreteRegisterError:
@@ -162,6 +162,12 @@ class LLDBConcreteTarget:
                 pass
 
         return state
+
+    def _canonical_register_name(self, regname: str) -> str:
+        canonical = self.arch.to_regname(regname)
+        if canonical is None:
+            raise ConcreteRegisterError(f'Not a register name: {regname}')
+        return canonical
 
     def _get_register(self, regname: str) -> lldb.SBValue:
         """Find a register by name.
@@ -208,15 +214,22 @@ class LLDBConcreteTarget:
         flags_val = self._get_register(flags_reg).GetValueAsUnsigned()
         return self.flag_register_decompose[self.archname](flags_val)
 
+    def read_pc(self) -> int:
+        """Read the architecture's canonical program counter."""
+        return self.read_register('PC')
+
     def read_register(self, regname: str) -> int:
         """Read the value of a register.
+
+        Register aliases and case are normalized before accessing LLDB.
 
         :raise ConcreteRegisterError: If `regname` is not a valid register name
                                       or the target is otherwise unable to read
                                       the register's value.
         """
+        canonical = self._canonical_register_name(regname)
         try:
-            reg = self._get_register(regname)
+            reg = self._get_register(canonical.lower())
             assert(reg.IsValid())
             if reg.size > 8:  # reg is a vector register
                 reg.data.byte_order = lldb.eByteOrderLittle
@@ -228,9 +241,9 @@ class LLDBConcreteTarget:
             return reg.GetValueAsUnsigned()
         except ConcreteRegisterError as err:
             flags = self.read_flags()
-            if regname in flags:
-                return flags[regname]
-            reader = self.arch.get_reg_reader(regname)
+            if canonical in flags:
+                return flags[canonical]
+            reader = self.arch.get_reg_reader(canonical)
             if reader:
                 return reader()
             raise ConcreteRegisterError(
@@ -244,7 +257,8 @@ class LLDBConcreteTarget:
                                       or the target is otherwise unable to set
                                       the register's value.
         """
-        reg = self._get_register(regname)
+        canonical = self._canonical_register_name(regname)
+        reg = self._get_register(canonical.lower())
         error = lldb.SBError()
         reg.SetValueFromCString(hex(value), error)
         if not error.success:
@@ -327,7 +341,7 @@ class LLDBConcreteTarget:
         return inst
 
     def get_next_basic_block(self) -> list[lldb.SBInstruction]:
-        return self.get_basic_block(self.read_register("pc"))
+        return self.get_basic_block(self.read_pc())
 
     def get_symbol(self, addr: int) -> lldb.SBSymbol:
         """Returns the symbol that belongs to the addr
@@ -370,7 +384,7 @@ class LLDBConcreteTarget:
 class LLDBLocalTarget(LLDBConcreteTarget):
     def __init__(self,
                  executable: str,
-                 argv: list[str] = [],
+                 argv: list[str] | None = None,
                  envp: list[str] | None = None):
         """Construct an LLDB local target. Stop at entry.
 
@@ -381,6 +395,8 @@ class LLDBLocalTarget(LLDBConcreteTarget):
                      `os.environ` if `None`.
         :raises RuntimeError: If the process is unable to launch.
         """
+        if argv is None:
+            argv = []
         if envp is None:
             envp = [f'{k}={v}' for k, v in os.environ.items()]
 

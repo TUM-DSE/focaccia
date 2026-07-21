@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import sys
 import argparse
 import logging
 
@@ -9,7 +8,7 @@ from focaccia.trace import TraceEnvironment
 from focaccia.native.tracer import SymbolicTracer
 from focaccia.deterministic import DeterministicLog
 
-def main():
+def make_argparser() -> argparse.ArgumentParser:
     prog = argparse.ArgumentParser()
     prog.description = 'Trace an executable concolically to capture symbolic' \
                        ' transformations among instructions.'
@@ -24,7 +23,7 @@ def main():
                       action='store_true',
                       help='Cross-validate symbolic equations with concrete values')
     prog.add_argument('-r', '--remote',
-                      default=False,
+                      default=None,
                       help='Remote target to trace (e.g. 127.0.0.1:12345)')
     prog.add_argument('-l', '--deterministic-log',
                       help='Path of the directory storing the deterministic log produced by RR')
@@ -55,7 +54,10 @@ def main():
                       default='json',
                       choices=['json', 'msgpack'],
                       help='Symbolic trace output format')
-    args = prog.parse_args()
+    return prog
+
+def main():
+    args = make_argparser().parse_args()
 
     if args.debug:
         logging.basicConfig(level=logging.DEBUG) # will be override by --log-level
@@ -67,10 +69,12 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    detlog = DeterministicLog(args.deterministic_log)
-    if args.deterministic_log and detlog.base_directory is None:
-        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
-                                   'Focaccia built without deterministic log support')
+    detlog = None
+    if args.deterministic_log:
+        detlog = DeterministicLog(args.deterministic_log)
+        if detlog.base_directory is None:
+            raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
+                                      'Focaccia built without deterministic log support')
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), 
                            nondeterminism_log=detlog,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 import logging
 
@@ -12,7 +11,7 @@ from focaccia.utils import timebound, TimeoutError
 from focaccia.trace import Trace, TraceContainer, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
-from focaccia.symbolic import SymbolicTransform, DisassemblyContext, run_instruction
+from focaccia.symbolic import Instruction, SymbolicTransform, DisassemblyContext, run_instruction
 from focaccia.deterministic import Event, EventMatcher
 
 from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
@@ -27,6 +26,39 @@ logging.getLogger('asmblock').setLevel(logging.CRITICAL)
 
 class ValidationError(Exception):
     pass
+
+class DisassemblyError(Exception):
+    def __init__(self, pc: int, primary_error: Exception, fallback_error: Exception):
+        self.pc = pc
+        self.primary_error = primary_error
+        self.fallback_error = fallback_error
+        super().__init__(
+            f'Unable to disassemble instruction at {hex(pc)}. '
+            f'Miasm failed with: {primary_error}. '
+            f'LLDB fallback failed with: {fallback_error}.'
+        )
+
+def _disassemble_instruction(ctx: DisassemblyContext,
+                             target: LLDBConcreteTarget,
+                             pc: int) -> Instruction:
+    try:
+        return ctx.disassemble(pc)
+    except Exception as primary_error:
+        try:
+            disassembly = target.get_disassembly(pc)
+            return Instruction.from_string(
+                disassembly,
+                ctx.arch,
+                pc,
+                target.get_instruction_size(pc),
+            )
+        except Exception as fallback_error:
+            raise DisassemblyError(pc, primary_error, fallback_error) from fallback_error
+
+def _events_for_environment(env: TraceEnvironment) -> list[Event]:
+    if env.detlog is None:
+        return []
+    return env.detlog.events()
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     # TODO: match the rest of the state to be sure
@@ -47,7 +79,7 @@ class SpeculativeTracer(ReadableProgramState):
     def __init__(self, target: LLDBConcreteTarget):
         super().__init__(target.arch)
         self.target = target
-        self.pc = target.read_register('pc')
+        self.pc = target.read_pc()
         self.speculative_pc: int | None = None
         self.speculative_count: int = 0
         
@@ -58,7 +90,7 @@ class SpeculativeTracer(ReadableProgramState):
         if new_pc is None:
             self.progress_execution()
             self.target.step()
-            self.pc = self.target.read_register('pc')
+            self.pc = self.target.read_pc()
             self.speculative_pc = None
             self.speculative_count = 0
             return
@@ -92,7 +124,7 @@ class SpeculativeTracer(ReadableProgramState):
         if self.target.is_exited():
             return
         self.target.step()
-        self.pc = self.target.read_register('pc')
+        self.pc = self.target.read_pc()
 
     def _cache(self, name: str, value):
         self.read_cache[name] = value
@@ -149,9 +181,9 @@ class SymbolicTracer:
     """
     def __init__(self, 
                  env: TraceEnvironment, 
-                 remote: str | None=None,
-                 force: bool=False,
-                 cross_validate: bool=False):
+                 remote: str | None = None,
+                 force: bool = False,
+                 cross_validate: bool = False):
         self.env = env
         self.force = force
         self.remote = remote
@@ -162,7 +194,7 @@ class SymbolicTracer:
 
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
-        if self.remote is False:
+        if self.remote is None:
             debug(f'Launching local debug target {binary} {self.env.argv}')
             debug(f'Environment: {self.env}')
             return LLDBLocalTarget(binary, self.env.argv, self.env.envp)
@@ -242,7 +274,7 @@ class SymbolicTracer:
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
 
-        event_matcher = EventMatcher(self.env.detlog.events(), match_event, self.target)
+        event_matcher = EventMatcher(_events_for_environment(self.env), match_event, self.target)
         if logger.isEnabledFor(logging.DEBUG):
             debug('Tracing program with the following non-deterministic events')
             for event in event_matcher.events:
@@ -261,24 +293,14 @@ class SymbolicTracer:
             symbolic_start = time.time()
             tid = self.target.get_current_tid()
             try:
-                instruction = ctx.disassemble(pc)
+                instruction = _disassemble_instruction(ctx, self.target, pc)
                 info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
-            except:
-                err = sys.exc_info()[1]
-
-                # Try to recovery by using the LLDB disassembly instead
-                try:
-                    alt_disas = self.target.get_disassembly(pc)
-                    instruction = Instruction.from_string(alt_disas, ctx.arch, pc,
-                                                         self.target.get_instruction_size(pc))
-                    info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
-                except:
-                    if self.force:
-                        warn(f'[{tid}] Unable to disassemble instruction {hex(pc)}: {err}.'
-                             f' Skipping.')
-                        self.target.step()
-                        continue
-                    raise # forward exception
+            except DisassemblyError as err:
+                if self.force:
+                    warn(f'[{tid}] {err} Skipping.')
+                    self.target.step()
+                    continue
+                raise
 
             event = event_matcher.match(self.target)
             post_event = event_matcher.match_pair(event)

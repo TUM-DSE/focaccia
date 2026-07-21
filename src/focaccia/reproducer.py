@@ -1,5 +1,5 @@
+from typing import Callable, Protocol
 
-from .lldb_target import LLDBConcreteTarget
 from .snapshot import ProgramState
 from .symbolic import SymbolicTransform, eval_symbol
 from .arch import x86
@@ -11,10 +11,27 @@ class ReproducerBasicBlockError(Exception):
 class ReproducerRegisterError(Exception):
     pass
 
-class Reproducer():
-    def __init__(self, oracle: str, argv: str, snap: ProgramState, sym: SymbolicTransform) -> None:
+class _ReproducerTarget(Protocol):
+    def get_basic_block_inst(self, addr: int) -> list[str]: ...
+    def get_symbol_limit(self) -> int: ...
 
-        target = LLDBConcreteTarget(oracle)
+_TargetFactory = Callable[[str, list[str]], _ReproducerTarget]
+
+def _make_local_target(oracle: str, argv: list[str]) -> _ReproducerTarget:
+    from .native.lldb_target import LLDBLocalTarget
+
+    return LLDBLocalTarget(oracle, argv)
+
+class Reproducer():
+    def __init__(self,
+                 oracle: str,
+                 argv: list[str],
+                 snap: ProgramState,
+                 sym: SymbolicTransform,
+                 target_factory: _TargetFactory | None = None) -> None:
+        if target_factory is None:
+            target_factory = _make_local_target
+        target = target_factory(oracle, argv)
 
         self.pc = snap.read_register("pc")
         self.bb = target.get_basic_block_inst(self.pc)

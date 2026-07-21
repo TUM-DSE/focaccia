@@ -101,7 +101,7 @@ def parse_snapshots(json_stream: TextIO) -> TraceContainer[ProgramState]:
     for snapshot in _get_or_throw(json_data, 'snapshots'):
         state = ProgramState(arch)
         for reg, val in _get_or_throw(snapshot, 'registers').items():
-            state.set_register(reg, val)
+            state.write_register(reg, val)
         for mem in _get_or_throw(snapshot, 'memory'):
             start, end = _get_or_throw(mem, 'range')
             data = base64.b64decode(_get_or_throw(mem, 'data'))
@@ -197,7 +197,7 @@ def _parse_qemu_line(line: str, cur_state: ProgramState):
             value = value.replace(' ', '')
             regname = cur_state.arch.to_regname(regname)
             if regname is not None:
-                cur_state.set_register(regname, int(value, 16))
+                cur_state.write_register(regname, int(value, 16))
 
 def parse_arancini(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
     aliases = {
@@ -222,7 +222,7 @@ def parse_arancini(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
             regname, value = split
             regname = arch.to_regname(aliases.get(regname, regname))
             if regname is not None:
-                states[-1].set_register(regname, int(value, 16))
+                states[-1].write_register(regname, int(value, 16))
 
     return TraceContainer(states, _make_unknown_env())
 
@@ -231,9 +231,9 @@ def parse_box64(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
         flags = ['O', 'D', 'S', 'Z', 'A', 'P', 'C']
         for i, flag in enumerate(flags):
             if flag == flags_dump[i]: # Flag is set
-                state.set_register(arch.to_regname(flag + 'F'), 1)
+                state.write_register(arch.to_regname(flag + 'F'), 1)
             elif '-' == flags_dump[i]: # Flag is not set
-                state.set_register(arch.to_regname(flag + 'F'), 0)
+                state.write_register(arch.to_regname(flag + 'F'), 0)
 
     trace_string = stream.read()
 
@@ -253,7 +253,7 @@ def parse_box64(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
 
             regname = arch.to_regname(regname)
             if regname is not None:
-                states[-1].set_register(regname, int(value, 16))
+                states[-1].write_register(regname, int(value, 16))
 
     return TraceContainer(states, _make_unknown_env())
 

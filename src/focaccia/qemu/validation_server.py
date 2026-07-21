@@ -136,12 +136,12 @@ class PluginProgramState(ProgramState):
             _flags = self.flag_register_decompose[self.arch.archname](val)
             if reg in _flags:
                 if not from_cache:
-                    self.set_register(reg, _flags[reg])
+                    self.write_register(reg, _flags[reg])
                 return _flags[reg]
             raise RegisterAccessError(f'Unable to access flag {reg}.')
 
         if not from_cache:
-            self.set_register(reg, val)
+            self.write_register(reg, val)
         return val & reg_acc.mask >> reg_acc.start
 
     def read_memory(self, addr: int, size: int) -> bytes:
@@ -281,9 +281,9 @@ def record_minimal_snapshot(prev_state: ProgramState,
         for regname in regs:
             try:
                 regval = cur_state.read_register(regname)
-                out_state.set_register(regname, regval)
+                out_state.write_register(regname, regval)
             except RegisterAccessError:
-                out_state.set_register(regname, 0)
+                out_state.write_register(regname, 0)
         for mem in mems:
             assert(mem.size % 8 == 0)
             addr = eval_symbol(mem.ptr, prev_state)
@@ -294,7 +294,7 @@ def record_minimal_snapshot(prev_state: ProgramState,
                 pass
 
     state = ProgramState(cur_transform.arch)
-    state.set_register('pc', cur_transform.addr)
+    state.write_register('pc', cur_transform.addr)
 
     set_values(prev_transform.changed_regs.keys(),
                get_written_addresses(prev_transform),
