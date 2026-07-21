@@ -2,7 +2,11 @@
 
 from collections.abc import Callable
 
-from .arch import Arch, RegisterDescription as _Reg
+from .arch import (
+    Arch,
+    ConstantRegisterDescription as _ConstReg,
+    RegisterDescription as _Reg,
+)
 
 archname = 'aarch64'
 
@@ -39,7 +43,6 @@ registers = [
     _Reg(('X29', 0, 64), ('W29', 0, 32)),
     _Reg(('X30', 0, 64), ('W30', 0, 32), ('LR', 0, 64)),
 
-    _Reg(('RZR', 0, 64), ('XZR', 0, 64), ('WZR', 0, 32)),
     _Reg(('SP', 0, 64), ('RSP', 0, 64)),
     _Reg(('PC', 0, 64)),
 
@@ -76,7 +79,7 @@ registers = [
     _Reg(('V30', 0, 128), ('D30', 0, 64), ('S30', 0, 32), ('H30', 0, 16), ('B30', 0, 8)),
     _Reg(('V31', 0, 128), ('D31', 0, 64), ('S31', 0, 32), ('H31', 0, 16), ('B31', 0, 8)),
 
-    _Reg(('CPSR', 0, 64),
+    _Reg(('CPSR', 0, 32),
          ('N',    31, 32),
          ('Z',    30, 31),
          ('C',    29, 30),
@@ -96,7 +99,11 @@ registers = [
     _Reg(('TPIDR', 0, 64)),
 ]
 
-# Names of registers in the architecture
+constant_registers = [
+    _ConstReg(0, ('XZR', 0, 64), ('WZR', 0, 32)),
+]
+
+# Names of mutable registers in the architecture
 regnames = [desc.base.base_reg for desc in registers]
 
 regname_aliases = {
@@ -132,36 +139,36 @@ regname_aliases = {
     'Q29': 'V29',
     'Q30': 'V30',
     'Q31': 'V31',
+    'RZR': 'XZR',
     'TPIDR_EL0': 'TPIDR',
     'DCZID_EL0': 'DCZID',
 }
 
+cpsr_field_names = [
+    'N', 'Z', 'C', 'V', 'Q', 'SSBS', 'PAN', 'DIT', 'GE',
+    'E', 'A', 'I', 'F', 'M',
+]
+
 def decompose_cpsr(cpsr: int) -> dict[str, int]:
-    """Extract individual flag values from the CPSR register."""
-    return {
-        'N':    (cpsr & (1 << 31)) != 0,
-        'Z':    (cpsr & (1 << 30)) != 0,
-        'C':    (cpsr & (1 << 29)) != 0,
-        'V':    (cpsr & (1 << 28)) != 0,
-        'Q':    (cpsr & (1 << 27)) != 0,
-        # Reserved: [26:24]
-        'SSBS': (cpsr & (1 << 23)) != 0,
-        'PAN':  (cpsr & (1 << 22)) != 0,
-        'DIT':  (cpsr & (1 << 21)) != 0,
-        # Reserved: [20]
-        'GE':   (cpsr & (0b1111 << 16)) != 0,
-        # Reserved: [15:10]
-        'E':    (cpsr & (1 << 9)) != 0,
-        'A':    (cpsr & (1 << 8)) != 0,
-        'I':    (cpsr & (1 << 7)) != 0,
-        'F':    (cpsr & (1 << 6)) != 0,
-        # Reserved: [5:4]
-        'M':    (cpsr & 0b1111) != 0,
-    }
+    """Decompose CPSR fields using the architecture register accessors."""
+    return ArchAArch64('little').decompose_register('CPSR', cpsr, cpsr_field_names)
+
+def compose_cpsr(fields: dict[str, int]) -> int:
+    """Compose CPSR fields using their declared bit widths."""
+    values = {name: fields.get(name, 0) for name in cpsr_field_names}
+    return ArchAArch64('little').compose_register('CPSR', values)
 
 class ArchAArch64(Arch):
     def __init__(self, endianness: Arch.Endianness):
-        super().__init__(archname, registers, 64, endianness)
+        suffix = 'l' if endianness == 'little' else 'b'
+        super().__init__(
+            archname,
+            registers,
+            64,
+            endianness,
+            serialized_name=f'{archname}{suffix}',
+            constant_registers=constant_registers,
+        )
         self.ignored_regs = [
             'N', 'Z', 'C', 'V', 'Q', 'SSBS', 'PAN', 'DIT', 'GE',
             'E', 'A', 'I', 'F', 'M'

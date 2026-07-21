@@ -1,11 +1,8 @@
-import re
 import gdb
 import time
 import socket
 import struct
 import logging
-from typing import Optional
-
 from focaccia.deterministic import (
     DeterministicLog,
     Event,
@@ -21,7 +18,11 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.arch import supported_architectures, Arch
-from focaccia.qemu.deterministic import emulated_system_calls, passthrough_system_calls
+from focaccia.qemu.deterministic import (
+    emulated_system_calls,
+    passthrough_system_calls,
+    syscall_number_registers,
+)
 from focaccia.qemu.x86 import SigContext, SigInfo, UContext, SigFrame
 
 logger = logging.getLogger('focaccia-qemu-target')
@@ -82,6 +83,12 @@ class GDBProgramState(ProgramState):
     }
 
     def read_register(self, reg: str) -> int:
+        if self.arch.is_constant_register(reg):
+            value = self.arch.get_constant_register_value(reg)
+            if value is None:
+                raise RuntimeError(f'Missing value for constant register {reg}.')
+            return value
+
         if reg == 'RFLAGS':
             reg = 'EFLAGS'
 
@@ -114,11 +121,7 @@ class GDBProgramState(ProgramState):
 
     def read_memory(self, addr: int, size: int) -> bytes:
         try:
-            mem = self._proc.read_memory(addr, size).tobytes()
-            if self.arch.endianness == 'little':
-                return mem
-            else:
-                return bytes(reversed(mem))  # Convert to big endian
+            return self._proc.read_memory(addr, size).tobytes()
         except gdb.MemoryError as err:
             raise MemoryAccessError(addr, size, str(err))
 
@@ -266,8 +269,17 @@ class GDBServerStateIterator(GDBServerConnector):
         debug(f'Thread mapping at this point: {event.tid}: {self.current_tid()}')
 
 
+    def _syscall_number_register(self) -> str:
+        try:
+            return syscall_number_registers[self.arch.archname]
+        except KeyError as error:
+            raise NotImplementedError(
+                f'Syscall replay is unsupported for {self.arch.serialized_name}.'
+            ) from error
+
     def _handle_syscall(self, event: Event, post_event: Event) -> ReadableProgramState:
-        call = event.registers.get(self.arch.get_syscall_reg())
+        syscall_reg = self._syscall_number_register()
+        call = event.registers.get(syscall_reg)
         state = self.current_state()
         next_state = None
 
@@ -278,7 +290,7 @@ class GDBServerStateIterator(GDBServerConnector):
             self.skip(post_event.pc)
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-            patchup_regs = [self.arch.get_syscall_reg(), 'rip', *(syscall.patchup_registers or [])]
+            patchup_regs = [syscall_reg, 'rip', *(syscall.patchup_registers or [])]
             for reg in patchup_regs:
                 gdb.execute(f'set ${reg} = {post_event.registers.get(reg)}', to_string=True)
                 next_state.write_register(reg, post_event.registers.get(reg))
@@ -345,8 +357,8 @@ class GDBServerStateIterator(GDBServerConnector):
 
             # Check if new thread was created
             if syscall.creates_thread:
-                new_tid = self.current_state().read_register(self.arch.get_syscall_reg())
-                event_new_tid = post_event.registers[self.arch.get_syscall_reg()]
+                new_tid = self.current_state().read_register(syscall_reg)
+                event_new_tid = post_event.registers[syscall_reg]
                 self._thread_count += 1
                 self._thread_map[event_new_tid] = (new_tid, self._thread_count)
                 info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event_new_tid)}')

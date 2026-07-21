@@ -159,7 +159,7 @@ class SymbolicTransform:
             else:
                 assert(isinstance(dst, ExprId))
                 regname = arch.to_regname(dst.name)
-                if regname is not None:
+                if regname is not None and not arch.is_constant_register(regname):
                     self.changed_regs[regname] = expr
 
     def concat(self, other: SymbolicTransform) -> SymbolicTransform:
@@ -404,7 +404,7 @@ class SymbolicTransform:
         instrs = [encode_inst(inst) for inst in self.instructions]
         instrs = [inst for inst in instrs if inst is not None]
         return {
-            'arch': self.arch.archname,
+            'arch': self.arch.serialized_name,
             'tid': self.tid,
             'from_addr': self.range[0],
             'to_addr': self.range[1],

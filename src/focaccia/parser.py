@@ -120,15 +120,15 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
 
     arch = snapshots[0].arch
     res = {
-        'architecture': arch.archname,
+        'architecture': arch.serialized_name,
         'env': snapshots.env.to_json(),
         'snapshots': []
     }
     for snapshot in snapshots:
         assert(snapshot.arch == arch)
-        regs = {r: v for r, v in snapshot.regs.items() if v is not None}
+        regs = snapshot.known_register_values(include_partial=True)
         mem = []
-        for addr, data in snapshot.mem._pages.items():
+        for addr, data in snapshot.mem.known_ranges():
             mem.append({
                 'range': [addr, addr + len(data)],
                 'data': base64.b64encode(data).decode('ascii')

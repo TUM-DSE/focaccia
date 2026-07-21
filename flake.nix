@@ -314,15 +314,19 @@
         "src/focaccia/arch/__init__.py"
         "src/focaccia/arch/arch.py"
         "src/focaccia/arch/aarch64.py"
+        "src/focaccia/arch/x86.py"
         "src/focaccia/cli.py"
         "src/focaccia/compare.py"
         "src/focaccia/match.py"
         "src/focaccia/native/lldb_target.py"
         "src/focaccia/native/tracer.py"
         "src/focaccia/parser.py"
+        "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/target.py"
         "src/focaccia/qemu/validation_server.py"
         "src/focaccia/reproducer.py"
         "src/focaccia/snapshot.py"
+        "src/focaccia/symbolic.py"
         "src/focaccia/tools/capture_transforms.py"
         "src/focaccia/trace.py"
         "tests"
@@ -430,6 +434,108 @@
         "tests/test_native_api.py"
         "-k"
         "oracle_program or missing_deterministic_log"
+      ];
+    };
+
+    architectureIdentityCheck = mkStaticUnitCheck {
+      name = "architecture-identity";
+      ruffTargets = [
+        "src/focaccia/arch"
+        "src/focaccia/parser.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_architecture.py"
+        "tests/test_state_serialization.py"
+      ];
+      pytestTargets = [
+        "tests/test_architecture.py"
+        "tests/test_state_serialization.py"
+        "-k"
+        "identity or serialization"
+      ];
+    };
+
+    sparseMemoryValidityCheck = mkStaticUnitCheck {
+      name = "sparse-memory-validity";
+      ruffTargets = [
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/snapshot.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_sparse_memory.py"
+        "tests/test_state_serialization.py"
+      ];
+      pytestTargets = [
+        "tests/test_plugin_state_validity.py"
+        "tests/test_sparse_memory.py"
+        "tests/test_state_serialization.py"
+      ];
+    };
+
+    registerValidityCheck = mkStaticUnitCheck {
+      name = "register-validity";
+      ruffTargets = [
+        "src/focaccia/arch"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/snapshot.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_plugin_state_validity.py"
+        "tests/test_snapshot.py"
+      ];
+    };
+
+    multibitFlagsCheck = mkStaticUnitCheck {
+      name = "multibit-flags";
+      ruffTargets = [
+        "src/focaccia/arch/aarch64.py"
+        "src/focaccia/arch/x86.py"
+        "tests/test_architecture.py"
+      ];
+      pytestTargets = [
+        "tests/test_architecture.py"
+        "-k"
+        "multibit"
+      ];
+    };
+
+    aarch64RegisterSemanticsCheck = mkStaticUnitCheck {
+      name = "aarch64-register-semantics";
+      ruffTargets = [
+        "src/focaccia/arch/aarch64.py"
+        "src/focaccia/snapshot.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_architecture.py"
+      ];
+      pytestTargets = [
+        "tests/test_architecture.py"
+        "-k"
+        "aarch64_zero or aarch64_status or symbolic_writes_to_aarch64_zero"
+      ];
+    };
+
+    memoryByteOrderCheck = mkStaticUnitCheck {
+      name = "memory-byte-order";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_memory_byte_order.py"
+      ];
+      pytestTargets = [ "tests/test_memory_byte_order.py" ];
+    };
+
+    syscallModelBoundaryCheck = mkStaticUnitCheck {
+      name = "syscall-model-boundary";
+      ruffTargets = [
+        "src/focaccia/arch"
+        "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_architecture.py"
+      ];
+      pytestTargets = [
+        "tests/test_architecture.py"
+        "-k"
+        "syscall_replay_policy"
       ];
     };
 
@@ -551,6 +657,13 @@
       disassembly-fallback = disassemblyFallbackCheck;
       remote-target-selection = remoteTargetSelectionCheck;
       oracle-program-routing = oracleProgramRoutingCheck;
+      architecture-identity = architectureIdentityCheck;
+      sparse-memory-validity = sparseMemoryValidityCheck;
+      register-validity = registerValidityCheck;
+      multibit-flags = multibitFlagsCheck;
+      aarch64-register-semantics = aarch64RegisterSemanticsCheck;
+      memory-byte-order = memoryByteOrderCheck;
+      syscall-model-boundary = syscallModelBoundaryCheck;
     };
   });
 }

@@ -1,6 +1,6 @@
 """Architecture-specific configuration."""
 
-from .arch import Arch, RegisterDescription as _Reg, SyscallInfo as _Sc
+from .arch import Arch, RegisterDescription as _Reg
 
 archname = 'x86_64'
 
@@ -113,75 +113,19 @@ regname_aliases = {
     'NF': 'SF',   # negative flag == sign flag in Miasm?
 }
 
+rflag_names = [
+    'CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',
+    'RF', 'VM', 'AC', 'VIF', 'VIP', 'ID',
+]
+
 def decompose_rflags(rflags: int) -> dict[str, int]:
-    """Decompose the RFLAGS register's value into its separate flags.
-
-    Uses flag name abbreviation conventions from
-    `https://en.wikipedia.org/wiki/FLAGS_register`.
-
-    :param rflags: The RFLAGS register value.
-    :return: A dictionary mapping Miasm's flag names to their values.
-    """
-    return {
-        # FLAGS
-        'CF':     (rflags & 0x0001) != 0,
-                          # 0x0002   reserved
-        'PF':     (rflags & 0x0004) != 0,
-                          # 0x0008   reserved
-        'AF':     (rflags & 0x0010) != 0,
-                          # 0x0020   reserved
-        'ZF':     (rflags & 0x0040) != 0,
-        'SF':     (rflags & 0x0080) != 0,
-        'TF':     (rflags & 0x0100) != 0,
-        'IF':     (rflags & 0x0200) != 0,
-        'DF':     (rflags & 0x0400) != 0,
-        'OF':     (rflags & 0x0800) != 0,
-        'IOPL':   (rflags & 0x3000) != 0,
-        'NT':     (rflags & 0x4000) != 0,
-
-        # EFLAGS
-        'RF':     (rflags & 0x00010000) != 0,
-        'VM':     (rflags & 0x00020000) != 0,
-        'AC':     (rflags & 0x00040000) != 0,
-        'VIF':    (rflags & 0x00080000) != 0,
-        'VIP':    (rflags & 0x00100000) != 0,
-        'ID':     (rflags & 0x00200000) != 0,
-    }
+    """Decompose RFLAGS fields using the architecture register accessors."""
+    return ArchX86().decompose_register('RFLAGS', rflags, rflag_names)
 
 def compose_rflags(rflags: dict[str, int]) -> int:
-    """Compose separate flags into RFLAGS register's value.
-
-    Uses flag name abbreviation conventions from
-    `https://en.wikipedia.org/wiki/FLAGS_register`.
-
-    :param rflags: A dictionary mapping Miasm's flag names to their alues.
-    :return: The RFLAGS register value.
-    """
-    return (
-        # FLAGS
-        (0x0001 if rflags.get('CF', 0)   else 0) |
-                        # 0x0002   reserved
-        (0x0004 if rflags.get('PF', 0)   else 0) |
-                        # 0x0008   reserved
-        (0x0010 if rflags.get('AF', 0)   else 0) |
-                        # 0x0020   reserved
-        (0x0040 if rflags.get('ZF', 0)   else 0) |
-        (0x0080 if rflags.get('SF', 0)   else 0) |
-        (0x0100 if rflags.get('TF', 0)   else 0) |
-        (0x0200 if rflags.get('IF', 0)   else 0) |
-        (0x0400 if rflags.get('DF', 0)   else 0) |
-        (0x0800 if rflags.get('OF', 0)   else 0) |
-        (0x3000 if rflags.get('IOPL', 0) else 0) |
-        (0x4000 if rflags.get('NT', 0)   else 0) |
-
-        # EFLAGS
-        (0x00010000 if rflags.get('RF', 0)  else 0) |
-        (0x00020000 if rflags.get('VM', 0)  else 0) |
-        (0x00040000 if rflags.get('AC', 0)  else 0) |
-        (0x00080000 if rflags.get('VIF', 0) else 0) |
-        (0x00100000 if rflags.get('VIP', 0) else 0) |
-        (0x00200000 if rflags.get('ID', 0)  else 0)
-    )
+    """Compose RFLAGS fields using their declared bit widths."""
+    fields = {name: rflags.get(name, 0) for name in rflag_names}
+    return ArchX86().compose_register('RFLAGS', fields)
 
 class ArchX86(Arch):
     def __init__(self):
@@ -214,13 +158,4 @@ class ArchX86(Arch):
         if instr.upper().startswith("INT"):
             return True
         return False
-
-    def get_em_syscalls(self) -> dict[int, str]:
-        return emulatedSyscalls
-
-    def get_pasthru_syscalls(self) -> dict[int, str]:
-        return passthruSyscalls
-
-    def get_syscall_reg(self) -> str:
-        return 'rax'
 

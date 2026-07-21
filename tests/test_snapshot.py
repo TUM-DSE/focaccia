@@ -1,6 +1,6 @@
 import pytest
 
-from focaccia.arch import x86
+from focaccia.arch import aarch64, x86
 from focaccia.snapshot import ProgramState, RegisterAccessError
 
 @pytest.fixture
@@ -41,9 +41,67 @@ def test_register_aliases_read_write(arch):
         assert state.read_register(reg) == 0xf0, reg
     for reg in ['AX', 'BX', 'CX', 'DX']:
         assert state.read_register(reg) == 0x0ff0, reg
-    for reg in ['EAX', 'EBX', 'ECX', 'EDX',
-                'RAX', 'RBX', 'RCX', 'RDX']:
+    for reg in ['EAX', 'EBX', 'ECX', 'EDX']:
         assert state.read_register(reg) == 0xa0ff0, reg
+    for reg in ['RAX', 'RBX', 'RCX', 'RDX']:
+        with pytest.raises(RegisterAccessError):
+            state.read_register(reg)
+
+def test_partial_register_validity():
+    state = ProgramState(x86.ArchX86())
+    state.write_register('AH', 0xab)
+
+    assert state.test_register('AH')
+    assert state.read_register('AH') == 0xab
+    assert not state.test_register('AL')
+    assert not state.test_register('AX')
+    assert not state.test_register('RAX')
+    with pytest.raises(RegisterAccessError):
+        state.read_register('AL')
+    with pytest.raises(RegisterAccessError):
+        state.read_register('RAX')
+
+    state.write_register('AL', 0xcd)
+    assert state.read_register('AX') == 0xabcd
+    with pytest.raises(RegisterAccessError):
+        state.read_register('EAX')
+
+def test_explicit_zero_extended_register_write():
+    state = ProgramState(x86.ArchX86())
+    state.write_register_zero_extended('EAX', 0x89abcdef)
+
+    assert state.read_register('EAX') == 0x89abcdef
+    assert state.read_register('RAX') == 0x89abcdef
+
+def test_aarch64_observed_and_zero_extended_writes_are_distinct():
+    state = ProgramState(aarch64.ArchAArch64('little'))
+    state.write_register('W0', 0x89abcdef)
+
+    assert state.read_register('W0') == 0x89abcdef
+    with pytest.raises(RegisterAccessError):
+        state.read_register('X0')
+
+    state.write_register_zero_extended('W0', 0x12345678)
+    assert state.read_register('X0') == 0x12345678
+
+def test_drop_registers_clears_values_and_validity():
+    state = ProgramState(x86.ArchX86())
+    state.write_register('RAX', 42)
+    state.drop_registers()
+
+    assert not state.test_register('RAX')
+    with pytest.raises(RegisterAccessError):
+        state.read_register('RAX')
+
+
+def test_single_flag_does_not_initialize_rflags():
+    state = ProgramState(x86.ArchX86())
+    state.write_register('ZF', 1)
+
+    assert state.read_register('ZF') == 1
+    with pytest.raises(RegisterAccessError):
+        state.read_register('RFLAGS')
+
 
 def test_flag_aliases(arch):
     flags = ['CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF',

@@ -1,6 +1,11 @@
 from focaccia.qemu.x86 import emulated_system_calls as x86_emu_syscalls
 from focaccia.qemu.x86 import passthrough_system_calls as x86_pass_syscalls
 
+
+syscall_number_registers = {
+    'x86_64': 'rax',
+}
+
 emulated_system_calls = {
     'x86_64': x86_emu_syscalls,
     'aarch64': { },

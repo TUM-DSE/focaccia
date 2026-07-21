@@ -80,8 +80,7 @@ class PluginProgramState(ProgramState):
     }
 
     def _flush_caches(self):
-        for r in self.regs.keys():
-            self.regs[r] = None
+        self.drop_registers()
         self.mem.drop_all()
 
 
@@ -147,7 +146,7 @@ class PluginProgramState(ProgramState):
     def read_memory(self, addr: int, size: int) -> bytes:
         global CONN
 
-        if self.mem.test(addr):
+        if self.mem.test(addr, size):
             return super().read_memory(addr, size)
 
         # print(f'Reading memory at {addr:x}, size={size}')

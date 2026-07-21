@@ -228,6 +228,12 @@ class LLDBConcreteTarget:
                                       the register's value.
         """
         canonical = self._canonical_register_name(regname)
+        if self.arch.is_constant_register(canonical):
+            value = self.arch.get_constant_register_value(canonical)
+            if value is None:
+                raise RuntimeError(f'Missing value for constant register {canonical}.')
+            return value
+
         try:
             reg = self._get_register(canonical.lower())
             assert(reg.IsValid())
@@ -258,6 +264,8 @@ class LLDBConcreteTarget:
                                       the register's value.
         """
         canonical = self._canonical_register_name(regname)
+        if self.arch.is_constant_register(canonical):
+            return
         reg = self._get_register(canonical.lower())
         error = lldb.SBError()
         reg.SetValueFromCString(hex(value), error)
@@ -276,10 +284,7 @@ class LLDBConcreteTarget:
         if not err.success:
             raise ConcreteMemoryError(f'Error when reading {size} bytes at'
                                       f' address {hex(addr)}: {err}')
-        if self.arch.endianness == 'little':
-            return content
-        else:
-            return bytes(reversed(content))
+        return content
 
     def write_memory(self, addr: int, value: bytes):
         """Write bytes to memory.
