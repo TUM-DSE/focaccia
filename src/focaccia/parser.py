@@ -9,7 +9,7 @@ from typing import TextIO, Literal
 from .arch import supported_architectures, Arch
 from .snapshot import ProgramState
 from .symbolic import SymbolicTransform
-from .trace import Trace, TraceContainer, TraceEnvironment
+from .trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 class ParseError(Exception):
     """A parse error."""
@@ -21,32 +21,25 @@ def _get_or_throw(obj: dict, key: str):
         return val
     raise ParseError(f'Expected value at key {key}, but found none.')
 
-def parse_transformations(json_stream: TextIO) -> TraceContainer[SymbolicTransform]:
+def parse_transformations(json_stream: TextIO) -> MaterializedTrace[SymbolicTransform]:
     """Parse symbolic transformations from a text stream."""
     data = json.loads(json_stream.read())
 
     env = TraceEnvironment.from_json(_get_or_throw(data, 'env'))
-    strace = [SymbolicTransform.from_json(item) \
-              for item in _get_or_throw(data, 'states')]
+    transforms = [
+        SymbolicTransform.from_json(item)
+        for item in _get_or_throw(data, 'states')
+    ]
+    if transforms:
+        env = env.with_architecture(transforms[0].arch.key)
 
-    return TraceContainer(strace, env)
+    addresses = data.get('addrs')
+    if addresses is None:
+        addresses = [transform.addr for transform in transforms]
+    return MaterializedTrace(transforms, env, addresses)
 
-class SymbolicTransformStream:
-    def __init__(self, unpacker: msgpack.Unpacker):
-        self._unpacker = unpacker
 
-    def __iter__(self):
-        return self
-
-    def __next__(self) -> SymbolicTransform:
-        obj = next(self._unpacker)
-        return SymbolicTransform.from_json(obj['state'])
-
-    def skip(self, n: int = 1) -> None:
-        for _ in range(n):
-            self._unpacker.skip()
-
-def stream_transformation(stream) -> Trace[SymbolicTransform]:
+def stream_transformation(stream) -> TransformStream[SymbolicTransform]:
     unpacker = msgpack.Unpacker(stream, raw=False)
 
     # First object always contains env
@@ -54,17 +47,17 @@ def stream_transformation(stream) -> Trace[SymbolicTransform]:
     env = TraceEnvironment.from_json(header['env'])
     addresses = header.get('addresses')
 
-    def state_iter():
+    def transform_iter():
         for obj in unpacker:
-            t = SymbolicTransform.from_json(obj['state'])
-            yield t
+            yield SymbolicTransform.from_json(obj['state'])
 
-    state_stream = SymbolicTransformStream(unpacker)
-    return Trace(iter(state_stream), addresses, env)
+    return TransformStream(iter(transform_iter()), env, addresses)
 
-def serialize_transformations(trace: Trace[SymbolicTransform],
-                              out_file: str,
-                              out_type: Literal['msgpack', 'json'] = 'json'):
+def serialize_transformations(
+    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    out_file: str,
+    out_type: Literal['msgpack', 'json'] = 'json',
+) -> None:
     """Serialize symbolic transformations to a text stream."""
     if out_type == 'json':
         with open(out_file, 'w') as out_stream:
@@ -91,7 +84,7 @@ def serialize_transformations(trace: Trace[SymbolicTransform],
     else:
         raise NotImplementedError(f'Unable to write transformations to type {out_type}')
 
-def parse_snapshots(json_stream: TextIO) -> TraceContainer[ProgramState]:
+def parse_snapshots(json_stream: TextIO) -> MaterializedTrace[ProgramState]:
     """Parse snapshots from our JSON format."""
     json_data = json.loads(json_stream.read())
 
@@ -110,18 +103,23 @@ def parse_snapshots(json_stream: TextIO) -> TraceContainer[ProgramState]:
 
         snapshots.append(state)
 
-    return TraceContainer(snapshots, env)
+    return MaterializedTrace(snapshots, env.with_architecture(arch.key))
 
-def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
+def serialize_snapshots(
+    snapshots: MaterializedTrace[ProgramState],
+    out_stream: TextIO,
+) -> None:
     """Serialize a list of snapshots to out JSON format."""
     if not snapshots:
         empty = json.dumps({}, option=json.OPT_INDENT_2).decode()
         out_stream.write(empty)
+        return
 
     arch = snapshots[0].arch
+    env = snapshots.env.with_architecture(arch.key)
     res = {
         'architecture': arch.serialized_name,
-        'env': snapshots.env.to_json(),
+        'env': env.to_json(),
         'snapshots': []
     }
     for snapshot in snapshots:
@@ -138,10 +136,17 @@ def serialize_snapshots(snapshots: Trace[ProgramState], out_stream: TextIO):
     data = json.dumps(res, option=json.OPT_INDENT_2).decode()
     out_stream.write(data)
 
-def _make_unknown_env() -> TraceEnvironment:
-    return TraceEnvironment('', [], False, [], '?')
+def _make_unknown_env(arch: Arch) -> TraceEnvironment:
+    return TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        replay_provenance=None,
+        architecture=arch.key,
+    )
 
-def parse_qemu(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
+def parse_qemu(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
     """Parse a QEMU log from a stream.
 
     Recommended QEMU log option: `qemu -d exec,cpu,fpu,vpu,nochain`. The `exec`
@@ -158,7 +163,7 @@ def parse_qemu(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
         if states:
             _parse_qemu_line(line, states[-1])
 
-    return TraceContainer(states, _make_unknown_env())
+    return MaterializedTrace(states, _make_unknown_env(arch))
 
 def _parse_qemu_line(line: str, cur_state: ProgramState):
     """Try to parse a single register-assignment line from a QEMU log.
@@ -199,7 +204,7 @@ def _parse_qemu_line(line: str, cur_state: ProgramState):
             if regname is not None:
                 cur_state.write_register(regname, int(value, 16))
 
-def parse_arancini(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
+def parse_arancini(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
     aliases = {
         'Program counter': 'RIP',
         'flag ZF': 'ZF',
@@ -224,9 +229,9 @@ def parse_arancini(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
             if regname is not None:
                 states[-1].write_register(regname, int(value, 16))
 
-    return TraceContainer(states, _make_unknown_env())
+    return MaterializedTrace(states, _make_unknown_env(arch))
 
-def parse_box64(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
+def parse_box64(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
     def parse_box64_flags(state: ProgramState, flags_dump: str):
         flags = ['O', 'D', 'S', 'Z', 'A', 'P', 'C']
         for i, flag in enumerate(flags):
@@ -255,5 +260,5 @@ def parse_box64(stream: TextIO, arch: Arch) -> TraceContainer[ProgramState]:
             if regname is not None:
                 states[-1].write_register(regname, int(value, 16))
 
-    return TraceContainer(states, _make_unknown_env())
+    return MaterializedTrace(states, _make_unknown_env(arch))
 

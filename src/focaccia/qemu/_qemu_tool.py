@@ -21,12 +21,17 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
-from focaccia.trace import Trace, TraceContainer, TraceEnvironment
+from focaccia.trace import (
+    MaterializedTrace,
+    StreamExhaustedError,
+    TraceEnvironment,
+    TransformStream,
+)
 from focaccia.utils import print_result
-from focaccia.deterministic import DeterministicLog, Event
+from focaccia.deterministic import DeterministicLog
 
 from focaccia.tools.validate_qemu import make_argparser, verbosity
-from focaccia.qemu.target import GDBProgramState, GDBServerStateIterator
+from focaccia.qemu.target import GDBServerStateIterator
 
 logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
@@ -113,8 +118,10 @@ def record_minimal_snapshot(prev_state: ReadableProgramState,
                state)
     return state
 
-def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
-        -> tuple[list[ProgramState], list[SymbolicTransform]]:
+def collect_conc_trace(
+        gdb: GDBServerStateIterator,
+        strace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+) -> tuple[list[ProgramState], list[SymbolicTransform]]:
     """Collect a trace of concrete states from GDB.
 
     Records minimal concrete states from GDB by using symbolic trace
@@ -135,7 +142,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                 return i
         return None
 
-    if not strace:
+    addresses = strace.require_addresses()
+    if not addresses:
         return [], []
 
     states = []
@@ -147,7 +155,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
     execution_time = 0
 
-    trace = iter(strace)
+    trace = strace.cursor() if isinstance(strace, MaterializedTrace) else strace
 
     if logger.isEnabledFor(logging.DEBUG):
         debug('Tracing program with the following non-deterministic events:')
@@ -170,7 +178,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
     # An online trace matching algorithm.
     info(f'Tracing QEMU between {hex(start_addr)}:{hex(strace.env.stop_address) if strace.env.stop_address else "end"}')
-    traced_address_set = pyroaring.BitMap64(strace.addresses)
+    traced_address_set = pyroaring.BitMap64(addresses)
 
     tracing_time = 0
 
@@ -194,7 +202,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
 
                 next_i = None
                 if pc in traced_address_set:
-                    next_i = find_index(strace.addresses[symb_i+1:], pc)
+                    next_i = find_index(addresses[symb_i+1:], pc)
                     debug(f'Next {next_i}, current {symb_i}')
 
                 # Otherwise, jump to the next matching symbolic state
@@ -217,8 +225,8 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                     transform = next(trace)
                     symb_i += next_i+1
                     validation_time += time.time() - validation_start
-                except StopIteration:
-                    warn(f'QEMU executed more states than native execution: {symb_i} vs {len(strace.addresses)-1}')
+                except (StopIteration, StreamExhaustedError):
+                    warn(f'QEMU executed more states than native execution: {symb_i} vs {len(addresses)-1}')
                     break
 
             assert(cur_state.read_pc() == transform.addr)
@@ -244,7 +252,7 @@ def collect_conc_trace(gdb: GDBServerStateIterator, strace: Trace) \
                                 f' {hex(strace.env.stop_address)}')
 
             assert(transform is not None)
-            if symb_i+1 < len(strace.addresses):
+            if symb_i+1 < len(addresses):
                 qemu_crash["crashed"] = True
                 qemu_crash["pc"] = transform.addr
                 qemu_crash["ref"] = transform
@@ -331,7 +339,10 @@ def main():
         from focaccia.parser import serialize_snapshots
         try:
             with open(args.output, 'w') as file:
-                serialize_snapshots(Trace(conc_states, env), file)
+                output_env = env
+                if conc_states:
+                    output_env = env.with_architecture(conc_states[0].arch.key)
+                serialize_snapshots(MaterializedTrace(conc_states, output_env), file)
         except Exception as e:
             raise Exception(f'Unable to serialize snapshots to file {args.output}: {e}')
 

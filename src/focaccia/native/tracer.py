@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 from focaccia.utils import timebound, TimeoutError
-from focaccia.trace import Trace, TraceContainer, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import Instruction, SymbolicTransform, DisassemblyContext, run_instruction
@@ -194,10 +194,12 @@ class SymbolicTracer:
 
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
+        if binary is None:
+            raise ValueError('A binary is required to create a native trace target.')
         if self.remote is None:
             debug(f'Launching local debug target {binary} {self.env.argv}')
             debug(f'Environment: {self.env}')
-            return LLDBLocalTarget(binary, self.env.argv, self.env.envp)
+            return LLDBLocalTarget(binary, list(self.env.argv), list(self.env.envp))
 
         debug(f'Connecting to remote debug target {self.remote}')
         target = LLDBRemoteTarget(self.remote, binary)
@@ -257,7 +259,7 @@ class SymbolicTracer:
                 return None
         return self.target.read_pc()
 
-    def trace(self, time_limit: int | None = None) -> Trace[SymbolicTransform]:
+    def trace(self, time_limit: int | None = None) -> MaterializedTrace[SymbolicTransform]:
         """Execute a program and compute state transformations between executed
         instructions.
 
@@ -375,5 +377,6 @@ class SymbolicTracer:
         print(f'Execution time: {self.target.target.exec_time}')
         print(f'Symbolic time: {symbolic_time}')
         print(f'Validation time: {self.validation_time}')
-        return TraceContainer(strace, self.env)
+        trace_env = self.env.with_architecture(arch.key)
+        return MaterializedTrace(strace, trace_env, [transform.addr for transform in strace])
 

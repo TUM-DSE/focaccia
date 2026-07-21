@@ -1,18 +1,11 @@
 import base64
 import io
 import json
-from typing import cast
 
 from focaccia.arch import aarch64
-from focaccia.parser import serialize_snapshots
+from focaccia.parser import parse_snapshots, serialize_snapshots
 from focaccia.snapshot import ProgramState
-from focaccia.trace import Trace, TraceEnvironment
-
-
-class SnapshotTrace(list[ProgramState]):
-    def __init__(self, states: list[ProgramState], env: TraceEnvironment):
-        super().__init__(states)
-        self.env = env
+from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 
 def test_snapshot_serialization_preserves_identity_and_partial_validity():
@@ -23,10 +16,12 @@ def test_snapshot_serialization_preserves_identity_and_partial_validity():
     state.write_memory(0x2001, b"AB")
 
     env = TraceEnvironment("", [], [], binary_hash="test-hash")
-    trace = SnapshotTrace([state], env)
+    trace = MaterializedTrace([state], env)
     output = io.StringIO()
-    serialize_snapshots(cast(Trace[ProgramState], trace), output)
-    document = json.loads(output.getvalue())
+    serialize_snapshots(trace, output)
+    serialized = output.getvalue()
+    document = json.loads(serialized)
+    parsed = parse_snapshots(io.StringIO(serialized))
 
     assert document["architecture"] == "aarch64b"
     assert document["snapshots"][0]["registers"] == {
@@ -39,3 +34,10 @@ def test_snapshot_serialization_preserves_identity_and_partial_validity():
             "data": base64.b64encode(b"AB").decode("ascii"),
         }
     ]
+    assert parsed.addresses is None
+    assert len(parsed) == 1
+    assert list(parsed) == list(parsed)
+    assert parsed[0].read_register("PC") == 0x1000
+    assert parsed[0].read_register("W0") == 0x12345678
+    assert parsed[0].read_memory(0x2001, 2) == b"AB"
+    assert parsed.env.architecture == arch.key

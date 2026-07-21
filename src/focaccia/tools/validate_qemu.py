@@ -27,6 +27,7 @@ import focaccia.qemu
 from focaccia.compare import ErrorTypes
 from focaccia.arch import supported_architectures
 from focaccia.qemu.validation_server import start_validation_server
+from focaccia.trace import TraceEnvironment
 
 verbosity = {
     'debug':   ErrorTypes.INFO,
@@ -105,6 +106,17 @@ def try_remove(l: list, v):
     except ValueError:
         pass
 
+def make_plugin_trace_environment(guest_arch: str) -> TraceEnvironment:
+    arch = supported_architectures[guest_arch]
+    return TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        architecture=arch.key,
+    )
+
+
 def main():
     argparser = make_argparser()
     args = argparser.parse_args()
@@ -121,11 +133,12 @@ def main():
         logging.basicConfig(level=logging_level, force=True)
 
         # QEMU plugin interface
+        trace_env = make_plugin_trace_environment(args.guest_arch)
         start_validation_server(args.symb_trace,
                                 args.output,
                                 args.use_socket,
                                 args.guest_arch,
-                                env,
+                                trace_env,
                                 verbosity[args.error_level],
                                 args.quiet)
     else:

@@ -30,3 +30,22 @@ def test_set_register_migration_is_complete():
 
 def test_clients_do_not_construct_lldb_concrete_target():
     assert _calls_named("LLDBConcreteTarget") == []
+
+
+def test_trace_contract_migration_has_no_ambiguous_or_private_accesses():
+    forbidden = []
+    trace_module = PROJECT_ROOT / "src" / "focaccia" / "trace.py"
+    for path in PYTHON_SOURCES:
+        if path == trace_module:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {
+                "_iter",
+                "_state_list",
+                "states",
+            }:
+                forbidden.append(
+                    f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}:{node.attr}"
+                )
+    assert forbidden == []

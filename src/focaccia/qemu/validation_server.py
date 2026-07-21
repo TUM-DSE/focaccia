@@ -4,14 +4,14 @@ import os
 import socket
 import struct
 import logging
-from typing import Iterable
+from collections.abc import Iterable, Sequence
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_symbolic, ErrorTypes
 from focaccia.snapshot import ProgramState, RegisterAccessError, MemoryAccessError
 from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
-from focaccia.trace import Trace
+from focaccia.trace import MaterializedTrace, TraceEnvironment
 from focaccia.utils import print_result
 
 
@@ -308,7 +308,7 @@ def record_minimal_snapshot(prev_state: ProgramState,
     return state
 
 def collect_conc_trace(qemu: PluginStateIterator, \
-                       strace: list[SymbolicTransform]) \
+                       strace: Sequence[SymbolicTransform]) \
         -> tuple[list[ProgramState], list[SymbolicTransform]]:
     """Collect a trace of concrete states from QEMU.
 
@@ -380,7 +380,7 @@ def start_validation_server(symb_trace: str,
                             output: str,
                             socket: str,
                             guest_arch: str,
-                            env,
+                            env: TraceEnvironment,
                             verbosity: ErrorTypes,
                             is_quiet: bool = False):
     # Read pre-computed symbolic trace
@@ -394,7 +394,7 @@ def start_validation_server(symb_trace: str,
     # Use symbolic trace to collect concrete trace from QEMU
     conc_states, matched_transforms = collect_conc_trace(
         qemu,
-        symb_transforms.states)
+        symb_transforms)
 
     # Verify and print result
     if not is_quiet:
@@ -404,5 +404,5 @@ def start_validation_server(symb_trace: str,
     if output:
         from focaccia.parser import serialize_snapshots
         with open(output, 'w') as file:
-            serialize_snapshots(Trace(conc_states, env), file)
+            serialize_snapshots(MaterializedTrace(conc_states, env), file)
 

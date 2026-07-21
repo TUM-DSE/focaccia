@@ -102,7 +102,7 @@ def test_symbolic_tracer_selects_local_target_for_none(monkeypatch):
     symbolic.remote = None
 
     assert symbolic.create_debug_target() is expected
-    assert calls == [(env.binary_name, env.argv, env.envp)]
+    assert calls == [(env.binary_name, list(env.argv), list(env.envp))]
 
 
 def test_symbolic_tracer_selects_remote_target_for_address(monkeypatch):
@@ -111,6 +111,7 @@ def test_symbolic_tracer_selects_remote_target_for_address(monkeypatch):
 
     class FakeRemoteTarget:
         def determine_name(self) -> str:
+            assert env.binary_name is not None
             return env.binary_name
 
     expected = FakeRemoteTarget()

@@ -6,7 +6,7 @@ from focaccia.arch import x86
 from focaccia.reproducer import Reproducer
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 
 def _environment() -> TraceEnvironment:
@@ -49,18 +49,18 @@ def test_collect_concrete_trace_uses_local_target_factory():
 
     result = cli.collect_concrete_trace(env, [0x1000, 0x2000], target_factory)
 
-    assert calls == [(env.binary_name, env.argv, env.envp)]
+    assert calls == [(env.binary_name, list(env.argv), list(env.envp))]
     assert target.breakpoints == [0x1000, 0x2000]
     assert result == [snapshot]
 
 
 def test_oracle_program_uses_symbolic_tracer_factory(monkeypatch):
     env = _environment()
-    trace = Trace([], [], env)
+    trace = MaterializedTrace([], env, [])
     calls = []
 
     class FakeTracer:
-        def trace(self) -> Trace[SymbolicTransform]:
+        def trace(self) -> MaterializedTrace[SymbolicTransform]:
             return trace
 
     def tracer_factory(actual_env: TraceEnvironment) -> FakeTracer:

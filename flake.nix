@@ -321,6 +321,7 @@
         "src/focaccia/native/lldb_target.py"
         "src/focaccia/native/tracer.py"
         "src/focaccia/parser.py"
+        "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/deterministic.py"
         "src/focaccia/qemu/target.py"
         "src/focaccia/qemu/validation_server.py"
@@ -328,6 +329,7 @@
         "src/focaccia/snapshot.py"
         "src/focaccia/symbolic.py"
         "src/focaccia/tools/capture_transforms.py"
+        "src/focaccia/tools/validate_qemu.py"
         "src/focaccia/trace.py"
         "tests"
       ];
@@ -539,6 +541,104 @@
       ];
     };
 
+    explicitTraceKindsCheck = mkStaticUnitCheck {
+      name = "explicit-trace-kinds";
+      ruffTargets = [
+        "src/focaccia/trace.py"
+        "tests/test_api_migrations.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_api_migrations.py"
+        "tests/test_trace.py"
+        "-k"
+        "trace_contract_migration or trace_kinds_are_explicit or transform_stream or transition_trace"
+      ];
+    };
+
+    repeatableMaterializedTracesCheck = mkStaticUnitCheck {
+      name = "repeatable-materialized-traces";
+      ruffTargets = [
+        "src/focaccia/trace.py"
+        "tests/test_state_serialization.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_state_serialization.py"
+        "tests/test_trace.py"
+        "-k"
+        "materialized_program_state or materialized_symbolic or empty_materialized_trace or snapshot_serialization"
+      ];
+    };
+
+    explicitTraceAddressesCheck = mkStaticUnitCheck {
+      name = "explicit-trace-addresses";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/trace.py"
+        "tests/test_state_serialization.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_state_serialization.py"
+        "tests/test_trace.py"
+        "-k"
+        "materialized_program_state or requires_explicit_matching_addresses or snapshot_serialization"
+      ];
+    };
+
+    traceEnvironmentIdentityCheck = mkStaticUnitCheck {
+      name = "trace-environment-identity";
+      ruffTargets = [
+        "src/focaccia/trace.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "trace_environment"
+      ];
+    };
+
+    unknownTraceEnvironmentCheck = mkStaticUnitCheck {
+      name = "unknown-trace-environment";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/trace.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "legacy_log_parser_uses_typed_unknown_environment"
+      ];
+    };
+
+    materializedSnapshotSerializationCheck = mkStaticUnitCheck {
+      name = "materialized-snapshot-serialization";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/trace.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "empty_materialized_snapshot_serialization"
+      ];
+    };
+
+    qemuSnapshotTraceConstructionCheck = mkStaticUnitCheck {
+      name = "qemu-snapshot-trace-construction";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_trace_output.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_trace_output.py" ];
+    };
+
   in rec {
     packages = rec {
       focaccia = pythonEnv.overrideAttrs (old: {
@@ -664,6 +764,13 @@
       aarch64-register-semantics = aarch64RegisterSemanticsCheck;
       memory-byte-order = memoryByteOrderCheck;
       syscall-model-boundary = syscallModelBoundaryCheck;
+      explicit-trace-kinds = explicitTraceKindsCheck;
+      repeatable-materialized-traces = repeatableMaterializedTracesCheck;
+      explicit-trace-addresses = explicitTraceAddressesCheck;
+      trace-environment-identity = traceEnvironmentIdentityCheck;
+      unknown-trace-environment = unknownTraceEnvironmentCheck;
+      materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
+      qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
     };
   });
 }

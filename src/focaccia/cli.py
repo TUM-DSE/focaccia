@@ -11,7 +11,7 @@ from focaccia.match import fold_traces, match_traces
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
 from focaccia.utils import ErrorSeverity, print_result, get_envp
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 verbosity = {
     'info':    ErrorTypes.INFO,
@@ -44,7 +44,7 @@ class _ConcreteTraceTarget(Protocol):
     def run(self) -> None: ...
 
 class _SymbolicTraceCollector(Protocol):
-    def trace(self) -> Trace[SymbolicTransform]: ...
+    def trace(self) -> MaterializedTrace[SymbolicTransform]: ...
 
 _ConcreteTargetFactory = Callable[[str, list[str], list[str]], _ConcreteTraceTarget]
 _SymbolicTracerFactory = Callable[[TraceEnvironment], _SymbolicTraceCollector]
@@ -75,7 +75,9 @@ def collect_concrete_trace(
     """
     if target_factory is None:
         target_factory = _make_local_target
-    target = target_factory(env.binary_name, env.argv, env.envp)
+    if env.binary_name is None:
+        raise ValueError('A binary is required to collect a concrete trace.')
+    target = target_factory(env.binary_name, list(env.argv), list(env.envp))
 
     # Set breakpoints
     for address in breakpoints:
@@ -91,7 +93,8 @@ def collect_concrete_trace(
 
 def collect_symbolic_trace(
         env: TraceEnvironment,
-        tracer_factory: _SymbolicTracerFactory | None = None) -> Trace[SymbolicTransform]:
+        tracer_factory: _SymbolicTracerFactory | None = None,
+) -> MaterializedTrace[SymbolicTransform]:
     if tracer_factory is None:
         tracer_factory = _make_symbolic_tracer
     return tracer_factory(env).trace()
@@ -183,7 +186,7 @@ def print_reproducer(result, min_severity: ErrorSeverity, oracle, oracle_args):
             print(rep.asm())
             return
 
-def get_test_trace(args, arch: Arch) -> Trace[ProgramState]:
+def get_test_trace(args, arch: Arch) -> MaterializedTrace[ProgramState]:
     path = args.test_trace
     parser = concrete_trace_parsers[args.test_trace_type]
     with open(path, 'r') as txl_file:
@@ -200,7 +203,8 @@ def get_truth_env(args) -> TraceEnvironment:
 
 def get_symbolic_trace(
         args,
-        tracer_factory: _SymbolicTracerFactory | None = None) -> Trace[SymbolicTransform]:
+        tracer_factory: _SymbolicTracerFactory | None = None,
+) -> MaterializedTrace[SymbolicTransform]:
     if args.oracle_program:
         env = get_truth_env(args)
         print('Tracing', env)
@@ -254,7 +258,7 @@ def main():
         print_reproducer(result,
                          verbosity[args.error_level],
                          oracle_env.binary_name,
-                         oracle_env.argv)
+                         list(oracle_env.argv))
 
 if __name__ == '__main__':
     main()
