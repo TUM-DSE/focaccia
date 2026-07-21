@@ -1,4 +1,3 @@
-import unittest
 import pytest
 
 from focaccia.arch import x86
@@ -20,7 +19,7 @@ def test_register_access_empty_state(state, reg):
 def test_register_read_write(arch):
     state = ProgramState(arch)
     for reg in x86.regnames:
-        state.set_register(reg, 0x42)
+        state.write_register(reg, 0x42)
     for reg in x86.regnames:
         val = state.read_register(reg)
         assert val == 0x42
@@ -34,7 +33,7 @@ def test_register_aliases_empty_state(arch):
 def test_register_aliases_read_write(arch):
     state = ProgramState(arch)
     for reg in ['EAX', 'EBX', 'ECX', 'EDX']:
-        state.set_register(reg, 0xa0ff0)
+        state.write_register(reg, 0xa0ff0)
 
     for reg in ['AH', 'BH', 'CH', 'DH']:
         assert state.read_register(reg) == 0xf, reg
@@ -51,12 +50,12 @@ def test_flag_aliases(arch):
              'IOPL', 'NT', 'RF', 'VM', 'AC', 'VIF', 'VIP', 'ID']
     state = ProgramState(arch)
 
-    state.set_register('RFLAGS', 0)
+    state.write_register('RFLAGS', 0)
     for flag in flags:
         assert state.read_register(flag) == 0
 
-    state.set_register('RFLAGS',
-                       x86.compose_rflags({'ZF': 1, 'PF': 1, 'OF': 0}))
+    state.write_register('RFLAGS',
+                         x86.compose_rflags({'ZF': 1, 'PF': 1, 'OF': 0}))
     assert state.read_register('ZF') == 1, arch.get_reg_accessor('ZF')
     assert state.read_register('PF') == 1
     assert state.read_register('OF') == 0
@@ -65,13 +64,13 @@ def test_flag_aliases(arch):
     assert state.read_register('SF') == 0
 
     for flag in flags:
-        state.set_register(flag, 1)
+        state.write_register(flag, 1)
     for flag in flags:
         assert state.read_register(flag) == 1
 
-    state.set_register('OF', 1)
-    state.set_register('AF', 1)
-    state.set_register('SF', 1)
+    state.write_register('OF', 1)
+    state.write_register('AF', 1)
+    state.write_register('SF', 1)
     assert state.read_register('OF') == 1
     assert state.read_register('AF') == 1
     assert state.read_register('SF') == 1

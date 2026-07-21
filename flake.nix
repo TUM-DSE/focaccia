@@ -209,6 +209,7 @@
 
     pythonEnv = pythonSet.mkVirtualEnv "focaccia-env" workspace.deps.default;
     pythonDevEnv = pythonSetEditable.mkVirtualEnv "focaccia-dev-env" workspace.deps.all;
+    pythonStaticUnitEnv = pythonSet.mkVirtualEnv "focaccia-static-unit-env" workspace.deps.all;
 
     devEnv = pythonDevEnv.overrideAttrs (old: {
       buildPhase = ''
@@ -219,6 +220,7 @@
         pkgs.uv
         pkgs.lldb
         gdbInternal
+        pkgs.nodejs
       ];
     });
 
@@ -271,6 +273,47 @@
       doCheck = false;
       configureFlags = (old.configureFlags or []) ++ [ "--disable-hyper" ];
     });
+
+    staticUnitSource = pkgs.lib.fileset.toSource {
+      root = ./.;
+      fileset = pkgs.lib.fileset.unions [
+        ./pyproject.toml
+        ./src/focaccia
+        ./tests
+      ];
+    };
+
+    staticUnitChecks = pkgs.stdenv.mkDerivation {
+      name = "static-unit-checks";
+      src = staticUnitSource;
+
+      doCheck = true;
+      dontBuild = true;
+      nativeCheckInputs = [ pythonStaticUnitEnv pkgs.nodejs ];
+
+      checkPhase = ''
+        set -euo pipefail
+        export REPO_ROOT="$PWD"
+
+        ruff check \
+          src/focaccia/__init__.py \
+          src/focaccia/arch/__init__.py \
+          src/focaccia/arch/arch.py \
+          src/focaccia/arch/aarch64.py \
+          src/focaccia/snapshot.py \
+          src/focaccia/trace.py \
+          src/focaccia/parser.py \
+          src/focaccia/compare.py \
+          src/focaccia/match.py \
+          tests
+        python -m pyright
+        python -m pytest -q -m 'not integration' tests
+
+        touch "$out"
+      '';
+
+      env = uvEnv;
+    };
 
   in rec {
     packages = rec {
@@ -381,24 +424,8 @@
 
 
     checks = {
-      focaccia-tests = pkgs.stdenv.mkDerivation {
-        name = "focaccia-tests";
-        src = ./.;
-
-        doCheck = true;
-        dontBuild = true;
-        nativeCheckInputs = [ packages.dev pythonDevEnv ];
-
-        checkPhase = ''
-          set -euo pipefail
-          export REPO_ROOT="$PWD"
-          ${packages.dev}/bin/python -m pytest -q tests
-          touch $out
-        '';
-
-        env = uvEnv;
-        shellHook = uvShellHook;
-      };
+      static-unit-checks = staticUnitChecks;
+      focaccia-tests = staticUnitChecks;
     };
   });
 }

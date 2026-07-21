@@ -68,18 +68,30 @@ target-version = ["py312"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py312"
 exclude = ["__pycache__", "result"]
 src = ["src"]
 
+[tool.ruff.lint]
+select = ["F401", "F821"]
+
 [tool.pyright]
 typeCheckingMode = "standard"
-reportMissingImports = true
+include = ["tests"]
+reportCallIssue = "error"
+reportMissingImports = "error"
 reportMissingTypeStubs = false
+reportUndefinedVariable = "error"
+reportUnusedImport = "error"
 useLibraryCodeForTypes = true
 executionEnvironments = [ {root = "src"} ]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not integration'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+markers = [
+	"integration: requires a debugger, emulator, RR replay, or a running guest program; run only from a dedicated flake check",
+]
 
