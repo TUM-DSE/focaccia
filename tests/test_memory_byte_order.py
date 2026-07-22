@@ -49,9 +49,11 @@ def test_gdb_memory_bytes_stay_in_address_order_on_big_endian(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
     target_module = importlib.import_module("focaccia.qemu.target")
-    state = object.__new__(target_module.GDBProgramState)
-    state.arch = aarch64.ArchAArch64("big")
-    state._proc = FakeProcess(b"\x10\x20\x30\x40")
+    state = target_module.GDBProgramState(
+        cast(Any, FakeProcess(b"\x10\x20\x30\x40")),
+        cast(Any, object()),
+        aarch64.ArchAArch64("big"),
+    )
 
     assert state.read_register("XZR") == 0
     assert state.read_memory(0x2000, 4) == b"\x10\x20\x30\x40"

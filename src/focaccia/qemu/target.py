@@ -12,7 +12,6 @@ from focaccia.deterministic import (
     MemoryMapping,
 )
 from focaccia.snapshot import (
-    ProgramState,
     ReadableProgramState,
     RegisterAccessError,
     MemoryAccessError,
@@ -23,6 +22,7 @@ from focaccia.qemu.deterministic import (
     passthrough_system_calls,
     syscall_number_registers,
 )
+from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
 from focaccia.qemu.x86 import SigContext, SigInfo, UContext, SigFrame
 
 logger = logging.getLogger('focaccia-qemu-target')
@@ -39,91 +39,97 @@ def match_event(event: Event, target: ReadableProgramState) -> bool:
         return True
     return False
 
-class GDBProgramState(ProgramState):
+class GDBProgramState(CachedBackendProgramState):
+    """One stopped GDB inferior state with canonical sparse caching."""
+
     from focaccia.arch import aarch64, x86
 
-    flag_register_names = {
-        aarch64.archname: 'cpsr',
-        x86.archname: 'eflags',
-    }
-
-    flag_register_decompose = {
-        aarch64.archname: aarch64.decompose_cpsr,
-        x86.archname: x86.decompose_rflags,
+    flag_backend_names = {
+        aarch64.archname: "cpsr",
+        x86.archname: "eflags",
     }
 
     def __init__(self, process: gdb.Inferior, frame: gdb.Frame, arch: Arch):
         super().__init__(arch)
         self._proc = process
         self._frame = frame
+        flags_name = self.flag_backend_names.get(arch.archname)
+        canonical_flags = arch.to_regname(flags_name) if flags_name else None
+        flags = arch.get_reg_accessor(canonical_flags) if canonical_flags else None
+        self._flags_base = flags.base_reg if flags is not None else None
 
     @staticmethod
-    def _read_vector_reg_aarch64(val: gdb.Value, size) -> int:
-        try:
-            return int(str(val['d']['u']), 10)
-        except:
+    def _read_vector_reg_aarch64(value: gdb.Value, _size: int) -> int:
+        errors = []
+        for path in (("d", "u"), ("u",), ("q", "u")):
             try:
-                return int(str(val['u']), 10)
-            except:
-                return int(str(val['q']['u']), 10)
+                current = value
+                for component in path:
+                    current = current[component]
+                return int(str(current), 10)
+            except (KeyError, TypeError, ValueError, gdb.error) as error:
+                errors.append(error)
+        raise ValueError(f"Unable to decode AArch64 vector register: {errors}.")
 
     @staticmethod
-    def _read_vector_reg_x86(val: gdb.Value, size) -> int:
+    def _read_vector_reg_x86(value: gdb.Value, size: int) -> int:
+        if size % 64 != 0:
+            raise ValueError(f"Unsupported x86 vector width {size}.")
         num_longs = size // 64
-        vals = val[f'v{num_longs}_int64']
-        res = 0
-        for i in range(num_longs):
-            val = int(vals[i].cast(gdb.lookup_type('unsigned long')))
-            res += val << i * 64
-        return res
+        values = value[f"v{num_longs}_int64"]
+        result = 0
+        for index in range(num_longs):
+            component = int(
+                values[index].cast(gdb.lookup_type("unsigned long"))
+            )
+            result |= component << (index * 64)
+        return result
 
     read_vector_reg = {
         aarch64.archname: _read_vector_reg_aarch64,
         x86.archname: _read_vector_reg_x86,
     }
 
-    def read_register(self, reg: str) -> int:
-        if self.arch.is_constant_register(reg):
-            value = self.arch.get_constant_register_value(reg)
-            if value is None:
-                raise RuntimeError(f'Missing value for constant register {reg}.')
-            return value
-
-        if reg == 'RFLAGS':
-            reg = 'EFLAGS'
-
+    def _read_backend_register(self, base_reg: str) -> RegisterObservation:
+        wire_name = (
+            self.flag_backend_names[self.arch.archname]
+            if self._flags_base is not None and base_reg == self._flags_base
+            else base_reg.lower()
+        )
+        canonical = self.arch.to_regname(wire_name)
+        if canonical is None:
+            raise RegisterAccessError(
+                base_reg,
+                f"GDB register {wire_name!r} is not in the guest architecture.",
+            )
         try:
-            val = self._frame.read_register(reg.lower())
-            size = val.type.sizeof * 8
+            value = self._frame.read_register(wire_name)
+            size = value.type.sizeof * 8
+            if size >= 128:
+                reader = self.read_vector_reg.get(self.arch.archname)
+                if reader is None:
+                    raise ValueError(
+                        f"Vector registers are unsupported for {self.arch}."
+                    )
+                numeric = reader(value, size)
+            elif size <= 32:
+                numeric = int(value.cast(gdb.lookup_type("unsigned int")))
+            elif size == 64:
+                numeric = int(value.cast(gdb.lookup_type("unsigned long")))
+            else:
+                raise ValueError(f"Unsupported scalar register width {size}.")
+        except (ValueError, RuntimeError, gdb.error) as error:
+            raise RegisterAccessError(
+                base_reg,
+                f"GDB cannot access register {wire_name}: {error}.",
+            ) from error
+        return RegisterObservation(canonical, numeric, size)
 
-            # For vector registers, we need to apply architecture-specific
-            # logic because GDB's interface is not consistent.
-            if size >= 128:  # Value is a vector
-                if self.arch.archname not in self.read_vector_reg:
-                    raise NotImplementedError(
-                        f'Reading vector registers is not implemented for'
-                        f' architecture {self.arch.archname}.')
-                return self.read_vector_reg[self.arch.archname](val, size)
-            elif size < 64:
-                return int(val.cast(gdb.lookup_type('unsigned int')))
-            # For non-vector values, just return the 64-bit value
-            return int(val.cast(gdb.lookup_type('unsigned long')))
-        except ValueError as err:
-            # Try to access the flags register with `reg` as a logical flag name
-            if self.arch.archname in self.flag_register_names:
-                flags_reg = self.flag_register_names[self.arch.archname]
-                flags = int(self._frame.read_register(flags_reg))
-                flags = self.flag_register_decompose[self.arch.archname](flags)
-                if reg in flags:
-                    return flags[reg]
-            raise RegisterAccessError(reg,
-                                      f'[GDB] Unable to access {reg}: {err}')
-
-    def read_memory(self, addr: int, size: int) -> bytes:
+    def _read_backend_memory(self, addr: int, size: int) -> bytes:
         try:
             return self._proc.read_memory(addr, size).tobytes()
-        except gdb.MemoryError as err:
-            raise MemoryAccessError(addr, size, str(err))
+        except gdb.MemoryError as error:
+            raise MemoryAccessError(addr, size, str(error)) from error
 
 class GDBServerConnector:
     def __init__(self, remote: str):

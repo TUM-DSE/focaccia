@@ -325,7 +325,10 @@
         "src/focaccia/persistence.py"
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/state.py"
         "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/transport.py"
         "src/focaccia/qemu/validation_server.py"
         "src/focaccia/reproducer.py"
         "src/focaccia/snapshot.py"
@@ -735,6 +738,131 @@
       pytestTargets = [ "tests/test_qemu_trace_output.py" ];
     };
 
+    fix021PluginFramedTransportCheck = mkStaticUnitCheck {
+      name = "fix-021-plugin-framed-transport";
+      ruffTargets = [
+        "src/focaccia/qemu/transport.py"
+        "tests/test_qemu_transport.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_transport.py" ];
+    };
+
+    fix022PluginRegisterCacheCheck = mkStaticUnitCheck {
+      name = "fix-022-plugin-register-cache";
+      ruffTargets = [
+        "src/focaccia/qemu/state.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "-k"
+        "alias or flag or status or base_register"
+      ];
+    };
+
+    fix033PluginConnectionOwnershipCheck = mkStaticUnitCheck {
+      name = "fix-033-plugin-connection-ownership";
+      ruffTargets = [
+        "src/focaccia/qemu/transport.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_qemu_transport.py"
+      ];
+      pytestTargets = [
+        "tests/test_plugin_state_validity.py"
+        "tests/test_qemu_transport.py"
+        "-k"
+        "module_global or own_independent or context_manager"
+      ];
+    };
+
+    fix054GdbLaunchEncodingCheck = mkStaticUnitCheck {
+      name = "fix-054-gdb-launch-encoding";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_launcher.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_launcher.py" ];
+    };
+
+    fix058SharedSnapshotPlannerCheck = mkStaticUnitCheck {
+      name = "fix-058-shared-snapshot-planner";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+    };
+
+    fix070GdbWideRegisterCheck = mkStaticUnitCheck {
+      name = "fix-070-gdb-wide-registers";
+      ruffTargets = [
+        "src/focaccia/qemu/state.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "80_bit_scalar"
+      ];
+    };
+
+    qemuSparseMemoryCacheCheck = mkStaticUnitCheck {
+      name = "qemu-sparse-memory-cache";
+      ruffTargets = [
+        "src/focaccia/qemu/state.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "-k"
+        "memory or full_range"
+      ];
+    };
+
+    qemuScriptedStateCollectionCheck = mkStaticUnitCheck {
+      name = "qemu-scripted-state-collection";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/state.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/transport.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_snapshot.py"
+        "tests/test_qemu_trace_output.py"
+        "tests/test_qemu_transport.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_snapshot.py"
+        "tests/test_qemu_trace_output.py"
+        "tests/test_qemu_transport.py"
+      ];
+    };
+
     freshFileHashesCheck = mkStaticUnitCheck {
       name = "fresh-file-hashes";
       ruffTargets = [
@@ -1129,6 +1257,14 @@
       unknown-trace-environment = unknownTraceEnvironmentCheck;
       materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
+      fix-021-plugin-framed-transport = fix021PluginFramedTransportCheck;
+      fix-022-plugin-register-cache = fix022PluginRegisterCacheCheck;
+      fix-033-plugin-connection-ownership = fix033PluginConnectionOwnershipCheck;
+      fix-054-gdb-launch-encoding = fix054GdbLaunchEncodingCheck;
+      fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
+      fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
+      qemu-sparse-memory-cache = qemuSparseMemoryCacheCheck;
+      qemu-scripted-state-collection = qemuScriptedStateCollectionCheck;
       fresh-file-hashes = freshFileHashesCheck;
       trace-schema-v2 = traceSchemaV2Check;
       trace-schema-v3 = traceSchemaV3Check;

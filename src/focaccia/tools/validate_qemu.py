@@ -1,110 +1,157 @@
 #!/usr/bin/env python3
 
-"""
-Spawn GDB, connect to QEMU's GDB server, and read test states from that.
+"""Launch the fake-testable QEMU GDB or plugin validation backend."""
 
-We need two scripts (this one and the primary `qemu_tool.py`) because we can't
-pass arguments to scripts executed via `gdb -x <script>`.
+from __future__ import annotations
 
-Alternatively, we connect to the Focaccia QEMU plugin when a socket is given.
-
-This script (`validate_qemu.py`) is the one the user interfaces with. It
-eventually calls `execv` to spawn a GDB process that calls the main
-`qemu_tool.py` script; `python validate_qemu.py` essentially behaves as if
-something like `gdb --batch -x qemu_tool.py` were executed instead. Before it
-starts GDB, though, it parses command line arguments and applies some weird but
-necessary logic to pass them to `qemu_tool.py`.
-"""
-
-import os
-import sys
-import logging
 import argparse
-import sysconfig
+import json
+import logging
+import os
 import subprocess
+import sys
+import sysconfig
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
+import focaccia
 import focaccia.qemu
-from focaccia.compare import ErrorTypes
 from focaccia.arch import supported_architectures
+from focaccia.compare import ErrorTypes
 from focaccia.qemu.validation_server import start_validation_server
 from focaccia.trace import TraceEnvironment
 
+
 verbosity = {
-    'debug':   ErrorTypes.INFO,
-    'info':    ErrorTypes.INFO,
-    'warning': ErrorTypes.POSSIBLE,
-    'error':   ErrorTypes.CONFIRMED,
+    "debug": ErrorTypes.INFO,
+    "info": ErrorTypes.INFO,
+    "warning": ErrorTypes.POSSIBLE,
+    "error": ErrorTypes.CONFIRMED,
 }
 
-def make_argparser():
-    """This is also used by the GDB-invoked script to parse its args."""
-    prog = argparse.ArgumentParser()
-    prog.description = """Use Focaccia to test QEMU.
+GDB_ARGUMENTS_ENV = "FOCACCIA_GDB_ARGUMENTS_V1"
+GDB_ARGUMENTS_VERSION = 1
+MAX_GDB_ARGUMENTS_PAYLOAD = 1024 * 1024
 
-Uses QEMU's GDB-server feature to read QEMU's emulated state and test its
-transformation during emulation against a symbolic truth.
 
-In fact, this tool could be used to test any emulator that provides a
-GDB-server interface. The server must support reading registers, reading
-memory, and stepping forward by single instructions.
+class GDBLaunchError(RuntimeError):
+    def __init__(self, returncode: int, command: Sequence[str]):
+        self.returncode = returncode
+        self.command = tuple(command)
+        super().__init__(
+            f"GDB validation process exited with status {returncode}: "
+            f"{list(command)!r}."
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GDBLaunch:
+    command: tuple[str, ...]
+    environment: Mapping[str, str]
+
+
+def make_argparser() -> argparse.ArgumentParser:
+    """Build the parser shared with the script loaded inside GDB."""
+    parser = argparse.ArgumentParser()
+    parser.description = """Use Focaccia to test QEMU.
+
+Uses either QEMU's GDB remote interface or the project plugin interface to
+observe guest state and validate it against a symbolic native trace.
 """
-    prog.add_argument('--symb-trace',
-                      required=True,
-                      help='A pre-computed symbolic transformation trace to' \
-                           ' be used for verification. Generate this with' \
-                           ' the `tools/capture_transforms.py` tool.')
-    prog.add_argument('-q', '--quiet',
-                      default=False,
-                      action='store_true',
-                      help='Don\'t print a verification result.')
-    prog.add_argument('-o', '--output',
-                      type=str,
-                      help='If specified with a file name, the recorded'
-                           ' emulator states will be written to that file.')
-    prog.add_argument('--error-level',
-                      default='warning',
-                      choices=list(verbosity.keys()))
-    prog.add_argument('--executable',
-                      default=None,
-                      help='The executable executed under QEMU, overrides the auto-detected' \
-                            'executable')
-    prog.add_argument('--use-socket',
-                      type=str,
-                      nargs='?',
-                      const='/tmp/focaccia.sock',
-                      help='Use QEMU plugin interface given by socket instead of GDB')
-    prog.add_argument('--guest-arch',
-                      type=str,
-                      choices=supported_architectures.keys(),
-                      help='Architecture of the emulated guest'
-                           '(Only required when using --use-socket)')
-    prog.add_argument('--remote',
-                      type=str,
-                      help='The hostname:port pair at which to find a QEMU GDB server.')
-    prog.add_argument('--gdb',
-                      type=str,
-                      default='gdb',
-                      help='GDB binary to invoke.')
-    prog.add_argument('--deterministic-log', default=None,
-                      help='The directory containing rr traces')
-    prog.add_argument('--trace-type',
-                      default='json',
-                      choices=['msgpack', 'json'],
-                      help='The format of the input symbolic trace')
-    prog.add_argument('--schedule',
-                      default=False,
-                      action='store_true',
-                      help='Enables scheduling (experimental)')
-    return prog
+    parser.add_argument(
+        "--symb-trace",
+        required=True,
+        help="A pre-computed symbolic transformation trace.",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        default=False,
+        action="store_true",
+        help="Do not print a verification result.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        help="Write recorded emulator states to this file.",
+    )
+    parser.add_argument(
+        "--error-level",
+        default="warning",
+        choices=list(verbosity),
+    )
+    parser.add_argument(
+        "--executable",
+        default=None,
+        help="Guest executable, overriding GDB auto-detection.",
+    )
+    parser.add_argument(
+        "--use-socket",
+        type=str,
+        nargs="?",
+        const="/tmp/focaccia.sock",
+        help="Use the QEMU plugin at this Unix socket instead of GDB.",
+    )
+    parser.add_argument(
+        "--guest-arch",
+        type=str,
+        choices=supported_architectures.keys(),
+        help="Emulated guest architecture (required for the plugin backend).",
+    )
+    parser.add_argument(
+        "--remote",
+        type=str,
+        help="QEMU GDB server hostname:port.",
+    )
+    parser.add_argument(
+        "--gdb",
+        type=str,
+        default="gdb",
+        help="GDB binary to invoke.",
+    )
+    parser.add_argument(
+        "--deterministic-log",
+        default=None,
+        help="Directory containing an RR deterministic log.",
+    )
+    parser.add_argument(
+        "--trace-type",
+        default="json",
+        choices=["msgpack", "json"],
+        help="Input symbolic trace format.",
+    )
+    parser.add_argument(
+        "--schedule",
+        default=False,
+        action="store_true",
+        help="Enable experimental scheduling (unsupported; removed in Step 10).",
+    )
+    return parser
 
-def quoted(s: str) -> str:
-    return f'"{s}"'
 
-def try_remove(l: list, v):
-    try:
-        l.remove(v)
-    except ValueError:
-        pass
+def validate_backend_options(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
+    if args.use_socket is not None:
+        if args.remote is not None:
+            parser.error("--remote and --use-socket select different backends")
+        if args.guest_arch is None:
+            parser.error("--guest-arch is required with --use-socket")
+    elif args.remote is None:
+        parser.error("--remote is required unless --use-socket is specified")
+
+
+def make_gdb_trace_environment(executable: str | None) -> TraceEnvironment:
+    return TraceEnvironment(
+        executable,
+        (),
+        (),
+        binary_hash=None,
+    )
+
 
 def make_plugin_trace_environment(guest_arch: str) -> TraceEnvironment:
     arch = supported_architectures[guest_arch]
@@ -117,67 +164,136 @@ def make_plugin_trace_environment(guest_arch: str) -> TraceEnvironment:
     )
 
 
-def main():
-    argparser = make_argparser()
-    args = argparser.parse_args()
+def encode_gdb_arguments(arguments: Sequence[str]) -> str:
+    payload = json.dumps(
+        {
+            "version": GDB_ARGUMENTS_VERSION,
+            "arguments": list(arguments),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    if len(payload.encode("utf-8")) > MAX_GDB_ARGUMENTS_PAYLOAD:
+        raise ValueError("GDB argument payload exceeds the configured limit.")
+    return payload
 
-    # Get environment
-    env = os.environ.copy()
 
-    # Differentiate between the QEMU GDB server and QEMU plugin interfaces
-    if args.use_socket:
-        if not args.guest_arch:
-            argparser.error('--guest-arch is required when --use-socket is specified')
+def decode_gdb_arguments(environment: Mapping[str, str]) -> list[str] | None:
+    payload = environment.get(GDB_ARGUMENTS_ENV)
+    if payload is None:
+        return None
+    if len(payload.encode("utf-8")) > MAX_GDB_ARGUMENTS_PAYLOAD:
+        raise ValueError("GDB argument payload exceeds the configured limit.")
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError("Malformed GDB argument payload.") from error
+    if not isinstance(document, dict) or document.get("version") != GDB_ARGUMENTS_VERSION:
+        raise ValueError("Unsupported GDB argument payload version.")
+    arguments = document.get("arguments")
+    if not isinstance(arguments, list) or not all(
+        isinstance(argument, str) for argument in arguments
+    ):
+        raise ValueError("GDB argument payload must contain a string list.")
+    return arguments
 
+
+def _default_python_paths() -> list[str]:
+    package_root = str(Path(focaccia.__file__).resolve().parent.parent)
+    paths = sysconfig.get_paths()
+    candidates = [package_root, paths.get("purelib"), paths.get("platlib")]
+    return [path for path in candidates if path and os.path.isdir(path)]
+
+
+def _merge_pythonpath(
+    selected: Sequence[str],
+    existing: str | None,
+) -> str:
+    entries = list(selected)
+    if existing:
+        entries.extend(existing.split(os.pathsep))
+    unique: list[str] = []
+    for entry in entries:
+        if entry and entry not in unique:
+            unique.append(entry)
+    return os.pathsep.join(unique)
+
+
+def build_gdb_launch(
+    args: argparse.Namespace,
+    forwarded_arguments: Sequence[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+    qemu_tool_path: str | None = None,
+    python_paths: Sequence[str] | None = None,
+) -> GDBLaunch:
+    """Build a shell-free GDB launch without mutating caller arguments."""
+    if args.remote is None or args.use_socket is not None:
+        raise ValueError("A GDB launch requires the remote backend.")
+    child_environment = dict(os.environ if environment is None else environment)
+    child_environment[GDB_ARGUMENTS_ENV] = encode_gdb_arguments(
+        tuple(forwarded_arguments)
+    )
+    selected_paths = (
+        list(python_paths) if python_paths is not None else _default_python_paths()
+    )
+    child_environment["PYTHONPATH"] = _merge_pythonpath(
+        selected_paths,
+        child_environment.get("PYTHONPATH"),
+    )
+
+    if qemu_tool_path is None:
+        script_dir = Path(focaccia.qemu.__file__).resolve().parent
+        qemu_tool_path = str(script_dir / "_qemu_tool.py")
+    command = (
+        args.gdb,
+        "-nx",
+        "--batch",
+        "-x",
+        qemu_tool_path,
+    )
+    return GDBLaunch(command, child_environment)
+
+
+def execute_gdb_launch(
+    launch: GDBLaunch,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> None:
+    completed = runner(
+        list(launch.command),
+        env=dict(launch.environment),
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise GDBLaunchError(completed.returncode, launch.command)
+
+
+def main() -> None:
+    parser = make_argparser()
+    args = parser.parse_args()
+    validate_backend_options(parser, args)
+
+    if args.use_socket is not None:
         logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
         logging.basicConfig(level=logging_level, force=True)
-
-        # QEMU plugin interface
         trace_env = make_plugin_trace_environment(args.guest_arch)
-        start_validation_server(args.symb_trace,
-                                args.output,
-                                args.use_socket,
-                                args.guest_arch,
-                                trace_env,
-                                verbosity[args.error_level],
-                                args.quiet)
-    else:
-        # QEMU GDB interface
-        script_dirname = os.path.dirname(focaccia.qemu.__file__)
-        qemu_tool_path = os.path.join(script_dirname, '_qemu_tool.py')
+        start_validation_server(
+            args.symb_trace,
+            args.output,
+            args.use_socket,
+            args.guest_arch,
+            trace_env,
+            verbosity[args.error_level],
+            args.quiet,
+            args.trace_type,
+        )
+        return
 
-        # We have to remove all arguments we don't want to pass to the qemu tool
-        # manually here. Not nice, but what can you do..
-        argv = sys.argv
-        try_remove(argv, '--gdb')
-        try_remove(argv, args.gdb)
+    forwarded_arguments = list(sys.argv[1:])
+    launch = build_gdb_launch(args, forwarded_arguments)
+    execute_gdb_launch(launch)
 
-        # Assemble the argv array passed to the qemu tool. GDB does not have a
-        # mechanism to pass arguments to a script that it executes, so we
-        # overwrite `sys.argv` manually before invoking the script.
-        argv_str = f'[{", ".join(quoted(a) for a in argv)}]'
-        path_str = f'[{", ".join(quoted(s) for s in sys.path)}]'
 
-        paths = sysconfig.get_paths()
-        candidates = [paths["purelib"], paths["platlib"]]
-        entries = [p for p in candidates if p and os.path.isdir(p)]
-        venv_site = entries[0]
-        env["PYTHONPATH"] = ','.join([script_dirname, venv_site])
-
-        print(f"GDB started with Python Path: {env['PYTHONPATH']}")
-        gdb_cmd = [
-            args.gdb,
-            '-nx',  # Don't parse any .gdbinits
-            '--batch',
-            '-ex',  'py import sys',
-            '-ex', f'py sys.argv = {argv_str}',
-            '-ex', f'py sys.path = {path_str}',
-            "-ex", f'py import site; site.addsitedir({venv_site!r})',
-            "-ex", f'py import site; site.addsitedir({script_dirname!r})',
-            '-x', qemu_tool_path
-        ]
-        proc = subprocess.Popen(gdb_cmd, env=env)
-
-        ret = proc.wait()
-        exit(ret)
-
+if __name__ == "__main__":
+    main()

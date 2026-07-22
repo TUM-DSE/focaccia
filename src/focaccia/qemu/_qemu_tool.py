@@ -6,92 +6,35 @@ But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
-import time
 import logging
-from typing import Iterable
+import os
+import time
 
 import focaccia.parser as parser
 from focaccia.compare import compare_symbolic, Error, ErrorTypes
 from focaccia.match import MatchResult, TransitionMatcher
-from focaccia.snapshot import (
-    ProgramState,
-    ReadableProgramState,
-    RegisterAccessError,
-    MemoryAccessError,
-)
-from focaccia.symbolic import (
-    SymbolicTraceItem,
-    SymbolicTransform,
-    eval_symbol,
-    ExprMem,
-)
+from focaccia.snapshot import ProgramState, RegisterAccessError
+from focaccia.symbolic import SymbolicTraceItem
 from focaccia.trace import (
     MaterializedTrace,
-    TraceEnvironment,
     TransformStream,
 )
 from focaccia.utils import print_result
 from focaccia.deterministic import DeterministicLog
 
-from focaccia.tools.validate_qemu import make_argparser, verbosity
+from focaccia.tools.validate_qemu import (
+    decode_gdb_arguments,
+    make_argparser,
+    make_gdb_trace_environment,
+    validate_backend_options,
+    verbosity,
+)
+from focaccia.qemu.snapshot import collect_minimal_snapshot, snapshot_diagnostics
 from focaccia.qemu.target import GDBServerStateIterator
 
 logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
 info = logger.info
-
-def record_minimal_snapshot(
-    previous_state: ReadableProgramState,
-    current_state: ReadableProgramState,
-    incoming: SymbolicTraceItem | None,
-    outgoing: SymbolicTraceItem | None,
-) -> ProgramState:
-    """Record inputs/outputs needed on either side of one retained boundary."""
-    boundary_transform = incoming if incoming is not None else outgoing
-    architecture = (
-        boundary_transform.arch
-        if boundary_transform is not None
-        else current_state.arch
-    )
-    snapshot = ProgramState(architecture)
-    snapshot.write_register("PC", current_state.read_pc())
-
-    def written_memory(transform: SymbolicTransform) -> Iterable[ExprMem]:
-        return [write.destination for write in transform.memory_writes]
-
-    def copy_values(
-        registers: Iterable[str],
-        memory: Iterable[ExprMem],
-        address_state: ReadableProgramState,
-    ) -> None:
-        for register in registers:
-            try:
-                snapshot.write_register(register, current_state.read_register(register))
-            except RegisterAccessError:
-                pass
-        for expression in memory:
-            if expression.size % 8 != 0:
-                raise ValueError(f"Non-byte memory expression width: {expression.size}.")
-            address = eval_symbol(expression.ptr, address_state)
-            try:
-                data = current_state.read_memory(address, expression.size // 8)
-            except MemoryAccessError:
-                continue
-            snapshot.write_memory(address, data)
-
-    if isinstance(incoming, SymbolicTransform):
-        copy_values(
-            incoming.canonical_register_outputs().keys(),
-            written_memory(incoming),
-            previous_state,
-        )
-    if isinstance(outgoing, SymbolicTransform):
-        copy_values(
-            outgoing.get_used_registers(),
-            outgoing.get_used_memory_addresses(),
-            current_state,
-        )
-    return snapshot
 
 def collect_conc_trace(
     gdb: GDBServerStateIterator,
@@ -101,6 +44,7 @@ def collect_conc_trace(
     matcher = TransitionMatcher(strace)
     retained_states: list[ProgramState] = []
     retained_transforms: list[SymbolicTraceItem] = []
+    diagnostics = []
     state_iterator = iter(gdb)
 
     execution_time = 0.0
@@ -122,14 +66,9 @@ def collect_conc_trace(
         start_address = pc
 
     execution_start = time.time()
-    try:
-        if pc != start_address:
-            info(f"Executing until starting address {hex(start_address)}")
-            current_state = state_iterator.run_until(start_address)
-    except Exception as error:
-        raise RuntimeError(
-            f"Unable to reach start address {hex(start_address)}: {error}"
-        ) from error
+    if pc != start_address:
+        info(f"Executing until starting address {hex(start_address)}")
+        current_state = state_iterator.run_until(start_address)
     execution_time += time.time() - execution_start
 
     info(
@@ -148,15 +87,24 @@ def collect_conc_trace(
         if boundary is not None:
             tracing_start = time.time()
             previous_state = retained_states[-1] if retained_states else current_state
-            snapshot = record_minimal_snapshot(
+            collection = collect_minimal_snapshot(
                 previous_state,
                 current_state,
                 boundary.incoming,
                 boundary.outgoing,
             )
+            diagnostics.extend(
+                snapshot_diagnostics(
+                    collection,
+                    len(retained_states),
+                    len(retained_transforms)
+                    if boundary.incoming is not None
+                    else None,
+                )
+            )
             if boundary.incoming is not None:
                 retained_transforms.append(boundary.incoming)
-            retained_states.append(snapshot)
+            retained_states.append(collection.state)
             tracing_time += time.time() - tracing_start
 
         if matcher.done:
@@ -171,10 +119,18 @@ def collect_conc_trace(
     execution_time -= gdb.event_time
     debug(f"Execution time: {execution_time}")
     debug(f"Tracing time: {tracing_time}")
-    return matcher.make_result(retained_states, retained_transforms)
+    result = matcher.make_result(retained_states, retained_transforms)
+    return MatchResult(
+        result.trace,
+        (*result.diagnostics, *diagnostics),
+        result.pending_transform,
+    )
 
 def main():
-    args = make_argparser().parse_args()
+    argument_parser = make_argparser()
+    forwarded_arguments = decode_gdb_arguments(os.environ)
+    args = argument_parser.parse_args(forwarded_arguments)
+    validate_backend_options(argument_parser, args)
 
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
@@ -184,100 +140,74 @@ def main():
         raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
                                    'Focaccia built without deterministic log support')
 
-    try:
-        gdb_server = GDBServerStateIterator(args.remote, detlog, args.schedule)
-    except Exception as e:
-        raise Exception(f'Unable to perform basic GDB setup: {e}')
+    gdb_server = GDBServerStateIterator(args.remote, detlog, args.schedule)
 
-    try:
-        executable: str | None = None
-        if args.executable is None:
-            executable = gdb_server.binary
-        else:
-            executable = args.executable
+    executable = (
+        gdb_server.binary if args.executable is None else args.executable
+    )
+    env = make_gdb_trace_environment(executable)
 
-        argv = []  # QEMU's GDB stub does not support 'info proc cmdline'
-        envp = []  # Can't get the remote target's environment
-        env = TraceEnvironment(executable, argv, envp, '?')
-    except Exception as e:
-        raise Exception(f'Unable to create trace environment for executable {executable}: {e}')
-
-    # Read pre-computed symbolic trace
+    # Keep streaming trace input open until collection consumes it.
+    mode = "r" if args.trace_type == "json" else "rb"
     try:
-        if args.trace_type == 'json':
-            file = open(args.symb_trace, 'r')
-            symb_transforms = parser.parse_transformations(file)
-        else:
-            file = open(args.symb_trace, 'rb')
-            symb_transforms = parser.stream_transformation(file)
-    except Exception as e:
-        raise Exception(f'Failed to parse state transformations from native trace: {e}')
-
-    # Use symbolic trace to collect concrete trace from QEMU
-    try:
-        matched = collect_conc_trace(gdb_server, symb_transforms)
-    except Exception as error:
+        with open(args.symb_trace, mode) as trace_file:
+            if args.trace_type == "json":
+                symb_transforms = parser.parse_transformations(trace_file)
+            else:
+                symb_transforms = parser.stream_transformation(trace_file)
+            matched = collect_conc_trace(gdb_server, symb_transforms)
+    except (OSError, ValueError) as error:
         raise RuntimeError(
-            f"Failed to collect concolic trace from QEMU: {error}"
+            f"Failed to parse or collect the QEMU trace: {error}"
         ) from error
 
     # Verify and print result
     if not args.quiet:
-        try:
-            validation_start = time.time()
-            report = compare_symbolic(
-                matched.trace,
-                diagnostics=matched.diagnostics,
+        validation_start = time.time()
+        report = compare_symbolic(
+            matched.trace,
+            diagnostics=matched.diagnostics,
+        )
+        if matched.pending_transform is not None:
+            source = (
+                matched.trace.state_boundaries[-1]
+                if matched.trace is not None
+                else None
             )
-            if matched.pending_transform is not None:
-                source = (
-                    matched.trace.state_boundaries[-1]
-                    if matched.trace is not None
-                    else None
-                )
-                report = report.with_entry(
-                    {
-                        "pc": matched.pending_transform.addr,
-                        "txl": None,
-                        "ref": matched.pending_transform,
-                        "errors": [
-                            Error(
-                                ErrorTypes.CONFIRMED,
-                                "QEMU stopped before the pending transition "
-                                "produced a destination state.",
-                            )
-                        ],
-                        "snap": source,
-                    }
-                )
-            validation_time = time.time() - validation_start
-            print(f"Validation time: {validation_time}")
-            print_result(report, verbosity[args.error_level])
-        except Exception as error:
-            raise RuntimeError(
-                f"Error comparing with symbolic equations: {error}"
-            ) from error
+            report = report.with_entry(
+                {
+                    "pc": matched.pending_transform.addr,
+                    "txl": None,
+                    "ref": matched.pending_transform,
+                    "errors": [
+                        Error(
+                            ErrorTypes.CONFIRMED,
+                            "QEMU stopped before the pending transition "
+                            "produced a destination state.",
+                        )
+                    ],
+                    "snap": source,
+                }
+            )
+        validation_time = time.time() - validation_start
+        print(f"Validation time: {validation_time}")
+        print_result(report, verbosity[args.error_level])
 
     if args.output:
         from focaccia.parser import serialize_snapshots
 
-        try:
-            states = (
-                matched.trace.state_boundaries
-                if matched.trace is not None
-                else ()
-            )
-            output_env = env
-            if states:
-                output_env = env.with_architecture(states[0].arch.key)
-            elif symb_transforms.env.architecture is not None:
-                output_env = env.with_architecture(symb_transforms.env.architecture)
-            with open(args.output, "w") as file:
-                serialize_snapshots(MaterializedTrace(states, output_env), file)
-        except Exception as error:
-            raise RuntimeError(
-                f"Unable to serialize snapshots to file {args.output}: {error}"
-            ) from error
+        states = (
+            matched.trace.state_boundaries
+            if matched.trace is not None
+            else ()
+        )
+        output_env = env
+        if states:
+            output_env = env.with_architecture(states[0].arch.key)
+        elif symb_transforms.env.architecture is not None:
+            output_env = env.with_architecture(symb_transforms.env.architecture)
+        with open(args.output, "w") as file:
+            serialize_snapshots(MaterializedTrace(states, output_env), file)
 
 if __name__ == "__main__":
     main()

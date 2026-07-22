@@ -153,5 +153,7 @@ def test_plugin_snapshot_does_not_fabricate_unavailable_register_outputs():
     )
 
     assert result.trace is not None
+    assert "snapshot-register-unavailable" in codes(result)
+    assert not result.complete
     with pytest.raises(RegisterAccessError):
         result.trace.state_boundaries[-1].read_register("RAX")
