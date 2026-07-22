@@ -9,7 +9,7 @@ from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
 from focaccia.match import MatchResult, match_transitions
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicTransform
+from focaccia.symbolic import SymbolicTraceItem, TraceGap
 from focaccia.utils import ErrorSeverity, print_result, get_envp
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
@@ -29,7 +29,7 @@ concrete_trace_parsers = {
 _MatchingAlgorithm = Callable[
     [
         Iterable[ProgramState],
-        MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+        MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     ],
     MatchResult,
 ]
@@ -49,7 +49,7 @@ class _ConcreteTraceTarget(Protocol):
     def run(self) -> None: ...
 
 class _SymbolicTraceCollector(Protocol):
-    def trace(self) -> MaterializedTrace[SymbolicTransform]: ...
+    def trace(self) -> MaterializedTrace[SymbolicTraceItem]: ...
 
 _ConcreteTargetFactory = Callable[[str, list[str], list[str]], _ConcreteTraceTarget]
 _SymbolicTracerFactory = Callable[[TraceEnvironment], _SymbolicTraceCollector]
@@ -99,7 +99,7 @@ def collect_concrete_trace(
 def collect_symbolic_trace(
         env: TraceEnvironment,
         tracer_factory: _SymbolicTracerFactory | None = None,
-) -> MaterializedTrace[SymbolicTransform]:
+) -> MaterializedTrace[SymbolicTraceItem]:
     if tracer_factory is None:
         tracer_factory = _make_symbolic_tracer
     return tracer_factory(env).trace()
@@ -185,7 +185,7 @@ def print_reproducer(result, min_severity: ErrorSeverity, oracle, oracle_args):
     for res in result:
         errs = [e for e in res['errors'] if e.severity >= min_severity]
         #breakpoint()
-        if errs:
+        if errs and not isinstance(res['ref'], TraceGap):
             rep = Reproducer(oracle, oracle_args, res['snap'], res['ref'])
             print(rep.asm())
             return
@@ -208,7 +208,7 @@ def get_truth_env(args) -> TraceEnvironment:
 def get_symbolic_trace(
         args,
         tracer_factory: _SymbolicTracerFactory | None = None,
-) -> MaterializedTrace[SymbolicTransform]:
+) -> MaterializedTrace[SymbolicTraceItem]:
     if args.oracle_program:
         env = get_truth_env(args)
         print('Tracing', env)

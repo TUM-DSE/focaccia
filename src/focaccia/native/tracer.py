@@ -7,11 +7,20 @@ import logging
 
 from pathlib import Path
 
+from focaccia.arch import Arch
 from focaccia.utils import timebound, TimeoutError
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import ReadableProgramState, RegisterAccessError
-from focaccia.symbolic import Instruction, SymbolicTransform, DisassemblyContext, run_instruction
+from focaccia.symbolic import (
+    DisassemblyContext,
+    GapReason,
+    Instruction,
+    SymbolicTraceItem,
+    SymbolicTransform,
+    TraceGap,
+    run_instruction,
+)
 from focaccia.deterministic import Event, EventMatcher
 
 from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
@@ -19,7 +28,7 @@ from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
 logger = logging.getLogger('focaccia-symbolic')
 debug = logger.debug
 info = logger.info
-warn = logger.warn
+warn = logger.warning
 
 # Disable Miasm's disassembly logger
 logging.getLogger('asmblock').setLevel(logging.CRITICAL)
@@ -90,7 +99,7 @@ class SpeculativeTracer(ReadableProgramState):
         if new_pc is None:
             self.progress_execution()
             self.target.step()
-            self.pc = self.target.read_pc()
+            self.pc = 0 if self.target.is_exited() else self.target.read_pc()
             self.speculative_pc = None
             self.speculative_count = 0
             return
@@ -124,7 +133,7 @@ class SpeculativeTracer(ReadableProgramState):
         if self.target.is_exited():
             return
         self.target.step()
-        self.pc = self.target.read_pc()
+        self.pc = 0 if self.target.is_exited() else self.target.read_pc()
 
     def _cache(self, name: str, value):
         self.read_cache[name] = value
@@ -259,7 +268,29 @@ class SymbolicTracer:
                 return None
         return self.target.read_pc()
 
-    def trace(self, time_limit: int | None = None) -> MaterializedTrace[SymbolicTransform]:
+    def _trace_gap(
+        self,
+        tid: int,
+        arch: Arch,
+        start: int,
+        end: int,
+        reason: GapReason,
+        error: BaseException,
+        *,
+        instruction: Instruction | None = None,
+    ) -> TraceGap:
+        return TraceGap(
+            tid,
+            arch,
+            start,
+            end,
+            reason,
+            str(error),
+            instruction=instruction,
+            cause=error,
+        )
+
+    def trace(self, time_limit: int | None = None) -> MaterializedTrace[SymbolicTraceItem]:
         """Execute a program and compute state transformations between executed
         instructions.
 
@@ -283,7 +314,7 @@ class SymbolicTracer:
                 debug(event)
 
         # Trace concolically
-        strace: list[SymbolicTransform] = []
+        strace: list[SymbolicTraceItem] = []
         while not self.target.is_exited():
             pc = self.target.read_pc()
 
@@ -298,68 +329,194 @@ class SymbolicTracer:
                 instruction = _disassemble_instruction(ctx, self.target, pc)
                 info(f'[{tid}] Disassembled instruction {instruction} at {hex(pc)}')
             except DisassemblyError as err:
-                if self.force:
-                    warn(f'[{tid}] {err} Skipping.')
-                    self.target.step()
-                    continue
-                raise
+                if not self.force:
+                    raise
+                warn(f'[{tid}] {err} Recording an explicit trace gap.')
+                self.target.step()
+                next_pc = 0 if self.target.is_exited() else self.target.read_pc()
+                strace.append(
+                    self._trace_gap(
+                        tid,
+                        arch,
+                        pc,
+                        next_pc,
+                        'disassembly-error',
+                        err,
+                    )
+                )
+                if self.target.is_exited():
+                    break
+                continue
 
             event = event_matcher.match(self.target)
             post_event = event_matcher.match_pair(event)
-            in_event = (event and event_matcher) or self.target.arch.is_instr_syscall(str(instruction))
+            in_event = event is not None or self.target.arch.is_instr_syscall(
+                str(instruction)
+            )
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
 
+            symbolic_error: BaseException | None = None
+            gap_reason: GapReason = 'unsupported-semantics'
             try:
-                new_pc, modified = timebound(time_limit, run_instruction,
-                                             instruction.instr, conc_state, ctx.lifter)
-            except TimeoutError:
-                warn(f'Running instruction {instruction} took longer than {time_limit} second. Skipping')
-                new_pc, modified = None, {}
-            except Exception as e:
+                new_pc, modified = timebound(
+                    time_limit,
+                    run_instruction,
+                    instruction.instr,
+                    conc_state,
+                    ctx.lifter,
+                )
+                if new_pc is None:
+                    raise RuntimeError('Symbolic execution produced no destination PC.')
+            except TimeoutError as error:
                 if not self.force:
                     raise
-                warn(f'Unable to run instruction symbolically: {e}')
+                warn(
+                    f'Running instruction {instruction} exceeded {time_limit} seconds; '
+                    'recording an explicit trace gap.'
+                )
+                symbolic_error = error
+                gap_reason = 'symbolic-timeout'
+                new_pc, modified = None, {}
+            except Exception as error:
+                if not self.force:
+                    raise
+                warn(
+                    f'Unable to run instruction symbolically: {error}; '
+                    'recording an explicit trace gap.'
+                )
+                symbolic_error = error
                 new_pc, modified = None, {}
 
             symbolic_time += time.time() - symbolic_start
 
-            if self.cross_validate and new_pc:
-                # Predict next concrete state.
-                # We verify the symbolic execution backend on the fly for some
-                # additional protection from bugs in the backend.
-                new_pc = int(new_pc)
+            if symbolic_error is not None:
+                self.progress(None, step=bool(in_event))
+                observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
+                transform: SymbolicTraceItem = self._trace_gap(
+                    tid,
+                    arch,
+                    pc,
+                    observed_pc,
+                    gap_reason,
+                    symbolic_error,
+                    instruction=instruction,
+                )
+            elif self.cross_validate:
+                assert new_pc is not None
+                # Verify generated equations against the concrete target before
+                # retaining them. A forced failure is an explicit gap.
+                destination = int(new_pc)
                 symbolic_start = time.time()
-                transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+                candidate: SymbolicTransform | None = None
+                cross_validation_error: BaseException | None = None
+                failure_reason: GapReason = 'cross-validation-error'
+                try:
+                    candidate = SymbolicTransform(
+                        tid,
+                        modified,
+                        [instruction],
+                        arch,
+                        pc,
+                        destination,
+                    )
+                except Exception as error:
+                    if not self.force:
+                        raise
+                    cross_validation_error = error
+                    failure_reason = 'unsupported-semantics'
                 symbolic_time += time.time() - symbolic_start
-                try:
-                    pred_regs, pred_mems = self.predict_next_state(instruction, transform)
-                except Exception as e:
-                    if self.force:
-                        warn(f'Cross-validation failed: {e}')
-                        continue
-                    raise
-                finally:
-                    self.progress(new_pc, step=True)
 
-                try:
-                    self.validate(instruction, transform, pred_regs, pred_mems)
-                except Exception as e:
-                    if self.force:
-                        warn(f'Cross-validation failed: {e}')
-                        continue
-                    raise
+                pred_regs: dict[str, int] = {}
+                pred_mems: dict[int, bytes] = {}
+                if candidate is not None:
+                    try:
+                        try:
+                            pred_regs, pred_mems = self.predict_next_state(
+                                instruction,
+                                candidate,
+                            )
+                        except Exception as error:
+                            if not self.force:
+                                raise
+                            cross_validation_error = error
+                    finally:
+                        self.progress(destination, step=True)
+                else:
+                    self.progress(None, step=bool(in_event))
+
+                if candidate is not None and cross_validation_error is None:
+                    try:
+                        self.validate(instruction, candidate, pred_regs, pred_mems)
+                    except Exception as error:
+                        if not self.force:
+                            raise
+                        cross_validation_error = error
+
+                if candidate is not None and cross_validation_error is None:
+                    transform = candidate
+                else:
+                    assert cross_validation_error is not None
+                    warn(
+                        f'Symbolic construction/cross-validation failed: '
+                        f'{cross_validation_error}; recording an explicit trace gap.'
+                    )
+                    observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
+                    transform = self._trace_gap(
+                        tid,
+                        arch,
+                        pc,
+                        observed_pc,
+                        failure_reason,
+                        cross_validation_error,
+                        instruction=instruction,
+                    )
             else:
-                new_pc = self.progress(new_pc, step=in_event)
-
+                assert new_pc is not None
+                predicted_destination = int(new_pc)
                 symbolic_start = time.time()
-                if new_pc is None:
-                    transform = SymbolicTransform(tid, modified, [instruction], arch, pc, 0)
-                    strace.append(transform)
-                    symbolic_time += time.time() - symbolic_start
-                    continue # we're done
-                transform = SymbolicTransform(tid, modified, [instruction], arch, pc, new_pc)
+                try:
+                    candidate = SymbolicTransform(
+                        tid,
+                        modified,
+                        [instruction],
+                        arch,
+                        pc,
+                        predicted_destination,
+                    )
+                except Exception as error:
+                    if not self.force:
+                        raise
+                    warn(
+                        f'Unable to construct symbolic transform: {error}; '
+                        'recording an explicit trace gap.'
+                    )
+                    self.progress(None, step=bool(in_event))
+                    observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
+                    transform = self._trace_gap(
+                        tid,
+                        arch,
+                        pc,
+                        observed_pc,
+                        'unsupported-semantics',
+                        error,
+                        instruction=instruction,
+                    )
+                else:
+                    progressed_pc = self.progress(new_pc, step=bool(in_event))
+                    destination = 0 if progressed_pc is None else int(progressed_pc)
+                    if destination == predicted_destination:
+                        transform = candidate
+                    else:
+                        transform = SymbolicTransform(
+                            tid,
+                            modified,
+                            [instruction],
+                            arch,
+                            pc,
+                            destination,
+                        )
                 symbolic_time += time.time() - symbolic_start
 
             symbolic_start = time.time()

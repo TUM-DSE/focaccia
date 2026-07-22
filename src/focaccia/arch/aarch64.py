@@ -1,7 +1,5 @@
 """Description of 64-bit ARM."""
 
-from collections.abc import Callable
-
 from .arch import (
     Arch,
     ConstantRegisterDescription as _ConstReg,
@@ -141,7 +139,17 @@ regname_aliases = {
     'Q31': 'V31',
     'RZR': 'XZR',
     'TPIDR_EL0': 'TPIDR',
-    'DCZID_EL0': 'DCZID',
+    'NF': 'N',
+    'SF': 'N',
+    'ZF': 'Z',
+    'CF': 'C',
+    'VF': 'V',
+    'OF': 'V',
+    'QF': 'Q',
+    'AF': 'A',
+    'EF': 'E',
+    'IF': 'I',
+    'FF': 'F',
 }
 
 cpsr_field_names = [
@@ -181,11 +189,11 @@ class ArchAArch64(Arch):
 
         return regname_aliases.get(name.upper(), None)
 
-    def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
-        if regname == 'DCZID':
-            from . import aarch64_dczid as dczid
-            return dczid.read
-        return None
+    def register_write_zero_extends(self, regname: str) -> bool:
+        accessor = self.get_reg_accessor(regname)
+        if accessor is None or accessor.start != 0 or accessor.num_bits != 32:
+            return False
+        return accessor.base_reg.startswith('X') and accessor.base_reg[1:].isdigit()
 
     def is_instr_syscall(self, instr: str) -> bool:
         return instr.upper().startswith('SVC')

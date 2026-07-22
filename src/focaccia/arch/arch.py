@@ -182,8 +182,17 @@ class Arch:
         return result
 
     def get_reg_reader(self, regname: str) -> Callable[[], int] | None:
-        """Return a reader for a target-independent system register, if any."""
+        """Return a target-independent register reader.
+
+        Architecture implementations must not read analyzer-host registers here.
+        Target-dependent values have to come from the concrete target or remain
+        explicit unknown environment symbols.
+        """
         return None
+
+    def register_write_zero_extends(self, regname: str) -> bool:
+        """Return whether writing ``regname`` clears its base register's high bits."""
+        return False
 
     def is_instr_uarch_dep(self, instr: str) -> bool:
         """Return whether an instruction has microarchitecture-dependent results."""

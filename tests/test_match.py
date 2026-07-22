@@ -130,7 +130,9 @@ def test_composed_cutpoint_retains_outputs_from_every_skipped_transform():
     )
 
     assert result.trace is not None
-    assert set(result.trace.transforms[0].changed_regs) == {"RAX", "RBX"}
+    composed = result.trace.transforms[0]
+    assert isinstance(composed, SymbolicTransform)
+    assert set(composed.changed_regs) == {"RAX", "RBX"}
 
 
 def test_adaptive_matching_consumes_a_one_shot_transform_stream_once():

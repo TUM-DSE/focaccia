@@ -318,6 +318,7 @@
         "src/focaccia/cli.py"
         "src/focaccia/compare.py"
         "src/focaccia/match.py"
+        "src/focaccia/miasm_util.py"
         "src/focaccia/native/lldb_target.py"
         "src/focaccia/native/tracer.py"
         "src/focaccia/parser.py"
@@ -663,6 +664,21 @@
       ];
     };
 
+    traceSchemaV3Check = mkStaticUnitCheck {
+      name = "trace-schema-v3";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/persistence.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "-k"
+        "schema_v3 or ordered_memory_writes or trace_gaps or malformed_trace_gap"
+      ];
+    };
+
     jsonTraceRoundtripCheck = mkStaticUnitCheck {
       name = "json-trace-roundtrip";
       ruffTargets = [
@@ -715,7 +731,7 @@
       pytestTargets = [
         "tests/test_persistence.py"
         "-k"
-        "cardinality or memory_ranges or expression_widths or missing_v2 or top_level"
+        "cardinality or memory_ranges or expression_widths or missing_versioned or top_level"
       ];
     };
 
@@ -810,6 +826,74 @@
         "tests/test_match.py"
         "tests/test_qemu_matching.py"
       ];
+    };
+
+    fix046SymbolicCompositionCheck = mkStaticUnitCheck {
+      name = "fix-046-symbolic-composition";
+      ruffTargets = [
+        "src/focaccia/arch"
+        "src/focaccia/miasm_util.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [ "tests/test_symbolic_composition.py" ];
+    };
+
+    fix045Fp32ToFp64Check = mkStaticUnitCheck {
+      name = "fix-045-fp32-to-fp64";
+      ruffTargets = [
+        "src/focaccia/miasm_util.py"
+        "tests/test_fp_semantics.py"
+      ];
+      pytestTargets = [ "tests/test_fp_semantics.py" ];
+    };
+
+    fix029ExplicitTraceGapsCheck = mkStaticUnitCheck {
+      name = "fix-029-explicit-trace-gaps";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "src/focaccia/match.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/persistence.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_native_api.py"
+        "tests/test_persistence.py"
+        "tests/test_trace_gaps.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "tests/test_persistence.py"
+        "tests/test_trace_gaps.py"
+        "-k"
+        "trace_gap or force_mode_records or gap_is_retained or gap_cannot or gap_preserves"
+      ];
+    };
+
+    fix067X86ExtendedRegisterAliasesCheck = mkStaticUnitCheck {
+      name = "fix-067-x86-extended-register-aliases";
+      ruffTargets = [
+        "src/focaccia/arch/x86.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_symbolic_composition.py"
+        "-k"
+        "extended_register_aliases"
+      ];
+    };
+
+    fix062TargetEnvironmentSymbolsCheck = mkStaticUnitCheck {
+      name = "fix-062-target-environment-symbols";
+      ruffTargets = [
+        "src/focaccia/arch/aarch64.py"
+        "src/focaccia/compare.py"
+        "src/focaccia/miasm_util.py"
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_environment_symbols.py"
+      ];
+      pytestTargets = [ "tests/test_environment_symbols.py" ];
     };
 
   in rec {
@@ -946,6 +1030,7 @@
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
       fresh-file-hashes = freshFileHashesCheck;
       trace-schema-v2 = traceSchemaV2Check;
+      trace-schema-v3 = traceSchemaV3Check;
       json-trace-roundtrip = jsonTraceRoundtripCheck;
       msgpack-trace-roundtrip = msgpackTraceRoundtripCheck;
       legacy-trace-readers = legacyTraceReadersCheck;
@@ -956,6 +1041,11 @@
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
+      fix-046-symbolic-composition = fix046SymbolicCompositionCheck;
+      fix-045-fp32-to-fp64 = fix045Fp32ToFp64Check;
+      fix-029-explicit-trace-gaps = fix029ExplicitTraceGapsCheck;
+      fix-062-target-environment-symbols = fix062TargetEnvironmentSymbolsCheck;
+      fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
     };
   });
 }

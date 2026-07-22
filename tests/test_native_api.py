@@ -1,12 +1,14 @@
 from typing import cast
 
 import pytest
+from miasm.core.locationdb import LocationDB
+from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch import x86
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import DisassemblyError, SpeculativeTracer, SymbolicTracer
-from focaccia.symbolic import DisassemblyContext, Instruction
+from focaccia.symbolic import DisassemblyContext, Instruction, TraceGap
 from focaccia.tools.capture_transforms import make_argparser
 from focaccia.trace import TraceEnvironment
 
@@ -85,6 +87,35 @@ def test_speculative_tracer_uses_target_read_pc():
     assert speculative.read_pc() == 0x1004
     assert fake.read_pc_calls == 2
     assert fake.step_calls == 1
+
+
+def test_speculative_tracer_does_not_read_pc_after_terminal_step():
+    class FakeTarget:
+        arch = x86.ArchX86()
+
+        def __init__(self):
+            self.exited = False
+            self.read_pc_calls = 0
+
+        def read_pc(self) -> int:
+            self.read_pc_calls += 1
+            if self.exited:
+                raise AssertionError("terminal targets have no readable PC")
+            return 0x1000
+
+        def step(self) -> None:
+            self.exited = True
+
+        def is_exited(self) -> bool:
+            return self.exited
+
+    fake = FakeTarget()
+    speculative = SpeculativeTracer(cast(LLDBConcreteTarget, fake))
+
+    speculative.speculate(None)
+
+    assert speculative.read_pc() == 0
+    assert fake.read_pc_calls == 1
 
 
 def test_symbolic_tracer_selects_local_target_for_none(monkeypatch):
@@ -196,3 +227,175 @@ def test_disassembly_fallback_preserves_both_errors(monkeypatch):
     assert raised.value.primary_error is primary_error
     assert raised.value.fallback_error is fallback_error
     assert raised.value.__cause__ is fallback_error
+
+
+def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
+    class FakeInstruction:
+        instr = object()
+
+        def __str__(self) -> str:
+            return "UNMODELED-OUTPUT"
+
+    instruction = cast(Instruction, FakeInstruction())
+
+    class FakeContext:
+        arch = x86.ArchX86()
+        loc_db = LocationDB()
+        lifter = object()
+
+    class FakeEventMatcher:
+        events = []
+
+        def __init__(self, *_args):
+            pass
+
+        def match(self, _target):
+            return None
+
+        def match_pair(self, _event):
+            return None
+
+    class FakeTarget:
+        arch = x86.ArchX86()
+        exec_time = 0.0
+
+        def __init__(self):
+            self.target = self
+            self.pc = 0x1000
+            self.executed = False
+            self.post_execution_exit_checks = 0
+
+        def is_exited(self) -> bool:
+            if not self.executed:
+                return False
+            self.post_execution_exit_checks += 1
+            return self.post_execution_exit_checks >= 2
+
+        def read_pc(self) -> int:
+            return self.pc
+
+        def get_current_tid(self) -> int:
+            return 9
+
+        def speculate(self, new_pc) -> None:
+            assert new_pc is None
+            self.pc = 0x1001
+            self.executed = True
+
+        def progress_execution(self) -> None:
+            pass
+
+    def unsupported_output(*_args, **_kwargs):
+        return (
+            ExprInt(0x1001, 64),
+            {ExprId("UNMODELED", 64): ExprInt(1, 64)},
+        )
+
+    monkeypatch.setattr(tracer_module, "DisassemblyContext", lambda _target: FakeContext())
+    monkeypatch.setattr(
+        tracer_module,
+        "_disassemble_instruction",
+        lambda _ctx, _target, _pc: instruction,
+    )
+    monkeypatch.setattr(tracer_module, "EventMatcher", FakeEventMatcher)
+    monkeypatch.setattr(tracer_module, "timebound", unsupported_output)
+
+    tracer = object.__new__(SymbolicTracer)
+    tracer.env = _environment()
+    tracer.force = True
+    tracer.cross_validate = False
+    tracer.validation_time = 0.0
+    tracer.target = cast(SpeculativeTracer, FakeTarget())
+
+    trace = tracer.trace()
+
+    assert len(trace) == 1
+    gap = trace[0]
+    assert isinstance(gap, TraceGap)
+    assert gap.range == (0x1000, 0x1001)
+    assert gap.reason == "unsupported-semantics"
+    assert gap.cause is not None
+    assert "UNMODELED" in str(gap.cause)
+
+
+def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
+    symbolic_error = NotImplementedError("fixture instruction is unsupported")
+
+    class FakeInstruction:
+        instr = object()
+
+        def __str__(self) -> str:
+            return "UNSUPPORTED"
+
+    instruction = cast(Instruction, FakeInstruction())
+
+    class FakeContext:
+        arch = x86.ArchX86()
+        loc_db = LocationDB()
+        lifter = object()
+
+    class FakeEventMatcher:
+        events = []
+
+        def __init__(self, *_args):
+            pass
+
+        def match(self, _target):
+            return None
+
+        def match_pair(self, _event):
+            return None
+
+    class FakeTarget:
+        arch = x86.ArchX86()
+        exec_time = 0.0
+
+        def __init__(self):
+            self.target = self
+            self.pc = 0x1000
+            self.exited = False
+
+        def is_exited(self) -> bool:
+            return self.exited
+
+        def read_pc(self) -> int:
+            return self.pc
+
+        def get_current_tid(self) -> int:
+            return 9
+
+        def speculate(self, new_pc) -> None:
+            assert new_pc is None
+            self.pc = 0x1001
+            self.exited = True
+
+        def progress_execution(self) -> None:
+            pass
+
+    def fail_symbolically(*_args, **_kwargs):
+        raise symbolic_error
+
+    monkeypatch.setattr(tracer_module, "DisassemblyContext", lambda _target: FakeContext())
+    monkeypatch.setattr(
+        tracer_module,
+        "_disassemble_instruction",
+        lambda _ctx, _target, _pc: instruction,
+    )
+    monkeypatch.setattr(tracer_module, "EventMatcher", FakeEventMatcher)
+    monkeypatch.setattr(tracer_module, "timebound", fail_symbolically)
+
+    tracer = object.__new__(SymbolicTracer)
+    tracer.env = _environment()
+    tracer.force = True
+    tracer.cross_validate = False
+    tracer.validation_time = 0.0
+    tracer.target = cast(SpeculativeTracer, FakeTarget())
+
+    trace = tracer.trace()
+
+    assert len(trace) == 1
+    gap = trace[0]
+    assert isinstance(gap, TraceGap)
+    assert gap.range == (0x1000, 0)
+    assert gap.reason == "unsupported-semantics"
+    assert gap.cause is symbolic_error

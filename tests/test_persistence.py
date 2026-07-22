@@ -2,6 +2,7 @@ import copy
 import io
 import json
 from pathlib import Path
+from typing import cast
 
 import msgpack
 import pytest
@@ -31,7 +32,7 @@ from focaccia.parser import (
 )
 from focaccia.persistence import MAX_TRACE_ITEMS, MSGPACK_MAGIC
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicTransform
+from focaccia.symbolic import InstructionRecord, SymbolicTransform, TraceGap
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 FIXTURES = Path(__file__).parent / "fixtures" / "traces"
@@ -114,7 +115,7 @@ def write_transform_msgpack(tmp_path: Path) -> tuple[Path, list[dict]]:
     return path, decode_msgpack_frames(path.read_bytes())
 
 
-def test_schema_v2_json_transform_round_trip(tmp_path):
+def test_schema_v3_json_transform_round_trip(tmp_path):
     path, document = write_transform_json(tmp_path)
 
     assert document["schema_version"] == SCHEMA_VERSION
@@ -123,16 +124,22 @@ def test_schema_v2_json_transform_round_trip(tmp_path):
     assert document["addresses"] == [0x1000]
     assert document["item_count"] == 1
     assert len(document["items"]) == 1
+    assert document["items"][0]["record_kind"] == "transform"
+    assert document["items"][0]["memory_writes"] == [
+        {"address": "ExprInt(0x2000, 64)", "value": "ExprInt(0xABCD, 16)"}
+    ]
 
     with path.open() as stream:
         parsed = parse_transformations(stream)
     assert parsed.env == transform_trace().env
     assert parsed.require_addresses() == (0x1000,)
-    assert [item.to_json() for item in parsed] == [transform().to_json()]
+    assert [cast(SymbolicTransform, item).to_json() for item in parsed] == [
+        transform().to_json()
+    ]
     assert list(parsed) == list(parsed)
 
 
-def test_schema_v2_msgpack_transform_round_trip(tmp_path):
+def test_schema_v3_msgpack_transform_round_trip(tmp_path):
     path, frames = write_transform_msgpack(tmp_path)
     header = frames[0]
 
@@ -147,8 +154,143 @@ def test_schema_v2_msgpack_transform_round_trip(tmp_path):
         parsed = stream_transformation(source)
         assert parsed.env == transform_trace().env
         assert parsed.require_addresses() == (0x1000,)
-        assert [item.to_json() for item in parsed] == [transform().to_json()]
+        assert [cast(SymbolicTransform, item).to_json() for item in parsed] == [
+            transform().to_json()
+        ]
         assert parsed.exhausted
+
+
+def test_schema_v2_transform_documents_remain_readable(tmp_path):
+    _, document = write_transform_json(tmp_path)
+    document["schema_version"] = 2
+    for item in document["items"]:
+        item.pop("record_kind")
+        item["mem"] = {
+            write["address"]: write["value"] for write in item.pop("memory_writes")
+        }
+
+    parsed = parse_transformations(io.StringIO(json.dumps(document)))
+
+    assert len(parsed) == 1
+    assert cast(SymbolicTransform, parsed[0]).to_json() == transform().to_json()
+
+
+def test_schema_v2_state_documents_remain_readable():
+    arch = x86.ArchX86()
+    original = ProgramState(arch)
+    original.write_register("RIP", 0x1000)
+    trace = MaterializedTrace([original], environment(arch), [0x1000])
+    output = io.StringIO()
+    serialize_snapshots(trace, output)
+    document = json.loads(output.getvalue())
+    document["schema_version"] = 2
+
+    parsed = parse_snapshots(io.StringIO(json.dumps(document)))
+
+    assert parsed[0].read_pc() == 0x1000
+
+
+def test_ordered_memory_writes_round_trip_without_collapsing(tmp_path):
+    arch = x86.ArchX86()
+    pointer = ExprInt(0x2000, 64)
+    first = SymbolicTransform(
+        1,
+        {ExprMem(pointer, 16): ExprInt(0x1122, 16)},
+        [],
+        arch,
+        0x1000,
+        0x1001,
+    )
+    second = SymbolicTransform(
+        1,
+        {ExprMem(pointer, 16): ExprInt(0xAABB, 16)},
+        [],
+        arch,
+        0x1001,
+        0x1002,
+    )
+    composed = first.composed_with(second)
+    assert "mem" not in composed.to_json()
+    trace = MaterializedTrace([composed], environment(arch), [composed.addr])
+    path = tmp_path / "ordered.json"
+
+    serialize_transformations(trace, path, "json")
+    with path.open() as source:
+        parsed = parse_transformations(source)
+
+    parsed_transform = cast(SymbolicTransform, parsed[0])
+    assert len(parsed_transform.memory_writes) == 2
+    initial = ProgramState(arch)
+    assert parsed_transform.eval_memory_transforms(initial) == {
+        0x2000: b"\xbb\xaa"
+    }
+
+
+def test_trace_gaps_round_trip_in_json_and_streaming_msgpack(tmp_path):
+    arch = x86.ArchX86()
+    cause = NotImplementedError("fixture semantics unavailable")
+    instruction = InstructionRecord(0x1000, 1, "NOP")
+    gap = TraceGap(
+        3,
+        arch,
+        0x1000,
+        0x1001,
+        "unsupported-semantics",
+        str(cause),
+        cause=cause,
+        instruction=instruction,
+    )
+    trace = MaterializedTrace([gap], environment(arch), [gap.addr])
+
+    json_path = tmp_path / "gap.json"
+    serialize_transformations(trace, json_path, "json")
+    with json_path.open() as source:
+        parsed_json = parse_transformations(source)
+
+    msgpack_path = tmp_path / "gap.msgpack"
+    serialize_transformations(trace, msgpack_path, "msgpack")
+    with msgpack_path.open("rb") as source:
+        parsed_msgpack = list(stream_transformation(source))
+
+    for parsed in (parsed_json[0], parsed_msgpack[0]):
+        assert isinstance(parsed, TraceGap)
+        assert parsed.range == gap.range
+        assert parsed.reason == gap.reason
+        assert parsed.message == gap.message
+        assert parsed.cause is None
+        assert parsed.cause_type == "builtins.NotImplementedError"
+        assert parsed.instruction is not None
+        assert parsed.instruction.to_string().strip() == "NOP"
+
+
+def test_malformed_trace_gap_documents_are_rejected(tmp_path):
+    arch = x86.ArchX86()
+    gap = TraceGap(
+        1,
+        arch,
+        0x1000,
+        0x1001,
+        "unsupported-semantics",
+        "fixture gap",
+    )
+    trace = MaterializedTrace([gap], environment(arch), [gap.addr])
+    path = tmp_path / "gap.json"
+    serialize_transformations(trace, path, "json")
+    document = json.loads(path.read_text())
+
+    invalid_reason = copy.deepcopy(document)
+    invalid_reason["items"][0]["reason"] = "ignored"
+    empty_message = copy.deepcopy(document)
+    empty_message["items"][0]["message"] = ""
+    unknown_record = copy.deepcopy(document)
+    unknown_record["items"][0]["record_kind"] = "unknown"
+
+    with pytest.raises(TransformParseError, match="reason"):
+        parse_transformations(io.StringIO(json.dumps(invalid_reason)))
+    with pytest.raises(TransformParseError, match="message"):
+        parse_transformations(io.StringIO(json.dumps(empty_message)))
+    with pytest.raises(TransformParseError, match="record kind"):
+        parse_transformations(io.StringIO(json.dumps(unknown_record)))
 
 
 def test_json_and_msgpack_share_logical_header_fields(tmp_path):
@@ -170,7 +312,7 @@ def test_json_and_msgpack_share_logical_header_fields(tmp_path):
         assert msgpack_header[field] == json_document[field]
 
 
-def test_empty_state_trace_is_a_typed_v2_document():
+def test_empty_state_trace_is_a_typed_versioned_document():
     arch = x86.ArchX86()
     trace = MaterializedTrace([], environment(arch))
     output = io.StringIO()
@@ -304,7 +446,7 @@ def test_unknown_schema_versions_and_wrong_trace_kinds_are_rejected(tmp_path):
         stream_transformation(io.BytesIO(encode_msgpack_frames(msgpack_frames)))
 
 
-def test_v2_cardinality_and_address_mismatches_are_rejected(tmp_path):
+def test_versioned_cardinality_and_address_mismatches_are_rejected(tmp_path):
     _, document = write_transform_json(tmp_path)
     wrong_count = copy.deepcopy(document)
     wrong_count["item_count"] = 2
@@ -377,7 +519,7 @@ def test_symbolic_expression_widths_and_instruction_lengths_are_validated(tmp_pa
         parse_transformations(io.StringIO(json.dumps(overlapping_registers)))
 
 
-def test_missing_v2_metadata_and_oversized_counts_are_rejected(tmp_path):
+def test_missing_versioned_metadata_and_oversized_counts_are_rejected(tmp_path):
     _, document = write_transform_json(tmp_path)
     missing = copy.deepcopy(document)
     del missing["environment"]

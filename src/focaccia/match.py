@@ -7,7 +7,7 @@ from copy import copy
 from dataclasses import dataclass
 
 from .snapshot import ProgramState, RegisterAccessError
-from .symbolic import SymbolicTransform
+from .symbolic import SymbolicTraceItem, SymbolicTransform, TraceGap
 from .trace import (
     DiagnosticLevel,
     MaterializedTrace,
@@ -24,17 +24,17 @@ class MatchedBoundary:
 
     concrete_index: int
     pc: int
-    incoming: SymbolicTransform | None
-    outgoing: SymbolicTransform | None
+    incoming: SymbolicTraceItem | None
+    outgoing: SymbolicTraceItem | None
 
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
     """A cardinality-valid matched trace plus non-fatal/fatal diagnostics."""
 
-    trace: TransitionTrace[ProgramState, SymbolicTransform] | None
+    trace: TransitionTrace[ProgramState, SymbolicTraceItem] | None
     diagnostics: tuple[TraceDiagnostic, ...]
-    pending_transform: SymbolicTransform | None = None
+    pending_transform: SymbolicTraceItem | None = None
 
     @property
     def complete(self) -> bool:
@@ -47,16 +47,16 @@ def _clone_transform(transform: SymbolicTransform) -> SymbolicTransform:
     """Copy the mutable transform containers without copying immutable expressions."""
     cloned = copy(transform)
     cloned.changed_regs = transform.changed_regs.copy()
-    cloned.changed_mem = transform.changed_mem.copy()
+    cloned.memory_writes = list(transform.memory_writes)
     cloned.instructions = list(transform.instructions)
     return cloned
 
 
 def _as_symbolic_trace(
-    transforms: MaterializedTrace[SymbolicTransform]
-    | TransformStream[SymbolicTransform]
-    | Iterable[SymbolicTransform],
-) -> MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform]:
+    transforms: MaterializedTrace[SymbolicTraceItem]
+    | TransformStream[SymbolicTraceItem]
+    | Iterable[SymbolicTraceItem],
+) -> MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem]:
     if isinstance(transforms, (MaterializedTrace, TransformStream)):
         return transforms
 
@@ -82,9 +82,9 @@ class TransitionMatcher:
 
     def __init__(
         self,
-        transforms: MaterializedTrace[SymbolicTransform]
-        | TransformStream[SymbolicTransform]
-        | Iterable[SymbolicTransform],
+        transforms: MaterializedTrace[SymbolicTraceItem]
+        | TransformStream[SymbolicTraceItem]
+        | Iterable[SymbolicTraceItem],
         *,
         stop_address: int | None = None,
     ):
@@ -104,9 +104,9 @@ class TransitionMatcher:
 
         self._diagnostics: list[TraceDiagnostic] = []
         self._next_transform_index = 0
-        self._loaded_transforms: dict[int, SymbolicTransform] = {}
+        self._loaded_transforms: dict[int, SymbolicTraceItem] = {}
         self._current_index: int | None = None
-        self._current: SymbolicTransform | None = None
+        self._current: SymbolicTraceItem | None = None
         self._source_pc: int | None = None
         self._has_source = False
         self._has_boundary = False
@@ -115,7 +115,7 @@ class TransitionMatcher:
         self._concrete_count = 0
         self._extra_concrete_count = 0
         self._first_extra_concrete_index: int | None = None
-        self._pending_transform: SymbolicTransform | None = None
+        self._pending_transform: SymbolicTraceItem | None = None
         self._architecture = None
         self._thread_id: int | None = None
 
@@ -128,7 +128,7 @@ class TransitionMatcher:
         return tuple(self._diagnostics)
 
     @property
-    def pending_transform(self) -> SymbolicTransform | None:
+    def pending_transform(self) -> SymbolicTraceItem | None:
         return self._pending_transform
 
     def _diagnose(
@@ -170,6 +170,28 @@ class TransitionMatcher:
         self._current = None
         self._current_index = None
 
+    def _stop_incomplete(
+        self,
+        code: str,
+        message: str,
+        *,
+        concrete_index: int | None = None,
+        transform_index: int | None = None,
+        pending: SymbolicTraceItem | None = None,
+    ) -> None:
+        self._diagnose(
+            "incomplete",
+            code,
+            message,
+            concrete_index=concrete_index,
+            transform_index=transform_index,
+        )
+        self._pending_transform = pending
+        self._done = True
+        self._has_source = False
+        self._current = None
+        self._current_index = None
+
     def fail_concrete_state(self, index: int, error: Exception) -> None:
         self._fatal(
             "concrete-pc-unavailable",
@@ -178,7 +200,7 @@ class TransitionMatcher:
             transform_index=self._current_index,
         )
 
-    def _read_transform(self, index: int) -> SymbolicTransform | None:
+    def _read_transform(self, index: int) -> SymbolicTraceItem | None:
         if index in self._loaded_transforms:
             return self._loaded_transforms[index]
         if index != self._next_transform_index:
@@ -274,7 +296,7 @@ class TransitionMatcher:
                 return index
         return None
 
-    def _load_initial_transform(self, target_index: int) -> SymbolicTransform | None:
+    def _load_initial_transform(self, target_index: int) -> SymbolicTraceItem | None:
         for index in range(self._next_transform_index, target_index + 1):
             transform = self._read_transform(index)
             if transform is None:
@@ -308,7 +330,7 @@ class TransitionMatcher:
         pc: int,
         concrete_index: int,
     ) -> int | None:
-        previous: SymbolicTransform | None = None
+        previous: SymbolicTraceItem | None = None
         for index in range(start_index, len(self.addresses)):
             transform = self._read_transform(index)
             if transform is None:
@@ -331,15 +353,36 @@ class TransitionMatcher:
         self,
         end_index: int,
         concrete_index: int,
-    ) -> SymbolicTransform | None:
+    ) -> SymbolicTraceItem | None:
         assert self._current is not None
         assert self._current_index is not None
+        if isinstance(self._current, TraceGap):
+            if end_index != self._current_index:
+                self._stop_incomplete(
+                    "symbolic-gap-without-cutpoint",
+                    f"Cannot compose across trace gap {self._current_index} without "
+                    f"a concrete boundary at {hex(self._current.range[1])}.",
+                    concrete_index=concrete_index,
+                    transform_index=self._current_index,
+                    pending=self._current,
+                )
+                return None
+            self._diagnose(
+                "incomplete",
+                "symbolic-gap-retained",
+                f"Retained explicit trace gap {self._current_index} "
+                f"({self._current.reason}): {self._current.message}",
+                concrete_index=concrete_index,
+                transform_index=self._current_index,
+            )
+            return self._current
+
         composite = (
             self._current
             if end_index == self._current_index
             else _clone_transform(self._current)
         )
-        previous = self._current
+        previous: SymbolicTraceItem = self._current
 
         for index in range(self._current_index + 1, end_index + 1):
             transform = self._read_transform(index)
@@ -364,6 +407,17 @@ class TransitionMatcher:
                     transform_index=index,
                 )
                 return None
+            if isinstance(transform, TraceGap):
+                self._stop_incomplete(
+                    "symbolic-gap-without-cutpoint",
+                    f"Cannot compose across trace gap {index} without a concrete "
+                    f"boundary at {hex(transform.range[0])}.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                    pending=transform,
+                )
+                return None
+            assert isinstance(composite, SymbolicTransform)
             try:
                 composite.concat(transform)
             except Exception as error:
@@ -502,7 +556,7 @@ class TransitionMatcher:
         next_index = end_index + 1
         for index in range(start_index, end_index + 1):
             self._loaded_transforms.pop(index, None)
-        outgoing: SymbolicTransform | None = None
+        outgoing: SymbolicTraceItem | None = None
         self._current = None
         self._current_index = None
 
@@ -580,7 +634,7 @@ class TransitionMatcher:
     def make_result(
         self,
         states: Sequence[ProgramState],
-        transforms: Sequence[SymbolicTransform],
+        transforms: Sequence[SymbolicTraceItem],
     ) -> MatchResult:
         self.finish()
         trace = None
@@ -598,14 +652,14 @@ class TransitionMatcher:
 
 def match_transitions(
     concrete_states: Iterable[ProgramState],
-    symbolic_transforms: MaterializedTrace[SymbolicTransform]
-    | TransformStream[SymbolicTransform]
-    | Iterable[SymbolicTransform],
+    symbolic_transforms: MaterializedTrace[SymbolicTraceItem]
+    | TransformStream[SymbolicTraceItem]
+    | Iterable[SymbolicTraceItem],
 ) -> MatchResult:
     """Match materialized concrete states to symbolic transitions."""
     matcher = TransitionMatcher(symbolic_transforms)
     retained_states: list[ProgramState] = []
-    retained_transforms: list[SymbolicTransform] = []
+    retained_transforms: list[SymbolicTraceItem] = []
 
     for concrete_index, state in enumerate(concrete_states):
         try:
@@ -642,9 +696,9 @@ def match_transitions(
 
 
 def match_traces(
-    ctrace: list[ProgramState],
-    strace: list[SymbolicTransform],
-) -> tuple[list[ProgramState], list[SymbolicTransform]]:
+    ctrace: Sequence[ProgramState],
+    strace: Sequence[SymbolicTraceItem],
+) -> tuple[list[ProgramState], list[SymbolicTraceItem]]:
     """Compatibility wrapper around the shared non-mutating matcher."""
     result = match_transitions(ctrace, strace)
     if result.trace is None:
@@ -653,8 +707,8 @@ def match_traces(
 
 
 def fold_traces(
-    ctrace: list[ProgramState],
-    strace: list[SymbolicTransform],
-) -> tuple[list[ProgramState], list[SymbolicTransform]]:
+    ctrace: Sequence[ProgramState],
+    strace: Sequence[SymbolicTraceItem],
+) -> tuple[list[ProgramState], list[SymbolicTraceItem]]:
     """Compatibility alias for adaptive matching; inputs are never mutated."""
     return match_traces(ctrace, strace)

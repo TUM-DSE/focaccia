@@ -3,7 +3,7 @@ import io
 import json
 
 from focaccia.arch import aarch64
-from focaccia.parser import parse_snapshots, serialize_snapshots
+from focaccia.parser import SCHEMA_VERSION, parse_snapshots, serialize_snapshots
 from focaccia.snapshot import ProgramState
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
@@ -23,7 +23,7 @@ def test_snapshot_serialization_preserves_identity_and_partial_validity():
     document = json.loads(serialized)
     parsed = parse_snapshots(io.StringIO(serialized))
 
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == SCHEMA_VERSION
     assert document["trace_kind"] == "states"
     assert document["architecture"] == "aarch64b"
     assert document["item_count"] == 1

@@ -15,14 +15,14 @@ registers = [
     _Reg(('RDI', 0, 64), ('EDI', 0, 32), ('DI', 0, 16), ('DIL', 0, 8)),
     _Reg(('RBP', 0, 64), ('EBP', 0, 32), ('BP', 0, 16), ('BPL', 0, 8)),
     _Reg(('RSP', 0, 64), ('ESP', 0, 32), ('SP', 0, 16), ('SPL', 0, 8)),
-    _Reg(('R8',  0, 64)),
-    _Reg(('R9',  0, 64)),
-    _Reg(('R10', 0, 64)),
-    _Reg(('R11', 0, 64)),
-    _Reg(('R12', 0, 64)),
-    _Reg(('R13', 0, 64)),
-    _Reg(('R14', 0, 64)),
-    _Reg(('R15', 0, 64)),
+    _Reg(('R8',  0, 64), ('R8D',  0, 32), ('R8W',  0, 16), ('R8B',  0, 8)),
+    _Reg(('R9',  0, 64), ('R9D',  0, 32), ('R9W',  0, 16), ('R9B',  0, 8)),
+    _Reg(('R10', 0, 64), ('R10D', 0, 32), ('R10W', 0, 16), ('R10B', 0, 8)),
+    _Reg(('R11', 0, 64), ('R11D', 0, 32), ('R11W', 0, 16), ('R11B', 0, 8)),
+    _Reg(('R12', 0, 64), ('R12D', 0, 32), ('R12W', 0, 16), ('R12B', 0, 8)),
+    _Reg(('R13', 0, 64), ('R13D', 0, 32), ('R13W', 0, 16), ('R13B', 0, 8)),
+    _Reg(('R14', 0, 64), ('R14D', 0, 32), ('R14W', 0, 16), ('R14B', 0, 8)),
+    _Reg(('R15', 0, 64), ('R15D', 0, 32), ('R15W', 0, 16), ('R15B', 0, 8)),
 
     # RFLAGS
     _Reg(('RFLAGS', 0, 64), ('EFLAGS', 0, 32), ('FLAGS', 0, 16),
@@ -110,7 +110,10 @@ regnames = [desc.base.base_reg for desc in registers]
 # A dictionary mapping aliases to standard register names.
 regname_aliases = {
     'PC': 'RIP',
-    'NF': 'SF',   # negative flag == sign flag in Miasm?
+    'NF': 'SF',
+    'I_F': 'IF',
+    'IOPL_F': 'IOPL',
+    'I_D': 'ID',
 }
 
 rflag_names = [
@@ -146,6 +149,15 @@ class ArchX86(Arch):
 
         # Apply custom register alias rules
         return regname_aliases.get(name.upper(), None)
+
+    def register_write_zero_extends(self, regname: str) -> bool:
+        accessor = self.get_reg_accessor(regname)
+        if accessor is None or accessor.start != 0 or accessor.num_bits != 32:
+            return False
+        return accessor.base_reg in {
+            'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+            'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
+        }
 
     def is_instr_uarch_dep(self, instr: str) -> bool:
         if "XGETBV" in instr.upper():

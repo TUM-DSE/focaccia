@@ -4,7 +4,12 @@ from collections.abc import Iterable, Iterator, Sequence
 from typing import Any, overload
 
 from .snapshot import MemoryAccessError, ProgramState, RegisterAccessError
-from .symbolic import SymbolicTransform
+from .symbolic import (
+    SymbolEvaluationError,
+    SymbolicTraceItem,
+    SymbolicTransform,
+    TraceGap,
+)
 from .trace import (
     DiagnosticLevel,
     TraceDiagnostic,
@@ -295,6 +300,15 @@ def _find_register_errors(
                 "that are not entirely present in the tested source state.",
             )
         ]
+    except SymbolEvaluationError as error:
+        start, end = transform_truth.range
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                f"Register transformations {hex(start)} -> {hex(end)} depend "
+                f"on an unresolved environment symbol: {error}",
+            )
+        ]
     except RegisterAccessError as error:
         start, end = transform_truth.range
         if is_uarch_dep:
@@ -367,6 +381,15 @@ def _find_memory_errors(
                 "that are not entirely present in the tested source state.",
             )
         ]
+    except SymbolEvaluationError as error:
+        start, end = transform_truth.range
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                f"Memory transformations {hex(start)} -> {hex(end)} depend "
+                f"on an unresolved environment symbol: {error}",
+            )
+        ]
     except RegisterAccessError as error:
         start, end = transform_truth.range
         return [
@@ -422,12 +445,12 @@ def _find_errors_symbolic(
 
 
 def _coerce_transition_trace(
-    test_states: TransitionTrace[ProgramState, SymbolicTransform]
+    test_states: TransitionTrace[ProgramState, SymbolicTraceItem]
     | Iterable[ProgramState]
     | None,
-    transforms: Iterable[SymbolicTransform] | None,
+    transforms: Iterable[SymbolicTraceItem] | None,
 ) -> tuple[
-    TransitionTrace[ProgramState, SymbolicTransform] | None,
+    TransitionTrace[ProgramState, SymbolicTraceItem] | None,
     list[TraceDiagnostic],
 ]:
     diagnostics: list[TraceDiagnostic] = []
@@ -485,10 +508,10 @@ def _coerce_transition_trace(
 
 
 def compare_symbolic(
-    test_states: TransitionTrace[ProgramState, SymbolicTransform]
+    test_states: TransitionTrace[ProgramState, SymbolicTraceItem]
     | Iterable[ProgramState]
     | None,
-    transforms: Iterable[SymbolicTransform] | None = None,
+    transforms: Iterable[SymbolicTraceItem] | None = None,
     *,
     diagnostics: Iterable[TraceDiagnostic] = (),
 ) -> ValidationReport:
@@ -561,6 +584,21 @@ def compare_symbolic(
                 _diagnostic(
                     "error",
                     "transition-range-mismatch",
+                    message,
+                    concrete_index=index,
+                    transform_index=index,
+                )
+            )
+            entry_errors.append(Error(ErrorTypes.INCOMPLETE, message))
+        elif isinstance(transform, TraceGap):
+            message = (
+                f"Symbolic semantics are unavailable for transition {index} "
+                f"({transform.reason}): {transform.message}"
+            )
+            all_diagnostics.append(
+                _diagnostic(
+                    "incomplete",
+                    "symbolic-trace-gap",
                     message,
                     concrete_index=index,
                     transform_index=index,

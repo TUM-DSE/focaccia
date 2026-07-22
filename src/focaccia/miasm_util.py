@@ -9,8 +9,7 @@ from miasm.expression.simplifications import expr_simp_explicit
 
 from . import arch
 from .arch import Arch
-from .snapshot import ReadableProgramState, \
-                      RegisterAccessError, MemoryAccessError
+from .snapshot import ReadableProgramState, MemoryAccessError
 
 def make_machine(_arch: Arch) -> Machine:
     """Create a Miasm `Machine` object corresponding to an `Arch`."""
@@ -86,23 +85,52 @@ def simp_fsub(expr_simp, expr: ExprOp):
         return expr_simp(ExprInt(res, expr.size))
     return expr
 
-def simp_fpconvert_fp64(expr_simp, expr: ExprOp):
-    from .utils import float_bits_to_uint, uint_bits_to_float, \
-                       double_bits_to_uint, uint_bits_to_double
+def _fp32_bits_to_fp64_bits(value: int) -> int:
+    """Widen one IEEE-754 binary32 bit pattern to binary64 exactly.
 
+    Finite values are represented exactly in binary64. NaN sign and payload
+    are retained while signaling NaNs are quieted, matching a numeric IEEE-754
+    conversion.
+    """
+    value &= (1 << 32) - 1
+    sign = value >> 31
+    exponent = value >> 23 & 0xFF
+    fraction = value & ((1 << 23) - 1)
+
+    if exponent == 0:
+        if fraction == 0:
+            return sign << 63
+        leading_bit = fraction.bit_length() - 1
+        widened_exponent = leading_bit - 149 + 1023
+        widened_fraction = (fraction - (1 << leading_bit)) << (52 - leading_bit)
+    elif exponent == 0xFF:
+        widened_exponent = 0x7FF
+        widened_fraction = fraction << (52 - 23)
+        if fraction:
+            widened_fraction |= 1 << 51
+    else:
+        widened_exponent = exponent - 127 + 1023
+        widened_fraction = fraction << (52 - 23)
+
+    return sign << 63 | widened_exponent << 52 | widened_fraction
+
+
+def simp_fpconvert_fp64(expr_simp, expr: ExprOp):
     if expr.op != 'fpconvert_fp64':
         return expr
 
-    if not len(expr.args) == 1:
-        raise NotImplementedError(f'fpconvert_fp64 on number of arguments not in 1: {expr.args}')
+    if len(expr.args) != 1:
+        raise NotImplementedError(
+            f'fpconvert_fp64 expects one argument, received: {expr.args}'
+        )
 
     operand = expr.args[0]
     if operand.is_int():
-        if not operand.size == 32:
-            raise NotImplementedError(f'fpconvert_fp64 on values of size not in 64: {operand.size}')
-
-        res = double_bits_to_uint(uint_bits_to_double(float_bits_to_uint(operand.arg)))
-        return expr_simp(ExprInt(res, 64))
+        if operand.size != 32:
+            raise NotImplementedError(
+                f'fpconvert_fp64 expects a 32-bit value, received {operand.size} bits'
+            )
+        return expr_simp(ExprInt(_fp32_bits_to_fp64_bits(int(operand)), 64))
     return expr
 
 # The expression simplifier used in this module
@@ -113,29 +141,6 @@ expr_simp.enable_passes({
 
 class MiasmSymbolResolver:
     """Resolves atomic symbols to some state."""
-
-    miasm_flag_aliases = {
-        arch.x86.archname: {
-            'NF':     'SF',
-            'I_F':    'IF',
-            'IOPL_F': 'IOPL',
-            'I_D':    'ID',
-        },
-        arch.aarch64.archname: {
-            'NF': 'N',
-            'SF': 'N',
-            'ZF': 'Z',
-            'CF': 'C',
-            'VF': 'V',
-            'OF': 'V',
-            'QF': 'Q',
-
-            'AF': 'A',
-            'EF': 'E',
-            'IF': 'I',
-            'FF': 'F',
-        }
-    }
 
     def __init__(self,
                  state: ReadableProgramState,
@@ -148,11 +153,8 @@ class MiasmSymbolResolver:
     def _miasm_to_regname(self, regname: str) -> str:
         """Convert a register name as used by Miasm to one that follows
         Focaccia's naming conventions."""
-        regname = regname.upper()
-        if self._arch.archname in self.miasm_flag_aliases:
-            aliases = self.miasm_flag_aliases[self._arch.archname]
-            return aliases.get(regname, regname)
-        return regname
+        canonical = self._arch.to_regname(regname)
+        return canonical if canonical is not None else regname.upper()
 
     def resolve_register(self, regname: str) -> int | None:
         return self._state.read_register(self._miasm_to_regname(regname))
@@ -165,6 +167,14 @@ class MiasmSymbolResolver:
 
     def resolve_location(self, loc: LocKey) -> int | None:
         return self._loc_db.get_location_offset(loc)
+
+    def resolve_environment_operation(self, operation: str, args: tuple[Expr, ...]) -> Expr | None:
+        """Resolve a target-dependent operation from explicit target metadata.
+
+        The default deliberately leaves such operations symbolic.  In
+        particular, it must never query the analyzer host.
+        """
+        return None
 
 def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
     """Evaluate a symbolic expression with regard to a concrete reference
@@ -241,8 +251,11 @@ def _eval_exprmem(expr: ExprMem, state: MiasmSymbolResolver):
     return ExprInt(int.from_bytes(mem, byteorder=state.endianness), expr.size)
 
 def _eval_exprcond(expr, state: MiasmSymbolResolver):
-    """Evaluate an ExprCond using the current state"""
+    """Evaluate only the selected branch when the condition is concrete."""
     cond = eval_expr(expr.cond, state)
+    if isinstance(cond, ExprInt):
+        selected = expr.src1 if int(cond) != 0 else expr.src2
+        return eval_expr(selected, state)
     src1 = eval_expr(expr.src1, state)
     src2 = eval_expr(expr.src2, state)
     return ExprCond(cond, src1, src2)
@@ -252,35 +265,14 @@ def _eval_exprslice(expr, state: MiasmSymbolResolver):
     arg = eval_expr(expr.arg, state)
     return ExprSlice(arg, expr.start, expr.stop)
 
-def _eval_cpuid(rax: ExprInt, out_reg: ExprInt):
-    """Evaluate the `x86_cpuid` operator by performing a real invocation of
-    the CPUID instruction.
-
-    :param rax:     The current value of RAX. Must be concrete.
-    :param out_reg: An index in `[0, 4)` signaling which register's value
-                    shall be returned. Must be concrete.
-    """
-    from cpuid import cpuid
-
-    regs = cpuid.CPUID()(int(rax))
-
-    if int(out_reg) >= len(regs):
-        raise ValueError(f'Output register may not be {out_reg}.')
-    return ExprInt(regs[int(out_reg)], out_reg.size)
-
 def _eval_exprop(expr, state: MiasmSymbolResolver):
     """Evaluate an ExprOp using the current state"""
     args = [eval_expr(arg, state) for arg in expr.args]
 
-    # Special case: CPUID instruction
-    # Evaluate the expression to a value obtained from an an actual call to
-    # the CPUID instruction. Can't do this in an expression simplifier plugin
-    # because the arguments must be concrete.
     if expr.op == 'x86_cpuid':
-        if args[0].is_int() and args[1].is_int():
-            assert(isinstance(args[0], ExprInt) and isinstance(args[1], ExprInt))
-            return _eval_cpuid(args[0], args[1])
-        return expr
+        resolved = state.resolve_environment_operation(expr.op, tuple(args))
+        if resolved is not None:
+            return resolved
 
     return ExprOp(expr.op, *args)
 

@@ -11,7 +11,12 @@ from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_symbolic, ErrorTypes
 from focaccia.match import MatchResult, TransitionMatcher
 from focaccia.snapshot import ProgramState, RegisterAccessError, MemoryAccessError
-from focaccia.symbolic import SymbolicTransform, eval_symbol, ExprMem
+from focaccia.symbolic import (
+    SymbolicTraceItem,
+    SymbolicTransform,
+    eval_symbol,
+    ExprMem,
+)
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 from focaccia.utils import print_result
 
@@ -242,8 +247,8 @@ class PluginStateIterator:
 def record_minimal_snapshot(
     previous_state: ProgramState,
     current_state: ProgramState,
-    incoming: SymbolicTransform | None,
-    outgoing: SymbolicTransform | None,
+    incoming: SymbolicTraceItem | None,
+    outgoing: SymbolicTraceItem | None,
 ) -> ProgramState:
     """Record inputs/outputs needed on either side of one retained boundary."""
     boundary_transform = incoming if incoming is not None else outgoing
@@ -256,10 +261,7 @@ def record_minimal_snapshot(
     snapshot.write_register("PC", current_state.read_pc())
 
     def written_memory(transform: SymbolicTransform) -> Iterable[ExprMem]:
-        return [
-            ExprMem(address, value.size)
-            for address, value in transform.changed_mem.items()
-        ]
+        return [write.destination for write in transform.memory_writes]
 
     def copy_values(
         registers: Iterable[str],
@@ -281,13 +283,13 @@ def record_minimal_snapshot(
                 continue
             snapshot.write_memory(address, data)
 
-    if incoming is not None:
+    if isinstance(incoming, SymbolicTransform):
         copy_values(
-            incoming.changed_regs.keys(),
+            incoming.canonical_register_outputs().keys(),
             written_memory(incoming),
             previous_state,
         )
-    if outgoing is not None:
+    if isinstance(outgoing, SymbolicTransform):
         copy_values(
             outgoing.get_used_registers(),
             outgoing.get_used_memory_addresses(),
@@ -297,12 +299,12 @@ def record_minimal_snapshot(
 
 def collect_conc_trace(
     qemu: Iterable[ProgramState],
-    strace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    strace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
 ) -> MatchResult:
     """Collect a cardinality-valid concrete transition trace from the plugin."""
     matcher = TransitionMatcher(strace)
     retained_states: list[ProgramState] = []
-    retained_transforms: list[SymbolicTransform] = []
+    retained_transforms: list[SymbolicTraceItem] = []
     state_iterator = iter(qemu)
 
     while not matcher.done:

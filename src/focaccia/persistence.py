@@ -1,6 +1,6 @@
 """Versioned trace persistence with strict JSON and streaming MessagePack readers.
 
-Schema-v2 MessagePack files begin with ``MSGPACK_MAGIC`` and encode each map as
+Schema-v3 MessagePack files begin with ``MSGPACK_MAGIC`` and encode each map as
 an unsigned 64-bit big-endian length followed by one MessagePack payload.  This
 framing makes truncation and trailing data distinguishable while retaining
 one-transform-at-a-time decoding.
@@ -15,18 +15,26 @@ from dataclasses import dataclass
 from itertools import chain
 from os import PathLike
 from struct import Struct
-from typing import BinaryIO, Literal, TextIO
+from typing import BinaryIO, Literal, TextIO, cast
 
 import msgpack
 import orjson as json
+from miasm.expression.parser import str_to_expr
 
 from .arch import Arch, supported_architectures
 from .arch.arch import ArchitectureKey
 from .snapshot import ProgramState, RegisterAccessError
-from .symbolic import SymbolicTransform
+from .symbolic import (
+    GapReason,
+    InstructionRecord,
+    SymbolicTraceItem,
+    SymbolicTransform,
+    TraceGap,
+)
 from .trace import MaterializedTrace, TraceEnvironment, TransformStream
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
 TraceKind = Literal["states", "transforms"]
 
 MAX_JSON_CHARS = 64 * 1024 * 1024
@@ -40,6 +48,7 @@ MAX_EXPRESSION_CHARS = 1024 * 1024
 MAX_INSTRUCTION_TEXT_CHARS = 1024 * 1024
 MAX_INSTRUCTION_LENGTH = 64
 MAX_INSTRUCTIONS_PER_TRANSFORM = 1_000_000
+MAX_GAP_MESSAGE_CHARS = 1024 * 1024
 MAX_ADDRESS = (1 << 64) - 1
 MAX_RANGE_END = 1 << 64
 
@@ -106,6 +115,7 @@ class TruncatedTraceError(ParseError):
 
 @dataclass(frozen=True)
 class _TraceHeader:
+    version: int
     kind: TraceKind
     architecture: Arch
     environment: TraceEnvironment
@@ -375,15 +385,16 @@ def _parse_addresses(
     return addresses
 
 
-def _parse_v2_header(document: Mapping, expected_kind: TraceKind) -> _TraceHeader:
+def _parse_versioned_header(document: Mapping, expected_kind: TraceKind) -> _TraceHeader:
     version = _integer(
         _required(document, "schema_version", "trace"),
         "trace.schema_version",
         minimum=0,
     )
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported = ", ".join(str(item) for item in SUPPORTED_SCHEMA_VERSIONS)
         raise UnsupportedSchemaVersionError(
-            f"Unsupported trace schema version {version}; expected {SCHEMA_VERSION}."
+            f"Unsupported trace schema version {version}; supported versions: {supported}."
         )
 
     kind_value = _string(_required(document, "trace_kind", "trace"), "trace.trace_kind")
@@ -416,7 +427,7 @@ def _parse_v2_header(document: Mapping, expected_kind: TraceKind) -> _TraceHeade
     addresses = _parse_addresses(
         _required(document, "addresses", "trace"), item_count, kind
     )
-    return _TraceHeader(kind, architecture, environment, addresses, item_count)
+    return _TraceHeader(version, kind, architecture, environment, addresses, item_count)
 
 
 def _header_document(
@@ -653,8 +664,18 @@ def _validate_transform_document(
     path: str,
     *,
     legacy: bool,
+    schema_version: int = SCHEMA_VERSION,
 ) -> SymbolicTransform:
     document = _mapping(value, path)
+    if not legacy and schema_version >= 3:
+        record_kind = _string(
+            _required(document, "record_kind", path),
+            f"{path}.record_kind",
+        )
+        if record_kind != "transform":
+            raise TransformParseError(
+                f"Expected a symbolic transform at {path}, received {record_kind}."
+            )
     encoded_architecture_value = _required(document, "arch", path)
     if legacy:
         encoded_architecture = _resolve_legacy_architecture(
@@ -715,15 +736,46 @@ def _validate_transform_document(
         assert expression_text is not None
         if len(expression_text) > MAX_EXPRESSION_CHARS:
             raise TraceLimitError(f"Expression at {path}.regs.{name} is too large.")
+        try:
+            parsed_expression = str_to_expr(expression_text)
+        except Exception as error:
+            raise TransformParseError(
+                f"Unable to parse expression at {path}.regs.{name}: {error}."
+            ) from error
+        if parsed_expression.size != accessor.num_bits:
+            raise ExpressionWidthError(
+                f"Expression for {name} at {path}.regs is {parsed_expression.size} bits, "
+                f"expected {accessor.num_bits}."
+            )
 
-    memory = _mapping(_required(document, "mem", path), f"{path}.mem")
-    for address, expression in memory.items():
-        if not isinstance(address, str):
-            raise FieldTypeError(f"{path}.mem keys must be strings.")
-        expression_text = _string(expression, f"{path}.mem[{address}]")
-        assert expression_text is not None
-        if len(address) > MAX_EXPRESSION_CHARS or len(expression_text) > MAX_EXPRESSION_CHARS:
-            raise TraceLimitError(f"Memory expression at {path}.mem is too large.")
+    memory_write_count: int
+    if not legacy and schema_version >= 3:
+        memory_writes = _list(
+            _required(document, "memory_writes", path),
+            f"{path}.memory_writes",
+        )
+        memory_write_count = len(memory_writes)
+        for index, encoded_write in enumerate(memory_writes):
+            write_path = f"{path}.memory_writes[{index}]"
+            write = _mapping(encoded_write, write_path)
+            address = _string(_required(write, "address", write_path), f"{write_path}.address")
+            expression = _string(_required(write, "value", write_path), f"{write_path}.value")
+            assert address is not None and expression is not None
+            if len(address) > MAX_EXPRESSION_CHARS or len(expression) > MAX_EXPRESSION_CHARS:
+                raise TraceLimitError(f"Memory expression at {write_path} is too large.")
+    else:
+        memory = _mapping(_required(document, "mem", path), f"{path}.mem")
+        memory_write_count = len(memory)
+        for address, expression in memory.items():
+            if not isinstance(address, str):
+                raise FieldTypeError(f"{path}.mem keys must be strings.")
+            expression_text = _string(expression, f"{path}.mem[{address}]")
+            assert expression_text is not None
+            if (
+                len(address) > MAX_EXPRESSION_CHARS
+                or len(expression_text) > MAX_EXPRESSION_CHARS
+            ):
+                raise TraceLimitError(f"Memory expression at {path}.mem is too large.")
 
     instructions = _list(_required(document, "instructions", path), f"{path}.instructions")
     if len(instructions) > MAX_INSTRUCTIONS_PER_TRANSFORM:
@@ -770,9 +822,11 @@ def _validate_transform_document(
                 f"expected {accessor.num_bits}."
             )
 
-    if len(transform.changed_mem) != len(memory):
-        raise TransformParseError(f"Equivalent duplicate memory addresses at {path}.mem.")
-    for address, expression in transform.changed_mem.items():
+    if len(transform.memory_writes) != memory_write_count:
+        raise TransformParseError(f"Unable to retain every memory write at {path}.")
+    for write in transform.memory_writes:
+        address = write.address
+        expression = write.value
         if address.size != architecture.ptr_size:
             raise ExpressionWidthError(
                 f"Memory address at {path}.mem is {address.size} bits, "
@@ -788,12 +842,183 @@ def _validate_transform_document(
 
 def _encode_transform(transform: SymbolicTransform, architecture: Arch, path: str) -> dict:
     document = transform.to_json()
-    _validate_transform_document(document, architecture, path, legacy=False)
+    document.pop("mem", None)
+    document["record_kind"] = "transform"
+    _validate_transform_document(
+        document,
+        architecture,
+        path,
+        legacy=False,
+        schema_version=SCHEMA_VERSION,
+    )
     return document
 
 
+_GAP_REASONS: set[str] = {
+    "disassembly-error",
+    "symbolic-timeout",
+    "unsupported-semantics",
+    "cross-validation-error",
+}
+
+
+def _validate_gap_document(
+    value: object,
+    architecture: Arch,
+    path: str,
+) -> TraceGap:
+    document = _mapping(value, path)
+    record_kind = _string(
+        _required(document, "record_kind", path),
+        f"{path}.record_kind",
+    )
+    if record_kind != "gap":
+        raise TransformParseError(f"Expected a trace gap at {path}, received {record_kind}.")
+    encoded_architecture = _architecture_from_id(
+        _required(document, "arch", path),
+        f"{path}.arch",
+    )
+    if encoded_architecture != architecture:
+        raise ArchitectureParseError(
+            f"{path}.arch is {encoded_architecture}, expected {architecture}."
+        )
+    tid = _integer(
+        _required(document, "tid", path),
+        f"{path}.tid",
+        minimum=0,
+        maximum=MAX_ADDRESS,
+    )
+    start = _integer(
+        _required(document, "from_addr", path),
+        f"{path}.from_addr",
+        minimum=0,
+        maximum=MAX_ADDRESS,
+    )
+    end = _integer(
+        _required(document, "to_addr", path),
+        f"{path}.to_addr",
+        minimum=0,
+        maximum=MAX_ADDRESS,
+    )
+    reason_value = _string(_required(document, "reason", path), f"{path}.reason")
+    assert reason_value is not None
+    if reason_value not in _GAP_REASONS:
+        raise TransformParseError(f"Unsupported trace-gap reason {reason_value} at {path}.")
+    message = _string(_required(document, "message", path), f"{path}.message")
+    assert message is not None
+    if not message or len(message) > MAX_GAP_MESSAGE_CHARS:
+        raise TransformParseError(f"Invalid trace-gap message at {path}.")
+    cause_type = _string(
+        _required(document, "cause_type", path),
+        f"{path}.cause_type",
+        allow_none=True,
+    )
+
+    encoded_instruction = _required(document, "instruction", path)
+    instruction = None
+    if encoded_instruction is not None:
+        instruction_path = f"{path}.instruction"
+        fields = _list(encoded_instruction, instruction_path)
+        if len(fields) != 2:
+            raise InstructionParseError(f"{instruction_path} must contain [length, text].")
+        length = _integer(fields[0], f"{instruction_path}[0]")
+        if not 1 <= length <= MAX_INSTRUCTION_LENGTH:
+            raise InstructionParseError(f"Invalid instruction length at {instruction_path}.")
+        text = _string(fields[1], f"{instruction_path}[1]")
+        assert text is not None
+        if not text or len(text) > MAX_INSTRUCTION_TEXT_CHARS:
+            raise InstructionParseError(f"Invalid instruction text at {instruction_path}.")
+        instruction = InstructionRecord(start, length, text)
+
+    return TraceGap(
+        tid,
+        architecture,
+        start,
+        end,
+        cast(GapReason, reason_value),
+        message,
+        instruction=instruction,
+        recorded_cause_type=cause_type,
+    )
+
+
+def _encode_gap(gap: TraceGap, architecture: Arch, path: str) -> dict:
+    if gap.arch != architecture:
+        raise ArchitectureParseError(
+            f"Trace gap has architecture {gap.arch}, expected {architecture}."
+        )
+    encoded_instruction = None
+    if gap.instruction is not None:
+        if gap.instruction.addr != gap.addr:
+            raise InstructionParseError(
+                f"Trace-gap instruction address {hex(gap.instruction.addr)} does not "
+                f"match gap source {hex(gap.addr)} at {path}."
+            )
+        try:
+            encoded_instruction = [gap.instruction.length, gap.instruction.to_string()]
+        except Exception as error:
+            raise InstructionParseError(
+                f"Unable to serialize trace-gap instruction at {path}: {error}."
+            ) from error
+    document = {
+        "record_kind": "gap",
+        "arch": gap.arch.serialized_name,
+        "tid": gap.tid,
+        "from_addr": gap.range[0],
+        "to_addr": gap.range[1],
+        "reason": gap.reason,
+        "message": gap.message,
+        "cause_type": gap.cause_type,
+        "instruction": encoded_instruction,
+    }
+    _validate_gap_document(document, architecture, path)
+    return document
+
+
+def _decode_symbolic_item(
+    value: object,
+    architecture: Arch,
+    path: str,
+    schema_version: int,
+) -> SymbolicTraceItem:
+    if schema_version == 2:
+        return _validate_transform_document(
+            value,
+            architecture,
+            path,
+            legacy=False,
+            schema_version=2,
+        )
+    document = _mapping(value, path)
+    record_kind = _string(
+        _required(document, "record_kind", path),
+        f"{path}.record_kind",
+    )
+    if record_kind == "transform":
+        return _validate_transform_document(
+            document,
+            architecture,
+            path,
+            legacy=False,
+            schema_version=schema_version,
+        )
+    if record_kind == "gap":
+        return _validate_gap_document(document, architecture, path)
+    raise TransformParseError(f"Unsupported symbolic record kind {record_kind} at {path}.")
+
+
+def _encode_symbolic_item(
+    item: SymbolicTraceItem,
+    architecture: Arch,
+    path: str,
+) -> dict:
+    if isinstance(item, TraceGap):
+        return _encode_gap(item, architecture, path)
+    return _encode_transform(item, architecture, path)
+
+
 def _validate_transform_addresses(
-    transforms: Sequence[SymbolicTransform], addresses: tuple[int, ...]
+    transforms: Sequence[SymbolicTraceItem], addresses: tuple[int, ...]
 ) -> None:
     for index, (transform, address) in enumerate(zip(transforms, addresses, strict=True)):
         if transform.addr != address:
@@ -803,8 +1028,8 @@ def _validate_transform_addresses(
             )
 
 
-def _parse_v2_states(document: Mapping) -> MaterializedTrace[ProgramState]:
-    header = _parse_v2_header(document, "states")
+def _parse_versioned_states(document: Mapping) -> MaterializedTrace[ProgramState]:
+    header = _parse_versioned_header(document, "states")
     items = _list(_required(document, "items", "trace"), "trace.items")
     if len(items) != header.item_count:
         raise TraceCardinalityError(
@@ -853,10 +1078,10 @@ def _parse_legacy_states(document: Mapping) -> MaterializedTrace[ProgramState]:
 
 
 def parse_snapshots(json_stream: TextIO) -> MaterializedTrace[ProgramState]:
-    """Parse a schema-v2 or known unambiguous legacy JSON state trace."""
+    """Parse a versioned or known unambiguous legacy JSON state trace."""
     document = _read_json_document(json_stream)
     if "schema_version" in document:
-        return _parse_v2_states(document)
+        return _parse_versioned_states(document)
     return _parse_legacy_states(document)
 
 
@@ -864,7 +1089,7 @@ def serialize_snapshots(
     snapshots: MaterializedTrace[ProgramState],
     out_stream: TextIO,
 ) -> None:
-    """Serialize a materialized state trace as a schema-v2 JSON document."""
+    """Serialize a materialized state trace as a versioned JSON document."""
     architecture, environment = _trace_architecture(snapshots, item_kind="state")
     addresses = snapshots.addresses
     if addresses is not None:
@@ -879,8 +1104,8 @@ def serialize_snapshots(
     out_stream.write(json.dumps(document, option=json.OPT_INDENT_2).decode())
 
 
-def _parse_v2_transforms(document: Mapping) -> MaterializedTrace[SymbolicTransform]:
-    header = _parse_v2_header(document, "transforms")
+def _parse_versioned_transforms(document: Mapping) -> MaterializedTrace[SymbolicTraceItem]:
+    header = _parse_versioned_header(document, "transforms")
     assert header.addresses is not None
     items = _list(_required(document, "items", "trace"), "trace.items")
     if len(items) != header.item_count:
@@ -888,11 +1113,11 @@ def _parse_v2_transforms(document: Mapping) -> MaterializedTrace[SymbolicTransfo
             f"trace.items length {len(items)} does not match item_count {header.item_count}."
         )
     transforms = [
-        _validate_transform_document(
+        _decode_symbolic_item(
             item,
             header.architecture,
             f"trace.items[{index}]",
-            legacy=False,
+            header.version,
         )
         for index, item in enumerate(items)
     ]
@@ -943,16 +1168,16 @@ def _parse_legacy_transforms(document: Mapping) -> MaterializedTrace[SymbolicTra
     return MaterializedTrace(transforms, environment, addresses)
 
 
-def parse_transformations(json_stream: TextIO) -> MaterializedTrace[SymbolicTransform]:
-    """Parse a schema-v2 or known unambiguous legacy JSON transform trace."""
+def parse_transformations(json_stream: TextIO) -> MaterializedTrace[SymbolicTraceItem]:
+    """Parse a versioned or known unambiguous legacy symbolic trace."""
     document = _read_json_document(json_stream)
     if "schema_version" in document:
-        return _parse_v2_transforms(document)
+        return _parse_versioned_transforms(document)
     return _parse_legacy_transforms(document)
 
 
 def _transform_trace_metadata(
-    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    trace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
 ) -> tuple[Arch, TraceEnvironment, tuple[int, ...]]:
     addresses = trace.require_addresses()
     if len(addresses) > MAX_TRACE_ITEMS:
@@ -977,7 +1202,7 @@ def _transform_trace_metadata(
 
 
 def _serialize_transform_json(
-    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    trace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     out_file: str | PathLike[str],
 ) -> None:
     architecture, environment, addresses = _transform_trace_metadata(trace)
@@ -993,7 +1218,9 @@ def _serialize_transform_json(
             raise ArchitectureParseError(
                 f"Transform {index} has architecture {transform.arch}, expected {architecture}."
             )
-        items.append(_encode_transform(transform, architecture, f"trace.items[{index}]"))
+        items.append(
+            _encode_symbolic_item(transform, architecture, f"trace.items[{index}]")
+        )
     if len(items) != len(addresses):
         raise TraceCardinalityError(
             f"Transform stream ended after {len(items)} items; expected {len(addresses)}."
@@ -1021,7 +1248,7 @@ def _write_msgpack_frame(stream: BinaryIO, value: object) -> None:
 
 
 def _serialize_transform_msgpack(
-    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    trace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     out_file: str | PathLike[str],
 ) -> None:
     architecture, environment, addresses = _transform_trace_metadata(trace)
@@ -1044,7 +1271,11 @@ def _serialize_transform_msgpack(
                     f"Transform {index} has architecture {transform.arch}, "
                     f"expected {architecture}."
                 )
-            item = _encode_transform(transform, architecture, f"trace.items[{index}]")
+            item = _encode_symbolic_item(
+                transform,
+                architecture,
+                f"trace.items[{index}]",
+            )
             _write_msgpack_frame(out_stream, {"item": item})
             count += 1
         if count != len(addresses):
@@ -1054,11 +1285,11 @@ def _serialize_transform_msgpack(
 
 
 def serialize_transformations(
-    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    trace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     out_file: str | PathLike[str],
     out_type: Literal["msgpack", "json"] = "json",
 ) -> None:
-    """Serialize transforms using schema v2 in JSON or streaming MessagePack."""
+    """Serialize symbolic records using versioned JSON or streaming MessagePack."""
     if out_type == "json":
         _serialize_transform_json(trace, out_file)
     elif out_type == "msgpack":
@@ -1067,7 +1298,7 @@ def serialize_transformations(
         raise ValueError(f"Unsupported trace output type: {out_type}.")
 
 
-class _TransformFrameIterator(Iterator[SymbolicTransform]):
+class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
     def __init__(
         self,
         frames: Iterator,
@@ -1100,7 +1331,7 @@ class _TransformFrameIterator(Iterator[SymbolicTransform]):
         except Exception as error:
             raise TraceDecodeError(f"Invalid MessagePack frame: {error}.") from error
 
-    def __next__(self) -> SymbolicTransform:
+    def __next__(self) -> SymbolicTraceItem:
         if self._finished:
             raise StopIteration
         if self._index == self._header.item_count:
@@ -1121,12 +1352,20 @@ class _TransformFrameIterator(Iterator[SymbolicTransform]):
 
         frame = _mapping(self._next_frame(), f"stream frame {self._index}")
         item = _required(frame, self._frame_key, f"stream frame {self._index}")
-        transform = _validate_transform_document(
-            item,
-            self._header.architecture,
-            f"trace.items[{self._index}]",
-            legacy=self._legacy,
-        )
+        if self._legacy:
+            transform: SymbolicTraceItem = _validate_transform_document(
+                item,
+                self._header.architecture,
+                f"trace.items[{self._index}]",
+                legacy=True,
+            )
+        else:
+            transform = _decode_symbolic_item(
+                item,
+                self._header.architecture,
+                f"trace.items[{self._index}]",
+                self._header.version,
+            )
         assert self._header.addresses is not None
         expected_address = self._header.addresses[self._index]
         if transform.addr != expected_address:
@@ -1261,11 +1500,11 @@ def _legacy_architecture_from_environment(value: object) -> Arch | None:
     return _architecture_from_key(ArchitectureKey(isa, endianness))
 
 
-def _stream_v2_transformations(
+def _stream_versioned_transformations(
     header_document: Mapping,
     frames: Iterator,
-) -> TransformStream[SymbolicTransform]:
-    header = _parse_v2_header(header_document, "transforms")
+) -> TransformStream[SymbolicTraceItem]:
+    header = _parse_versioned_header(header_document, "transforms")
     assert header.addresses is not None
     iterator = _TransformFrameIterator(
         frames,
@@ -1279,7 +1518,7 @@ def _stream_v2_transformations(
 def _stream_legacy_transformations(
     header_document: Mapping,
     unpacker: msgpack.Unpacker,
-) -> TransformStream[SymbolicTransform]:
+) -> TransformStream[SymbolicTraceItem]:
     addresses_value = _required(header_document, "addresses", "legacy trace header")
     encoded_addresses = _list(addresses_value, "legacy trace header.addresses")
     if len(encoded_addresses) > MAX_TRACE_ITEMS:
@@ -1320,7 +1559,12 @@ def _stream_legacy_transformations(
         environment_document, architecture, legacy=True
     )
     header = _TraceHeader(
-        "transforms", architecture, environment, addresses, len(addresses)
+        1,
+        "transforms",
+        architecture,
+        environment,
+        addresses,
+        len(addresses),
     )
     iterator = _TransformFrameIterator(
         iter(frames),
@@ -1331,8 +1575,8 @@ def _stream_legacy_transformations(
     return TransformStream(iterator, environment, addresses)
 
 
-def stream_transformation(stream: BinaryIO) -> TransformStream[SymbolicTransform]:
-    """Read a schema-v2 or known legacy streaming MessagePack transform trace."""
+def stream_transformation(stream: BinaryIO) -> TransformStream[SymbolicTraceItem]:
+    """Read a versioned or known legacy streaming MessagePack symbolic trace."""
     prefix = bytearray()
     while len(prefix) < len(MSGPACK_MAGIC):
         chunk = stream.read(len(MSGPACK_MAGIC) - len(prefix))
@@ -1348,10 +1592,13 @@ def stream_transformation(stream: BinaryIO) -> TransformStream[SymbolicTransform
         )
         assert header_value is not None
         header = _mapping(header_value, "MessagePack trace header")
-        return _stream_v2_transformations(header, _LengthPrefixedFrames(stream))
+        return _stream_versioned_transformations(
+            header,
+            _LengthPrefixedFrames(stream),
+        )
 
     if prefix and MSGPACK_MAGIC.startswith(prefix):
-        raise TruncatedTraceError("MessagePack schema-v2 magic header is truncated.")
+        raise TruncatedTraceError("MessagePack versioned magic header is truncated.")
     legacy_stream = _PrefixedBinaryReader(bytes(prefix), stream)
     unpacker = _msgpack_unpacker(legacy_stream)
     header = _next_msgpack_header(unpacker)

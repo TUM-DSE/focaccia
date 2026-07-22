@@ -6,7 +6,12 @@ import pytest
 
 from focaccia import trace as trace_module
 from focaccia.arch import aarch64, x86
-from focaccia.parser import parse_qemu, serialize_snapshots, stream_transformation
+from focaccia.parser import (
+    SCHEMA_VERSION,
+    parse_qemu,
+    serialize_snapshots,
+    stream_transformation,
+)
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
 from focaccia.trace import (
@@ -112,10 +117,19 @@ def test_msgpack_transform_stream_has_explicit_one_shot_contract():
     transforms = [make_transform(0x1000, 0x1001), make_transform(0x1001, 0x1002)]
     env = environment(architecture=x86.ArchX86().key)
     packer = msgpack.Packer()
+
+    def legacy_document(transform: SymbolicTransform) -> dict:
+        document = transform.to_json()
+        document["mem"] = {
+            write["address"]: write["value"]
+            for write in document.pop("memory_writes")
+        }
+        return document
+
     encoded = b"".join(
         [
             packer.pack({"env": env.to_json(), "addresses": [0x1000, 0x1001]}),
-            *(packer.pack({"state": transform.to_json()}) for transform in transforms),
+            *(packer.pack({"state": legacy_document(transform)}) for transform in transforms),
         ]
     )
 
@@ -267,7 +281,7 @@ def test_empty_materialized_snapshot_serialization_returns_after_writing():
     serialize_snapshots(MaterializedTrace([], env), output)
 
     document = json.loads(output.getvalue())
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == SCHEMA_VERSION
     assert document["trace_kind"] == "states"
     assert document["architecture"] == "x86_64"
     assert document["item_count"] == 0
