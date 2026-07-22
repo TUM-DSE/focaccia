@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from .deterministic import DeterministicLog
 
 
+class _MissingBinaryHash:
+    pass
+
+
+_MISSING_BINARY_HASH = _MissingBinaryHash()
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class TraceEnvironment:
     """Immutable metadata describing how a trace was recorded."""
@@ -30,15 +37,15 @@ class TraceEnvironment:
         binary: str | None,
         argv: Iterable[str],
         envp: Iterable[str],
-        binary_hash: str | None = None,
+        binary_hash: str | None | _MissingBinaryHash = _MISSING_BINARY_HASH,
         nondeterminism_log: DeterministicLog | None = None,
         start_address: int | None = None,
         stop_address: int | None = None,
         replay_provenance: str | None = None,
         architecture: ArchitectureKey | None = None,
     ):
-        if binary_hash is None and binary:
-            binary_hash = file_hash(binary)
+        if isinstance(binary_hash, _MissingBinaryHash):
+            binary_hash = file_hash(binary) if binary else None
         if replay_provenance is None and nondeterminism_log is not None:
             base_directory = nondeterminism_log.base_directory
             if base_directory:

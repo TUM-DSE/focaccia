@@ -232,6 +232,29 @@ class ProgramState(ReadableProgramState):
         self.regs[accessor.base_reg] = stored
         self._valid_register_bits[accessor.base_reg] |= accessor.mask
 
+    def write_register_bits(self, reg: str, value: int, valid_mask: int) -> None:
+        """Record selected known bits of ``reg`` without inventing the rest."""
+        accessor = self.arch.get_reg_accessor(reg)
+        if accessor is None:
+            raise RegisterAccessError(reg, f"Not a register name: {reg}")
+        if value < 0 or value >= 1 << accessor.num_bits:
+            raise ValueError(f"Value does not fit in register {reg}.")
+        if valid_mask < 0 or valid_mask >= 1 << accessor.num_bits:
+            raise ValueError(f"Validity mask does not fit in register {reg}.")
+        if self.arch.is_constant_register(reg) or valid_mask == 0:
+            return
+        if accessor.base_reg not in self.regs:
+            raise RegisterAccessError(reg, f"Register has no mutable storage: {reg}")
+
+        shifted_validity = valid_mask << accessor.start & accessor.mask
+        shifted_value = value << accessor.start & shifted_validity
+        stored = self.regs[accessor.base_reg]
+        if stored is None:
+            stored = 0
+        stored = (stored & ~shifted_validity) | shifted_value
+        self.regs[accessor.base_reg] = stored
+        self._valid_register_bits[accessor.base_reg] |= shifted_validity
+
     def write_register_zero_extended(self, reg: str, value: int) -> None:
         """Apply an explicit low-register write with architectural zero extension."""
         accessor = self.arch.get_reg_accessor(reg)
@@ -254,6 +277,19 @@ class ProgramState(ReadableProgramState):
         for reg in self.regs:
             self.regs[reg] = None
             self._valid_register_bits[reg] = 0
+
+    def known_register_bits(self) -> dict[str, tuple[int, int]]:
+        """Return base-register values paired with their exact validity masks."""
+        observations: dict[str, tuple[int, int]] = {}
+        for base_reg in sorted(self.regs):
+            valid_mask = self._valid_register_bits[base_reg]
+            if valid_mask == 0:
+                continue
+            value = self.regs[base_reg]
+            if value is None:
+                raise RuntimeError(f"Register {base_reg} has valid bits but no stored value.")
+            observations[base_reg] = (value & valid_mask, valid_mask)
+        return observations
 
     def known_register_values(self, *, include_partial: bool = False) -> dict[str, int]:
         """Return known mutable registers without materializing unknown bits.

@@ -261,6 +261,12 @@ def test_legacy_log_parser_uses_typed_unknown_environment():
 
 def test_empty_materialized_snapshot_serialization_returns_after_writing():
     output = io.StringIO()
-    serialize_snapshots(MaterializedTrace([], environment()), output)
+    env = environment(architecture=x86.ArchX86().key)
+    serialize_snapshots(MaterializedTrace([], env), output)
 
-    assert isinstance(json.loads(output.getvalue()), dict)
+    document = json.loads(output.getvalue())
+    assert document["schema_version"] == 2
+    assert document["trace_kind"] == "states"
+    assert document["architecture"] == "x86_64"
+    assert document["item_count"] == 0
+    assert document["items"] == []

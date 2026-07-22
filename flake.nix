@@ -321,6 +321,7 @@
         "src/focaccia/native/lldb_target.py"
         "src/focaccia/native/tracer.py"
         "src/focaccia/parser.py"
+        "src/focaccia/persistence.py"
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/deterministic.py"
         "src/focaccia/qemu/target.py"
@@ -639,6 +640,100 @@
       pytestTargets = [ "tests/test_qemu_trace_output.py" ];
     };
 
+    freshFileHashesCheck = mkStaticUnitCheck {
+      name = "fresh-file-hashes";
+      ruffTargets = [
+        "src/focaccia/utils.py"
+        "tests/test_file_hash.py"
+      ];
+      pytestTargets = [ "tests/test_file_hash.py" ];
+    };
+
+    traceSchemaV2Check = mkStaticUnitCheck {
+      name = "trace-schema-v2";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "-k"
+        "schema_v2 or share_logical_header or explicit_null_binary_hash or unknown_schema"
+      ];
+    };
+
+    jsonTraceRoundtripCheck = mkStaticUnitCheck {
+      name = "json-trace-roundtrip";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+        "tests/test_state_serialization.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "tests/test_state_serialization.py"
+        "-k"
+        "json_transform_round_trip or aarch64_big_endian_state_round_trip or snapshot_serialization"
+      ];
+    };
+
+    msgpackTraceRoundtripCheck = mkStaticUnitCheck {
+      name = "msgpack-trace-roundtrip";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "-k"
+        "msgpack_transform_round_trip or truncated_and_trailing_msgpack"
+      ];
+    };
+
+    legacyTraceReadersCheck = mkStaticUnitCheck {
+      name = "legacy-trace-readers";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "tests/test_trace.py"
+        "-k"
+        "known_legacy or ambiguous_legacy or msgpack_transform_stream"
+      ];
+    };
+
+    traceStructuralValidationCheck = mkStaticUnitCheck {
+      name = "trace-structural-validation";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "-k"
+        "cardinality or memory_ranges or expression_widths or missing_v2 or top_level"
+      ];
+    };
+
+    typedEmptyTracesCheck = mkStaticUnitCheck {
+      name = "typed-empty-traces";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "tests/test_trace.py"
+        "-k"
+        "empty_state_trace or empty_transform_trace or empty_materialized_snapshot"
+      ];
+    };
+
   in rec {
     packages = rec {
       focaccia = pythonEnv.overrideAttrs (old: {
@@ -771,6 +866,13 @@
       unknown-trace-environment = unknownTraceEnvironmentCheck;
       materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
+      fresh-file-hashes = freshFileHashesCheck;
+      trace-schema-v2 = traceSchemaV2Check;
+      json-trace-roundtrip = jsonTraceRoundtripCheck;
+      msgpack-trace-roundtrip = msgpackTraceRoundtripCheck;
+      legacy-trace-readers = legacyTraceReadersCheck;
+      trace-structural-validation = traceStructuralValidationCheck;
+      typed-empty-traces = typedEmptyTracesCheck;
     };
   });
 }

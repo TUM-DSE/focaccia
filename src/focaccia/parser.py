@@ -1,140 +1,62 @@
-"""Parsing of JSON files containing snapshot data."""
+"""Public persistence APIs and parsers for emulator text logs."""
 
 import re
-import base64
-import msgpack
-import orjson as json
-from typing import TextIO, Literal
+from typing import TextIO
 
-from .arch import supported_architectures, Arch
+from .arch import Arch
+from .persistence import (
+    SCHEMA_VERSION,
+    AmbiguousArchitectureError,
+    ArchitectureParseError,
+    ExpressionWidthError,
+    FieldTypeError,
+    InstructionParseError,
+    MissingFieldError,
+    ParseError,
+    StateParseError,
+    TraceCardinalityError,
+    TraceDecodeError,
+    TraceKindError,
+    TraceLimitError,
+    TransformParseError,
+    TruncatedTraceError,
+    UnsupportedSchemaVersionError,
+    parse_snapshots,
+    parse_transformations,
+    serialize_snapshots,
+    serialize_transformations,
+    stream_transformation,
+)
 from .snapshot import ProgramState
-from .symbolic import SymbolicTransform
-from .trace import MaterializedTrace, TraceEnvironment, TransformStream
+from .trace import MaterializedTrace, TraceEnvironment
 
-class ParseError(Exception):
-    """A parse error."""
+__all__ = [
+    "SCHEMA_VERSION",
+    "AmbiguousArchitectureError",
+    "ArchitectureParseError",
+    "ExpressionWidthError",
+    "FieldTypeError",
+    "InstructionParseError",
+    "MissingFieldError",
+    "ParseError",
+    "StateParseError",
+    "TraceCardinalityError",
+    "TraceDecodeError",
+    "TraceKindError",
+    "TraceLimitError",
+    "TransformParseError",
+    "TruncatedTraceError",
+    "UnsupportedSchemaVersionError",
+    "parse_snapshots",
+    "parse_transformations",
+    "serialize_snapshots",
+    "serialize_transformations",
+    "stream_transformation",
+    "parse_qemu",
+    "parse_arancini",
+    "parse_box64",
+]
 
-def _get_or_throw(obj: dict, key: str):
-    """Get a value from a dict or throw a ParseError if not present."""
-    val = obj.get(key)
-    if val is not None:
-        return val
-    raise ParseError(f'Expected value at key {key}, but found none.')
-
-def parse_transformations(json_stream: TextIO) -> MaterializedTrace[SymbolicTransform]:
-    """Parse symbolic transformations from a text stream."""
-    data = json.loads(json_stream.read())
-
-    env = TraceEnvironment.from_json(_get_or_throw(data, 'env'))
-    transforms = [
-        SymbolicTransform.from_json(item)
-        for item in _get_or_throw(data, 'states')
-    ]
-    if transforms:
-        env = env.with_architecture(transforms[0].arch.key)
-
-    addresses = data.get('addrs')
-    if addresses is None:
-        addresses = [transform.addr for transform in transforms]
-    return MaterializedTrace(transforms, env, addresses)
-
-
-def stream_transformation(stream) -> TransformStream[SymbolicTransform]:
-    unpacker = msgpack.Unpacker(stream, raw=False)
-
-    # First object always contains env
-    header = next(unpacker)
-    env = TraceEnvironment.from_json(header['env'])
-    addresses = header.get('addresses')
-
-    def transform_iter():
-        for obj in unpacker:
-            yield SymbolicTransform.from_json(obj['state'])
-
-    return TransformStream(iter(transform_iter()), env, addresses)
-
-def serialize_transformations(
-    trace: MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
-    out_file: str,
-    out_type: Literal['msgpack', 'json'] = 'json',
-) -> None:
-    """Serialize symbolic transformations to a text stream."""
-    if out_type == 'json':
-        with open(out_file, 'w') as out_stream:
-            data = json.dumps({
-                'env': trace.env.to_json(),
-                'addrs': trace.addresses,
-                'states': [t.to_json() for t in trace],
-            }, option=json.OPT_INDENT_2).decode()
-            out_stream.write(data)
-    elif out_type == 'msgpack':
-        with open(out_file, 'wb') as out_stream:
-            pack = msgpack.Packer()
-
-            # Header: env + addresses (list[int])
-            header = {
-                "env": trace.env.to_json(),
-                "addresses": getattr(trace, "addresses", None),
-            }
-            out_stream.write(pack.pack(header))
-
-            # States streamed one by one
-            for state in trace:
-                out_stream.write(pack.pack({"state": state.to_json()}))
-    else:
-        raise NotImplementedError(f'Unable to write transformations to type {out_type}')
-
-def parse_snapshots(json_stream: TextIO) -> MaterializedTrace[ProgramState]:
-    """Parse snapshots from our JSON format."""
-    json_data = json.loads(json_stream.read())
-
-    arch = supported_architectures[_get_or_throw(json_data, 'architecture')]
-    env = TraceEnvironment.from_json(_get_or_throw(json_data, 'env'))
-    snapshots = []
-    for snapshot in _get_or_throw(json_data, 'snapshots'):
-        state = ProgramState(arch)
-        for reg, val in _get_or_throw(snapshot, 'registers').items():
-            state.write_register(reg, val)
-        for mem in _get_or_throw(snapshot, 'memory'):
-            start, end = _get_or_throw(mem, 'range')
-            data = base64.b64decode(_get_or_throw(mem, 'data'))
-            assert(len(data) == end - start)
-            state.write_memory(start, data)
-
-        snapshots.append(state)
-
-    return MaterializedTrace(snapshots, env.with_architecture(arch.key))
-
-def serialize_snapshots(
-    snapshots: MaterializedTrace[ProgramState],
-    out_stream: TextIO,
-) -> None:
-    """Serialize a list of snapshots to out JSON format."""
-    if not snapshots:
-        empty = json.dumps({}, option=json.OPT_INDENT_2).decode()
-        out_stream.write(empty)
-        return
-
-    arch = snapshots[0].arch
-    env = snapshots.env.with_architecture(arch.key)
-    res = {
-        'architecture': arch.serialized_name,
-        'env': env.to_json(),
-        'snapshots': []
-    }
-    for snapshot in snapshots:
-        assert(snapshot.arch == arch)
-        regs = snapshot.known_register_values(include_partial=True)
-        mem = []
-        for addr, data in snapshot.mem.known_ranges():
-            mem.append({
-                'range': [addr, addr + len(data)],
-                'data': base64.b64encode(data).decode('ascii')
-            })
-        res['snapshots'].append({ 'registers': regs, 'memory': mem })
-
-    data = json.dumps(res, option=json.OPT_INDENT_2).decode()
-    out_stream.write(data)
 
 def _make_unknown_env(arch: Arch) -> TraceEnvironment:
     return TraceEnvironment(

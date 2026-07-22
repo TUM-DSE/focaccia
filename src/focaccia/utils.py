@@ -5,8 +5,11 @@ import sys
 import shutil
 import ctypes
 import signal
+from collections.abc import Callable
+from os import PathLike
 from functools import total_ordering
 from hashlib import sha256
+from typing import Protocol
 
 @total_ordering
 class ErrorSeverity:
@@ -52,22 +55,25 @@ def uint_bits_to_double(v: int) -> float:
     """Bit-cast a 64-bit integer to a double."""
     return ctypes.c_double.from_buffer(ctypes.c_uint64(v)).value
 
-def file_hash(filename: str, hash = sha256(), chunksize: int = 65536) -> str:
-    """Calculate a file's hash.
+class HashAlgorithm(Protocol):
+    def update(self, data: bytes) -> None: ...
+    def hexdigest(self) -> str: ...
 
-    :param filename:  Name of the file to hash.
-    :param hash:      The hash algorithm to use.
-    :param chunksize: Optimization option. Size of contiguous chunks to read
-                      from the file and feed into the hashing algorithm.
-    :return: A hex digest.
-    """
+
+def file_hash(
+    filename: str | PathLike[str],
+    hash_factory: Callable[[], HashAlgorithm] = sha256,
+    chunksize: int = 65536,
+) -> str:
+    """Calculate a file hash with a fresh algorithm instance per call."""
+    if chunksize <= 0:
+        raise ValueError("Hash chunk size must be positive.")
+
+    algorithm = hash_factory()
     with open(filename, 'rb') as file:
-        while True:
-            data = file.read(chunksize)
-            if not data:
-                break
-            hash.update(data)
-    return hash.hexdigest()
+        while data := file.read(chunksize):
+            algorithm.update(data)
+    return algorithm.hexdigest()
 
 def get_envp() -> list[str]:
     """Return current environment array.

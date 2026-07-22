@@ -23,12 +23,19 @@ def test_snapshot_serialization_preserves_identity_and_partial_validity():
     document = json.loads(serialized)
     parsed = parse_snapshots(io.StringIO(serialized))
 
+    assert document["schema_version"] == 2
+    assert document["trace_kind"] == "states"
     assert document["architecture"] == "aarch64b"
-    assert document["snapshots"][0]["registers"] == {
+    assert document["item_count"] == 1
+    assert document["items"][0]["registers"] == {
         "PC": 0x1000,
-        "W0": 0x12345678,
+        "X0": 0x12345678,
     }
-    assert document["snapshots"][0]["memory"] == [
+    assert document["items"][0]["register_validity"] == {
+        "PC": (1 << 64) - 1,
+        "X0": (1 << 32) - 1,
+    }
+    assert document["items"][0]["memory"] == [
         {
             "range": [0x2001, 0x2003],
             "data": base64.b64encode(b"AB").decode("ascii"),
@@ -39,5 +46,10 @@ def test_snapshot_serialization_preserves_identity_and_partial_validity():
     assert list(parsed) == list(parsed)
     assert parsed[0].read_register("PC") == 0x1000
     assert parsed[0].read_register("W0") == 0x12345678
+    assert not parsed[0].test_register("X0")
+    assert parsed[0].known_register_bits()["X0"] == (
+        0x12345678,
+        (1 << 32) - 1,
+    )
     assert parsed[0].read_memory(0x2001, 2) == b"AB"
     assert parsed.env.architecture == arch.key
