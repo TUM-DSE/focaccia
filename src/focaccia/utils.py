@@ -89,9 +89,16 @@ def print_separator(separator: str = '-', stream=sys.stdout, count: int = 80):
     print(separator * min(termsize, maxtermsize), file=stream)
 
 def print_result(result, min_severity: ErrorSeverity):
-    """Print a comparison result."""
+    """Print a comparison result and any structured trace diagnostics."""
     shown = 0
     suppressed = 0
+
+    trace_diagnostics = tuple(getattr(result, "diagnostics", ()))
+    for diagnostic in trace_diagnostics:
+        print(
+            f"[TRACE {diagnostic.level.upper()}] "
+            f"{diagnostic.code}: {diagnostic.message}"
+        )
 
     for res in result:
         # Filter errors by severity
@@ -116,7 +123,8 @@ def print_result(result, min_severity: ErrorSeverity):
 
     print()
     print('#' * 60)
-    print(f'Found {shown} errors.')
+    print(f'Found {shown} state errors.')
+    print(f'Found {len(trace_diagnostics)} trace diagnostics.')
     print(f'Suppressed {suppressed} low-priority errors'
           f' (showing {min_severity} and higher).')
     print('#' * 60)

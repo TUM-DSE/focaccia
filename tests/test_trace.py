@@ -147,6 +147,8 @@ def test_transition_trace_enforces_state_transform_cardinality():
     valid = TransitionTrace(["s0", "s1"], ["t0"], env)
 
     assert len(valid) == 1
+    assert valid.state_boundaries == ("s0", "s1")
+    assert valid.transforms == ("t0",)
     assert valid[0] == Transition("s0", "t0", "s1")
     assert valid[-1] == valid[0]
     assert list(valid) == [Transition("s0", "t0", "s1")]

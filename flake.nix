@@ -734,6 +734,84 @@
       ];
     };
 
+    transitionBoundaryMatchingCheck = mkStaticUnitCheck {
+      name = "transition-boundary-matching";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/trace.py"
+        "tests/test_match.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_trace.py"
+        "-k"
+        "linear_match or single_transform or unmatched_terminal or transition_trace"
+      ];
+    };
+
+    terminalTransitionValidationCheck = mkStaticUnitCheck {
+      name = "terminal-transition-validation";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_compare.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py"
+        "tests/test_qemu_matching.py"
+        "-k"
+        "final_transition or single_transition or destination_for_single or preserves_final or missing_terminal or gdb_collector"
+      ];
+    };
+
+    adaptiveCutpointCompositionCheck = mkStaticUnitCheck {
+      name = "adaptive-cutpoint-composition";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+        "-k"
+        "repeated_pc or skipped_symbolic or composed_cutpoint or one_shot or concrete_only or discontinuous or stop_address or composes_symbolic"
+      ];
+    };
+
+    comparisonShapeDiagnosticsCheck = mkStaticUnitCheck {
+      name = "comparison-shape-diagnostics";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "src/focaccia/utils.py"
+        "tests/test_compare.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py"
+        "-k"
+        "empty or unequal or range_mismatch or unmatched_initial or zero_transition or renderer"
+      ];
+    };
+
+    sharedTransitionMatcherCheck = mkStaticUnitCheck {
+      name = "shared-transition-matcher";
+      ruffTargets = [
+        "src/focaccia/cli.py"
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+      ];
+    };
+
   in rec {
     packages = rec {
       focaccia = pythonEnv.overrideAttrs (old: {
@@ -873,6 +951,11 @@
       legacy-trace-readers = legacyTraceReadersCheck;
       trace-structural-validation = traceStructuralValidationCheck;
       typed-empty-traces = typedEmptyTracesCheck;
+      transition-boundary-matching = transitionBoundaryMatchingCheck;
+      terminal-transition-validation = terminalTransitionValidationCheck;
+      adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
+      comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
+      shared-transition-matcher = sharedTransitionMatcherCheck;
     };
   });
 }

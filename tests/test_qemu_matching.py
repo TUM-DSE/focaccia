@@ -1,0 +1,157 @@
+import importlib
+import sys
+from types import ModuleType
+
+import pytest
+from miasm.expression.expression import ExprId, ExprInt
+
+from focaccia.arch import x86
+from focaccia.qemu.validation_server import collect_conc_trace
+from focaccia.snapshot import ProgramState, RegisterAccessError
+from focaccia.symbolic import SymbolicTransform
+from focaccia.trace import MaterializedTrace, TraceEnvironment
+
+
+ARCH = x86.ArchX86()
+ENV = TraceEnvironment(
+    None,
+    (),
+    (),
+    binary_hash=None,
+    architecture=ARCH.key,
+)
+
+
+def state(pc: int, *, rax: int | None = None) -> ProgramState:
+    result = ProgramState(ARCH)
+    result.write_register("PC", pc)
+    if rax is not None:
+        result.write_register("RAX", rax)
+    return result
+
+
+def transform(start: int, end: int, *, rax: int | None = None) -> SymbolicTransform:
+    changes = {}
+    if rax is not None:
+        changes[ExprId("RAX", 64)] = ExprInt(rax, 64)
+    return SymbolicTransform(1, changes, [], ARCH, start, end)
+
+
+def trace(*items: SymbolicTransform) -> MaterializedTrace[SymbolicTransform]:
+    return MaterializedTrace(items, ENV, [item.addr for item in items])
+
+
+def codes(result) -> set[str]:
+    return {diagnostic.code for diagnostic in result.diagnostics}
+
+
+def test_plugin_collector_returns_destination_for_single_transition():
+    item = transform(0x1000, 0x1001)
+
+    result = collect_conc_trace(
+        iter([state(0x1000), state(0x1001)]),
+        trace(item),
+    )
+
+    assert result.trace is not None
+    assert len(result.trace) == 1
+    assert [boundary.read_pc() for boundary in result.trace.state_boundaries] == [
+        0x1000,
+        0x1001,
+    ]
+    assert result.trace.transforms == (item,)
+
+
+def test_plugin_collector_preserves_final_transition_of_two():
+    transforms = [transform(0x1000, 0x1001), transform(0x1001, 0x1002)]
+
+    result = collect_conc_trace(
+        iter([state(0x1000), state(0x1001), state(0x1002)]),
+        trace(*transforms),
+    )
+
+    assert result.trace is not None
+    assert len(result.trace) == 2
+    assert len(result.trace.state_boundaries) == 3
+    assert result.trace[-1].destination.read_pc() == 0x1002
+
+
+def test_plugin_collector_composes_symbolic_interior_cutpoints():
+    result = collect_conc_trace(
+        iter([state(0x1000), state(0x1002)]),
+        trace(transform(0x1000, 0x1001), transform(0x1001, 0x1002)),
+    )
+
+    assert result.trace is not None
+    assert len(result.trace) == 1
+    assert result.trace.transforms[0].range == (0x1000, 0x1002)
+    assert "symbolic-transforms-composed" in codes(result)
+
+
+def test_plugin_collector_classifies_missing_terminal_state():
+    item = transform(0x1000, 0x1001)
+
+    result = collect_conc_trace(iter([state(0x1000)]), trace(item))
+
+    assert result.trace is not None
+    assert len(result.trace) == 0
+    assert result.pending_transform is item
+    assert "unmatched-terminal-transition" in codes(result)
+
+
+def test_gdb_collector_uses_shared_matcher_and_keeps_terminal_state(monkeypatch):
+    fake_gdb = ModuleType("gdb")
+    for name in ("Breakpoint", "Frame", "Inferior", "Value"):
+        setattr(fake_gdb, name, object)
+    setattr(fake_gdb, "MemoryError", RuntimeError)
+    monkeypatch.setitem(sys.modules, "gdb", fake_gdb)
+    sys.modules.pop("focaccia.qemu.target", None)
+    sys.modules.pop("focaccia.qemu._qemu_tool", None)
+
+    qemu_tool = importlib.import_module("focaccia.qemu._qemu_tool")
+
+    class FakeGDBStates:
+        event_time = 0.0
+
+        class Events:
+            events = ()
+
+        _events = Events()
+
+        def __init__(self):
+            self._states = iter([state(0x1000), state(0x1001), state(0x1002)])
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+        def run_until(self, _address: int):
+            return next(self)
+
+    try:
+        result = qemu_tool.collect_conc_trace(
+            FakeGDBStates(),
+            trace(transform(0x1000, 0x1001), transform(0x1001, 0x1002)),
+        )
+    finally:
+        sys.modules.pop("focaccia.qemu._qemu_tool", None)
+        sys.modules.pop("focaccia.qemu.target", None)
+
+    assert result.trace is not None
+    assert len(result.trace) == 2
+    assert result.trace[-1].destination.read_pc() == 0x1002
+
+
+def test_plugin_snapshot_does_not_fabricate_unavailable_register_outputs():
+    item = transform(0x1000, 0x1001, rax=42)
+
+    result = collect_conc_trace(
+        iter([state(0x1000, rax=1), state(0x1001)]),
+        trace(item),
+    )
+
+    assert result.trace is not None
+    with pytest.raises(RegisterAccessError):
+        result.trace.state_boundaries[-1].read_register("RAX")

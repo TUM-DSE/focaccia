@@ -7,11 +7,11 @@ from typing import Callable, Iterable, Protocol
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
-from focaccia.match import fold_traces, match_traces
+from focaccia.match import MatchResult, match_transitions
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
 from focaccia.utils import ErrorSeverity, print_result, get_envp
-from focaccia.trace import MaterializedTrace, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 verbosity = {
     'info':    ErrorTypes.INFO,
@@ -27,14 +27,19 @@ concrete_trace_parsers = {
 }
 
 _MatchingAlgorithm = Callable[
-    [list[ProgramState], list[SymbolicTransform]],
-    tuple[list[ProgramState], list[SymbolicTransform]]
+    [
+        Iterable[ProgramState],
+        MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform],
+    ],
+    MatchResult,
 ]
 
+# Retain the command-line spellings while routing every path through the one
+# order-preserving matcher. The old implementations disagreed on cardinality.
 matching_algorithms: dict[str, _MatchingAlgorithm] = {
-    'none':   lambda c, s: (c, s),
-    'simple': match_traces,
-    'fold':   fold_traces,
+    'none': match_transitions,
+    'simple': match_transitions,
+    'fold': match_transitions,
 }
 
 class _ConcreteTraceTarget(Protocol):
@@ -139,10 +144,9 @@ them to the verifier with the --oracle-trace argument.
     parser.add_argument('--match',
                         choices=list(matching_algorithms.keys()),
                         default='simple',
-                        help='Select an algorithm to match the test trace to'
-                             ' the truth trace. Only applicable if --symbolic'
-                             ' is enabled.'
-                             ' [Default: simple]')
+                        help='Select a matching mode for symbolic validation.'
+                             ' Legacy mode names use the shared transition'
+                             ' matcher. [Default: simple]')
     parser.add_argument('--symbolic',
                         action='store_true',
                         default=False,
@@ -233,9 +237,12 @@ def main():
     if args.symbolic:
         symb_trace = get_symbolic_trace(args)
         match = matching_algorithms[args.match]
-        conc, symb = match(test_states, list(symb_trace))
+        matched = match(test_states, symb_trace)
 
-        result = compare_symbolic(conc, symb)
+        result = compare_symbolic(
+            matched.trace,
+            diagnostics=matched.diagnostics,
+        )
         oracle_env = symb_trace.env
     else:
         if not args.oracle_program:

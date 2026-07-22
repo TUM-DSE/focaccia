@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from .arch.arch import ArchitectureKey
 from .utils import file_hash
@@ -133,6 +133,20 @@ class TraceEnvironment:
             f"\n   replay_provenance={self.replay_provenance}"
             f"\n   architecture={self.architecture}"
         )
+
+
+DiagnosticLevel = Literal["info", "incomplete", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class TraceDiagnostic:
+    """Structured diagnostic produced while matching or validating a trace."""
+
+    level: DiagnosticLevel
+    code: str
+    message: str
+    concrete_index: int | None = None
+    transform_index: int | None = None
 
 
 T_co = TypeVar("T_co", covariant=True)
@@ -276,12 +290,13 @@ class TransitionTrace(
         env: TraceEnvironment,
     ):
         self.env = env
-        self.states = tuple(states)
+        self.state_boundaries = tuple(states)
         self.transforms = tuple(transforms)
-        if len(self.states) != len(self.transforms) + 1:
+        if len(self.state_boundaries) != len(self.transforms) + 1:
             raise ValueError(
                 "A transition trace requires exactly one more state boundary than "
-                f"transforms: {len(self.states)} != {len(self.transforms)} + 1."
+                f"transforms: {len(self.state_boundaries)} != "
+                f"{len(self.transforms)} + 1."
             )
 
     def __len__(self) -> int:
@@ -292,7 +307,11 @@ class TransitionTrace(
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError("transition trace index out of range")
-        return Transition(self.states[index], self.transforms[index], self.states[index + 1])
+        return Transition(
+            self.state_boundaries[index],
+            self.transforms[index],
+            self.state_boundaries[index + 1],
+        )
 
     @overload
     def __getitem__(self, index: int) -> Transition[StateT_co, TransformT_co]: ...
@@ -314,4 +333,7 @@ class TransitionTrace(
             yield self._at(index)
 
     def __repr__(self) -> str:
-        return f"Transition trace with {len(self)} transforms and {len(self.states)} states."
+        return (
+            f"Transition trace with {len(self)} transforms and "
+            f"{len(self.state_boundaries)} states."
+        )

@@ -1,105 +1,660 @@
-from typing import Iterable
+"""Order-preserving matching of concrete state boundaries to symbolic transforms."""
 
-from .snapshot import ProgramState
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from copy import copy
+from dataclasses import dataclass
+
+from .snapshot import ProgramState, RegisterAccessError
 from .symbolic import SymbolicTransform
+from .trace import (
+    DiagnosticLevel,
+    MaterializedTrace,
+    TraceDiagnostic,
+    TraceEnvironment,
+    TransformStream,
+    TransitionTrace,
+)
 
-def _find_index(seq: Iterable, target, access_seq_elem=lambda el: el):
-    for i, el in enumerate(seq):
-        if access_seq_elem(el) == target:
-            return i
-    return None
 
-def fold_traces(ctrace: list[ProgramState],
-                strace: list[SymbolicTransform]):
-    """Try to fold a higher-granularity symbolic trace to match a lower-
-    granularity concrete trace.
+@dataclass(frozen=True, slots=True)
+class MatchedBoundary:
+    """A retained concrete boundary and the transforms on either side of it."""
 
-    Modifies the inputs in-place.
+    concrete_index: int
+    pc: int
+    incoming: SymbolicTransform | None
+    outgoing: SymbolicTransform | None
 
-    :param ctrace: A concrete trace. Is assumed to have lower granularity than
-                   `truth`.
-    :param strace: A symbolic trace. Is assumed to have higher granularity than
-                   `test`. We assume that because we control the symbolic trace
-                   generation algorithm, and it produces traces on the level of
-                   single instructions, which is the highest granularity
-                   possible.
+
+@dataclass(frozen=True, slots=True)
+class MatchResult:
+    """A cardinality-valid matched trace plus non-fatal/fatal diagnostics."""
+
+    trace: TransitionTrace[ProgramState, SymbolicTransform] | None
+    diagnostics: tuple[TraceDiagnostic, ...]
+    pending_transform: SymbolicTransform | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.trace is not None and all(
+            diagnostic.level == "info" for diagnostic in self.diagnostics
+        )
+
+
+def _clone_transform(transform: SymbolicTransform) -> SymbolicTransform:
+    """Copy the mutable transform containers without copying immutable expressions."""
+    cloned = copy(transform)
+    cloned.changed_regs = transform.changed_regs.copy()
+    cloned.changed_mem = transform.changed_mem.copy()
+    cloned.instructions = list(transform.instructions)
+    return cloned
+
+
+def _as_symbolic_trace(
+    transforms: MaterializedTrace[SymbolicTransform]
+    | TransformStream[SymbolicTransform]
+    | Iterable[SymbolicTransform],
+) -> MaterializedTrace[SymbolicTransform] | TransformStream[SymbolicTransform]:
+    if isinstance(transforms, (MaterializedTrace, TransformStream)):
+        return transforms
+
+    items = tuple(transforms)
+    architecture = items[0].arch.key if items else None
+    environment = TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        architecture=architecture,
+    )
+    return MaterializedTrace(items, environment, [item.addr for item in items])
+
+
+class TransitionMatcher:
+    """Incrementally select concrete/symbolic cutpoints in execution order.
+
+    The matcher consumes each symbolic transform at most once.  When a concrete
+    state lands on a later symbolic boundary, every intervening transform is
+    composed into one incoming transform rather than discarded.
     """
-    if not ctrace or not strace:
-        return [], []
 
-    assert(ctrace[0].read_register('pc') == strace[0].addr)
+    def __init__(
+        self,
+        transforms: MaterializedTrace[SymbolicTransform]
+        | TransformStream[SymbolicTransform]
+        | Iterable[SymbolicTransform],
+        *,
+        stop_address: int | None = None,
+    ):
+        self.trace = _as_symbolic_trace(transforms)
+        self.environment = self.trace.env
+        self.addresses = self.trace.require_addresses()
+        self._iterator = (
+            self.trace.cursor()
+            if isinstance(self.trace, MaterializedTrace)
+            else self.trace
+        )
+        self._stop_address = (
+            self.environment.stop_address
+            if stop_address is None
+            else stop_address
+        )
 
-    i = 0
-    for next_state in ctrace[1:]:
-        next_pc = next_state.read_register('pc')
-        index_in_truth = _find_index(strace[i:], next_pc, lambda el: el.range[1])
+        self._diagnostics: list[TraceDiagnostic] = []
+        self._next_transform_index = 0
+        self._loaded_transforms: dict[int, SymbolicTransform] = {}
+        self._current_index: int | None = None
+        self._current: SymbolicTransform | None = None
+        self._source_pc: int | None = None
+        self._has_source = False
+        self._has_boundary = False
+        self._done = False
+        self._finished = False
+        self._concrete_count = 0
+        self._extra_concrete_count = 0
+        self._first_extra_concrete_index: int | None = None
+        self._pending_transform: SymbolicTransform | None = None
+        self._architecture = None
+        self._thread_id: int | None = None
 
-        # If no next element (i.e. no foldable range) is found in the truth
-        # trace, assume that the test trace contains excess states. Remove one
-        # and try again. This might skip testing some states, but covers more
-        # of the entire trace.
-        if index_in_truth is None:
-            ctrace.pop(i + 1)
-            continue
+    @property
+    def done(self) -> bool:
+        return self._done
 
-        # Fold the range of truth states until the next test state
-        for _ in range(index_in_truth):
-            strace[i].concat(strace.pop(i + 1))
+    @property
+    def diagnostics(self) -> tuple[TraceDiagnostic, ...]:
+        return tuple(self._diagnostics)
 
-        i += 1
-        if len(strace) <= i:
+    @property
+    def pending_transform(self) -> SymbolicTransform | None:
+        return self._pending_transform
+
+    def _diagnose(
+        self,
+        level: DiagnosticLevel,
+        code: str,
+        message: str,
+        *,
+        concrete_index: int | None = None,
+        transform_index: int | None = None,
+    ) -> None:
+        self._diagnostics.append(
+            TraceDiagnostic(
+                level,
+                code,
+                message,
+                concrete_index,
+                transform_index,
+            )
+        )
+
+    def _fatal(
+        self,
+        code: str,
+        message: str,
+        *,
+        concrete_index: int | None = None,
+        transform_index: int | None = None,
+    ) -> None:
+        self._diagnose(
+            "error",
+            code,
+            message,
+            concrete_index=concrete_index,
+            transform_index=transform_index,
+        )
+        self._done = True
+        self._has_source = False
+        self._current = None
+        self._current_index = None
+
+    def fail_concrete_state(self, index: int, error: Exception) -> None:
+        self._fatal(
+            "concrete-pc-unavailable",
+            f"Unable to read concrete state {index} program counter: {error}.",
+            concrete_index=index,
+            transform_index=self._current_index,
+        )
+
+    def _read_transform(self, index: int) -> SymbolicTransform | None:
+        if index in self._loaded_transforms:
+            return self._loaded_transforms[index]
+        if index != self._next_transform_index:
+            raise RuntimeError(
+                f"Internal transform cursor mismatch: {index} != "
+                f"{self._next_transform_index}."
+            )
+        try:
+            transform = next(self._iterator)
+        except StopIteration:
+            self._fatal(
+                "symbolic-trace-truncated",
+                f"Symbolic trace ended before transform {index}; "
+                f"the address index declares {len(self.addresses)} transforms.",
+                transform_index=index,
+            )
+            return None
+        except Exception as error:
+            self._fatal(
+                "symbolic-trace-read-error",
+                f"Unable to read symbolic transform {index}: {error}.",
+                transform_index=index,
+            )
+            return None
+
+        self._next_transform_index += 1
+        expected_address = self.addresses[index]
+        if transform.addr != expected_address:
+            self._fatal(
+                "symbolic-address-mismatch",
+                f"Transform {index} starts at {hex(transform.addr)}, but its "
+                f"address index contains {hex(expected_address)}.",
+                transform_index=index,
+            )
+            return None
+
+        if self._thread_id is None:
+            self._thread_id = transform.tid
+        elif transform.tid != self._thread_id:
+            self._fatal(
+                "unsupported-thread-transition",
+                f"Transform {index} changes thread ID from {self._thread_id} to "
+                f"{transform.tid}; concurrent traces are unsupported.",
+                transform_index=index,
+            )
+            return None
+
+        if self._architecture is None:
+            self._architecture = transform.arch
+            if (
+                self.environment.architecture is not None
+                and self.environment.architecture != transform.arch.key
+            ):
+                self._fatal(
+                    "symbolic-architecture-mismatch",
+                    f"Transform architecture {transform.arch} conflicts with "
+                    f"trace environment {self.environment.architecture}.",
+                    transform_index=index,
+                )
+                return None
+        elif transform.arch != self._architecture:
+            self._fatal(
+                "symbolic-architecture-mismatch",
+                f"Transform {index} has architecture {transform.arch}, expected "
+                f"{self._architecture}.",
+                transform_index=index,
+            )
+            return None
+        self._loaded_transforms[index] = transform
+        return transform
+
+    def _verify_exhausted(self) -> None:
+        try:
+            next(self._iterator)
+        except StopIteration:
+            return
+        except Exception as error:
+            self._fatal(
+                "symbolic-trace-read-error",
+                f"Unable to verify symbolic trace exhaustion: {error}.",
+                transform_index=self._next_transform_index,
+            )
+            return
+        self._fatal(
+            "symbolic-address-count-mismatch",
+            "Symbolic trace contains transforms beyond its address index.",
+            transform_index=self._next_transform_index,
+        )
+
+    def _find_address(self, start: int, pc: int) -> int | None:
+        for index in range(start, len(self.addresses)):
+            if self.addresses[index] == pc:
+                return index
+        return None
+
+    def _load_initial_transform(self, target_index: int) -> SymbolicTransform | None:
+        for index in range(self._next_transform_index, target_index + 1):
+            transform = self._read_transform(index)
+            if transform is None:
+                return None
+            if index == target_index:
+                self._current_index = index
+                self._current = transform
+        for index in tuple(self._loaded_transforms):
+            if index < target_index:
+                del self._loaded_transforms[index]
+        return self._current
+
+    def _stop_at_boundary(self, transform_index: int, pc: int) -> None:
+        skipped = len(self.addresses) - transform_index
+        if skipped:
+            self._diagnose(
+                "info",
+                "symbolic-suffix-outside-stop",
+                f"Stopped at {hex(pc)} with {skipped} symbolic transforms "
+                "outside the selected region.",
+                transform_index=transform_index,
+            )
+        self._current = None
+        self._current_index = None
+        self._has_source = False
+        self._done = True
+
+    def _find_destination(
+        self,
+        start_index: int,
+        pc: int,
+        concrete_index: int,
+    ) -> int | None:
+        previous: SymbolicTransform | None = None
+        for index in range(start_index, len(self.addresses)):
+            transform = self._read_transform(index)
+            if transform is None:
+                return None
+            if previous is not None and previous.range[1] != transform.range[0]:
+                self._fatal(
+                    "symbolic-trace-discontinuous",
+                    f"Transform {index - 1} ends at {hex(previous.range[1])}, "
+                    f"but transform {index} starts at {hex(transform.range[0])}.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            if transform.range[1] == pc:
+                return index
+            previous = transform
+        return None
+
+    def _compose_through(
+        self,
+        end_index: int,
+        concrete_index: int,
+    ) -> SymbolicTransform | None:
+        assert self._current is not None
+        assert self._current_index is not None
+        composite = (
+            self._current
+            if end_index == self._current_index
+            else _clone_transform(self._current)
+        )
+        previous = self._current
+
+        for index in range(self._current_index + 1, end_index + 1):
+            transform = self._read_transform(index)
+            if transform is None:
+                return None
+            if previous.range[1] != transform.range[0]:
+                self._fatal(
+                    "symbolic-trace-discontinuous",
+                    f"Cannot compose transform {index - 1} ending at "
+                    f"{hex(previous.range[1])} with transform {index} starting "
+                    f"at {hex(transform.range[0])}.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            if previous.tid != transform.tid:
+                self._fatal(
+                    "unsupported-thread-transition",
+                    "Cannot compose transforms from different threads; "
+                    "concurrent traces are unsupported.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            try:
+                composite.concat(transform)
+            except Exception as error:
+                self._fatal(
+                    "symbolic-composition-failed",
+                    f"Unable to compose transform {index}: {error}.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            previous = transform
+        return composite
+
+    def observe(self, pc: int) -> MatchedBoundary | None:
+        concrete_index = self._concrete_count
+        self._concrete_count += 1
+
+        if self._done:
+            if self._first_extra_concrete_index is None:
+                self._first_extra_concrete_index = concrete_index
+            self._extra_concrete_count += 1
+            return None
+
+        if not self.addresses:
+            self._has_boundary = True
+            self._diagnose(
+                "incomplete",
+                "symbolic-trace-empty",
+                "The symbolic trace is empty; no concrete transition can be validated.",
+                concrete_index=concrete_index,
+            )
+            self._verify_exhausted()
+            self._done = True
+            return MatchedBoundary(concrete_index, pc, None, None)
+
+        if not self._has_source:
+            target_index = self._find_address(self._next_transform_index, pc)
+            if target_index is None:
+                self._diagnose(
+                    "info",
+                    "concrete-state-skipped",
+                    f"Concrete state {concrete_index} at {hex(pc)} is not a "
+                    "remaining symbolic source boundary.",
+                    concrete_index=concrete_index,
+                    transform_index=self._next_transform_index,
+                )
+                if self._stop_address == pc:
+                    self._diagnose(
+                        "incomplete",
+                        "stop-address-unmatched",
+                        f"Concrete execution reached stop address {hex(pc)} without "
+                        "a matching symbolic boundary.",
+                        concrete_index=concrete_index,
+                        transform_index=self._next_transform_index,
+                    )
+                    self._done = True
+                return None
+
+            skipped = target_index - self._next_transform_index
+            if skipped:
+                self._diagnose(
+                    "info",
+                    "symbolic-prefix-skipped",
+                    f"Skipped {skipped} symbolic transforms before the first "
+                    f"matching concrete boundary at {hex(pc)}.",
+                    concrete_index=concrete_index,
+                    transform_index=target_index,
+                )
+            current = self._load_initial_transform(target_index)
+            if current is None:
+                return None
+            self._has_boundary = True
+            self._source_pc = pc
+
+            if self._stop_address == pc:
+                self._stop_at_boundary(target_index, pc)
+                return MatchedBoundary(concrete_index, pc, None, None)
+
+            self._has_source = True
+            return MatchedBoundary(concrete_index, pc, None, current)
+
+        assert self._current is not None
+        assert self._current_index is not None
+        assert self._source_pc is not None
+        start_index = self._current_index
+
+        end_index = self._find_destination(start_index, pc, concrete_index)
+        if end_index is None:
+            if self._done:
+                return None
+            self._diagnose(
+                "info",
+                "concrete-state-skipped",
+                f"Concrete state {concrete_index} at {hex(pc)} is not a "
+                "reachable symbolic destination boundary.",
+                concrete_index=concrete_index,
+                transform_index=start_index,
+            )
+            if self._stop_address == pc:
+                self._diagnose(
+                    "incomplete",
+                    "stop-address-unmatched",
+                    f"Concrete execution reached stop address {hex(pc)} without "
+                    "a matching symbolic destination.",
+                    concrete_index=concrete_index,
+                    transform_index=start_index,
+                )
+                self._pending_transform = self._current
+                self._done = True
+            return None
+
+        incoming = self._compose_through(end_index, concrete_index)
+        if incoming is None:
+            return None
+        if incoming.range != (self._source_pc, pc):
+            self._fatal(
+                "symbolic-trace-discontinuous",
+                f"Composed transform range {incoming.range!r} does not connect "
+                f"retained concrete boundaries {hex(self._source_pc)} and {hex(pc)}.",
+                concrete_index=concrete_index,
+                transform_index=start_index,
+            )
+            return None
+
+        composed_count = end_index - start_index + 1
+        if composed_count > 1:
+            self._diagnose(
+                "info",
+                "symbolic-transforms-composed",
+                f"Composed {composed_count} symbolic transforms between concrete "
+                f"cutpoints {hex(self._source_pc)} and {hex(pc)}.",
+                concrete_index=concrete_index,
+                transform_index=start_index,
+            )
+
+        next_index = end_index + 1
+        for index in range(start_index, end_index + 1):
+            self._loaded_transforms.pop(index, None)
+        outgoing: SymbolicTransform | None = None
+        self._current = None
+        self._current_index = None
+
+        if self._stop_address == pc:
+            self._stop_at_boundary(next_index, pc)
+        elif next_index < len(self.addresses):
+            outgoing = self._read_transform(next_index)
+            if outgoing is not None:
+                if incoming.range[1] != outgoing.range[0]:
+                    self._fatal(
+                        "symbolic-trace-discontinuous",
+                        f"Transform {end_index} ends at {hex(incoming.range[1])}, "
+                        f"but transform {next_index} starts at "
+                        f"{hex(outgoing.range[0])}.",
+                        concrete_index=concrete_index,
+                        transform_index=next_index,
+                    )
+                    outgoing = None
+                else:
+                    self._current = outgoing
+                    self._current_index = next_index
+                    self._source_pc = pc
+                    self._has_source = True
+        else:
+            self._verify_exhausted()
+            if not self._done:
+                self._done = True
+            self._has_source = False
+
+        return MatchedBoundary(concrete_index, pc, incoming, outgoing)
+
+    def finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+
+        if self._concrete_count == 0:
+            self._diagnose(
+                "incomplete",
+                "concrete-trace-empty",
+                "The concrete trace has no state boundary.",
+                transform_index=self._current_index or 0,
+            )
+        elif self._has_source and not self._done:
+            assert self._current is not None
+            self._pending_transform = self._current
+            self._diagnose(
+                "incomplete",
+                "unmatched-terminal-transition",
+                f"Concrete execution ended at source boundary {hex(self._source_pc or 0)} "
+                f"before transform {self._current_index} reached destination "
+                f"{hex(self._current.range[1])}.",
+                concrete_index=self._concrete_count - 1,
+                transform_index=self._current_index,
+            )
+            self._done = True
+        elif not self._has_boundary and not self._done:
+            self._diagnose(
+                "incomplete",
+                "no-matching-boundary",
+                "No concrete state matched a symbolic source boundary.",
+                transform_index=self._next_transform_index,
+            )
+            self._done = True
+
+        if self._extra_concrete_count:
+            self._diagnose(
+                "info",
+                "concrete-suffix-skipped",
+                f"Ignored {self._extra_concrete_count} concrete states after "
+                "symbolic matching completed.",
+                concrete_index=self._first_extra_concrete_index,
+            )
+
+    def make_result(
+        self,
+        states: Sequence[ProgramState],
+        transforms: Sequence[SymbolicTransform],
+    ) -> MatchResult:
+        self.finish()
+        trace = None
+        if states:
+            try:
+                trace = TransitionTrace(states, transforms, self.environment)
+            except ValueError as error:
+                self._diagnose(
+                    "error",
+                    "matched-trace-cardinality",
+                    str(error),
+                )
+        return MatchResult(trace, self.diagnostics, self._pending_transform)
+
+
+def match_transitions(
+    concrete_states: Iterable[ProgramState],
+    symbolic_transforms: MaterializedTrace[SymbolicTransform]
+    | TransformStream[SymbolicTransform]
+    | Iterable[SymbolicTransform],
+) -> MatchResult:
+    """Match materialized concrete states to symbolic transitions."""
+    matcher = TransitionMatcher(symbolic_transforms)
+    retained_states: list[ProgramState] = []
+    retained_transforms: list[SymbolicTransform] = []
+
+    for concrete_index, state in enumerate(concrete_states):
+        try:
+            pc = state.read_pc()
+        except RegisterAccessError as error:
+            matcher.fail_concrete_state(concrete_index, error)
             break
 
-    # Fold remaining symbolic transforms into one
-    while i + 1 < len(strace):
-        strace[i].concat(strace.pop(i + 1))
+        boundary = matcher.observe(pc)
+        if boundary is None:
+            continue
+        if boundary.incoming is None:
+            if retained_states:
+                matcher._fatal(
+                    "unexpected-initial-boundary",
+                    "Matcher produced a second initial boundary.",
+                    concrete_index=concrete_index,
+                )
+                break
+            retained_states.append(state)
+            continue
 
-    return ctrace, strace
+        if not retained_states:
+            matcher._fatal(
+                "missing-source-boundary",
+                "Matcher produced a destination without a retained source state.",
+                concrete_index=concrete_index,
+            )
+            break
+        retained_transforms.append(boundary.incoming)
+        retained_states.append(state)
 
-def match_traces(ctrace: list[ProgramState], \
-                 strace: list[SymbolicTransform]):
-    """Try to match traces that don't follow the same program flow.
+    return matcher.make_result(retained_states, retained_transforms)
 
-    This algorithm is useful if traces of the same binary mismatch due to
-    differences in environment during their recording.
 
-    Does not modify the arguments. Creates and returns new lists.
-
-    :param test: A concrete trace.
-    :param truth: A symbolic trace.
-
-    :return: The modified traces.
-    """
-    if not strace:
+def match_traces(
+    ctrace: list[ProgramState],
+    strace: list[SymbolicTransform],
+) -> tuple[list[ProgramState], list[SymbolicTransform]]:
+    """Compatibility wrapper around the shared non-mutating matcher."""
+    result = match_transitions(ctrace, strace)
+    if result.trace is None:
         return [], []
+    return list(result.trace.state_boundaries), list(result.trace.transforms)
 
-    states = []
-    matched_transforms = []
 
-    state_iter = iter(ctrace)
-    symb_i = 0
-    for cur_state in state_iter:
-        pc = cur_state.read_register('pc')
-
-        if pc != strace[symb_i].addr:
-            next_i = _find_index(strace[symb_i+1:], pc, lambda t: t.addr)
-
-            # Drop the concrete state if no address in the symbolic trace
-            # matches
-            if next_i is None:
-                continue
-
-            # Otherwise, jump to the next matching symbolic state
-            symb_i += next_i + 1
-
-        # Append the now matching state/transform pair to the traces
-        assert(cur_state.read_register('pc') == strace[symb_i].addr)
-        states.append(cur_state)
-        matched_transforms.append(strace[symb_i])
-
-        # Step forward
-        symb_i += 1
-
-    assert(len(states) == len(matched_transforms))
-
-    return states, matched_transforms
+def fold_traces(
+    ctrace: list[ProgramState],
+    strace: list[SymbolicTransform],
+) -> tuple[list[ProgramState], list[SymbolicTransform]]:
+    """Compatibility alias for adaptive matching; inputs are never mutated."""
+    return match_traces(ctrace, strace)

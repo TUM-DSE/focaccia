@@ -1,62 +1,119 @@
 from __future__ import annotations
-from typing import Iterable
 
-from .snapshot import ProgramState, MemoryAccessError, RegisterAccessError
+from collections.abc import Iterable, Iterator, Sequence
+from typing import Any, overload
+
+from .snapshot import MemoryAccessError, ProgramState, RegisterAccessError
 from .symbolic import SymbolicTransform
+from .trace import (
+    DiagnosticLevel,
+    TraceDiagnostic,
+    TraceEnvironment,
+    TransitionTrace,
+)
 from .utils import ErrorSeverity
 
+
 class ErrorTypes:
-    INFO       = ErrorSeverity(0, 'INFO')
-    INCOMPLETE = ErrorSeverity(2, 'INCOMPLETE DATA')
-    POSSIBLE   = ErrorSeverity(4, 'UNCONFIRMED ERROR')
-    CONFIRMED  = ErrorSeverity(5, 'ERROR')
+    INFO = ErrorSeverity(0, "INFO")
+    INCOMPLETE = ErrorSeverity(2, "INCOMPLETE DATA")
+    POSSIBLE = ErrorSeverity(4, "UNCONFIRMED ERROR")
+    CONFIRMED = ErrorSeverity(5, "ERROR")
+
 
 class Error:
     """A state comparison error."""
+
     def __init__(self, severity: ErrorSeverity, msg: str):
         self.severity = severity
         self.error_msg = msg
 
     def __repr__(self) -> str:
-        return f'{self.severity} {self.error_msg}'
+        return f"{self.severity} {self.error_msg}"
 
-def _calc_transformation(previous: ProgramState, current: ProgramState):
-    """Calculate the difference between two context blocks.
 
-    :return: A context block that contains in its registers the difference
-             between the corresponding input blocks' register values.
-    """
-    assert(previous.arch == current.arch)
+ComparisonEntry = dict[str, Any]
 
-    arch = previous.arch
-    transformation = ProgramState(arch)
-    for reg in arch.regnames:
+
+class ValidationReport(Sequence[ComparisonEntry]):
+    """Comparison entries plus structured non-entry diagnostics."""
+
+    def __init__(
+        self,
+        entries: Iterable[ComparisonEntry] = (),
+        diagnostics: Iterable[TraceDiagnostic] = (),
+    ):
+        self.entries = tuple(entries)
+        self.diagnostics = tuple(diagnostics)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    @overload
+    def __getitem__(self, index: int) -> ComparisonEntry: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[ComparisonEntry, ...]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> ComparisonEntry | tuple[ComparisonEntry, ...]:
+        return self.entries[index]
+
+    def __iter__(self) -> Iterator[ComparisonEntry]:
+        return iter(self.entries)
+
+    def with_entry(self, entry: ComparisonEntry) -> ValidationReport:
+        return ValidationReport((*self.entries, entry), self.diagnostics)
+
+
+def _diagnostic(
+    level: DiagnosticLevel,
+    code: str,
+    message: str,
+    *,
+    concrete_index: int | None = None,
+    transform_index: int | None = None,
+) -> TraceDiagnostic:
+    return TraceDiagnostic(
+        level,
+        code,
+        message,
+        concrete_index,
+        transform_index,
+    )
+
+
+def _calc_transformation(previous: ProgramState, current: ProgramState) -> ProgramState:
+    """Calculate known register differences between two context blocks."""
+    if previous.arch != current.arch:
+        raise ValueError(
+            f"Cannot compare state architectures {previous.arch} and {current.arch}."
+        )
+
+    transformation = ProgramState(previous.arch)
+    for reg in previous.arch.regnames:
         try:
             prev_val = previous.read_register(reg)
             cur_val = current.read_register(reg)
             transformation.write_register(reg, cur_val - prev_val)
         except RegisterAccessError:
-            # Register is not set in either state
             pass
-
     return transformation
 
-def _find_errors(transform_txl: ProgramState, transform_truth: ProgramState) \
-        -> list[Error]:
-    """Find possible errors between a reference and a tested state.
 
-    :param txl_state: The translated state to check for errors.
-    :param prev_txl_state: The translated snapshot immediately preceding
-                           `txl_state`.
-    :param truth_state: The reference state against which to check the
-                        translated state `txl_state` for errors.
-    :param prev_truth_state: The reference snapshot immediately preceding
-                           `prev_truth_state`.
-
-    :return: A list of errors; one entry for each register that may have
-             faulty contents. Is empty if no errors were found.
-    """
-    assert(transform_truth.arch == transform_txl.arch)
+def _find_errors(
+    transform_txl: ProgramState,
+    transform_truth: ProgramState,
+) -> list[Error]:
+    """Find differing known register transformations."""
+    if transform_truth.arch != transform_txl.arch:
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                "Unable to compare register differences from different architectures.",
+            )
+        ]
 
     errors = []
     for reg in transform_truth.arch.regnames:
@@ -64,261 +121,467 @@ def _find_errors(transform_txl: ProgramState, transform_truth: ProgramState) \
             diff_txl = transform_txl.read_register(reg)
             diff_truth = transform_truth.read_register(reg)
         except RegisterAccessError:
-            errors.append(Error(ErrorTypes.INFO,
-                                f'Unable to calculate difference:'
-                                f' Value for register {reg} is not set in'
-                                f' either the tested or the reference state.'))
+            errors.append(
+                Error(
+                    ErrorTypes.INFO,
+                    "Unable to calculate difference: value for register "
+                    f"{reg} is not set in either the tested or reference state.",
+                )
+            )
             continue
 
         if diff_txl != diff_truth:
-            errors.append(Error(
-                ErrorTypes.CONFIRMED,
-                f'Transformation of register {reg} is false.'
-                f' Expected difference: {hex(diff_truth)},'
-                f' actual difference in the translation: {hex(diff_txl)}.'))
-
+            errors.append(
+                Error(
+                    ErrorTypes.CONFIRMED,
+                    f"Transformation of register {reg} is false. Expected "
+                    f"difference: {hex(diff_truth)}, actual difference in the "
+                    f"translation: {hex(diff_txl)}.",
+                )
+            )
     return errors
 
-def compare_simple(test_states: list[ProgramState],
-                   truth_states: list[ProgramState]) -> list[dict]:
-    """Simple comparison of programs.
 
-    :param test_states: A program flow to check for errors.
-    :param truth_states: A reference program flow that defines a correct
-                         program execution.
+def compare_simple(
+    test_states: Iterable[ProgramState],
+    truth_states: Iterable[ProgramState],
+) -> ValidationReport:
+    """Compare equal-length concrete state traces without silent truncation."""
+    tested = tuple(test_states)
+    truth = tuple(truth_states)
+    diagnostics: list[TraceDiagnostic] = []
 
-    :return: Information, including possible errors, about each processed
-             snapshot.
-    """
-    PC_REGNAME = 'PC'
+    if not tested and not truth:
+        diagnostics.append(
+            _diagnostic(
+                "incomplete",
+                "empty-concrete-traces",
+                "Both concrete traces are empty; no transition can be compared.",
+            )
+        )
+        return ValidationReport(diagnostics=diagnostics)
+    if len(tested) != len(truth):
+        diagnostics.append(
+            _diagnostic(
+                "error",
+                "concrete-trace-cardinality",
+                "Concrete trace lengths differ: "
+                f"tested={len(tested)}, reference={len(truth)}.",
+            )
+        )
+        return ValidationReport(diagnostics=diagnostics)
+    if not tested:
+        return ValidationReport(diagnostics=diagnostics)
 
-    if len(test_states) == 0:
-        print('No states to compare. Exiting.')
-        return []
+    entries: list[ComparisonEntry] = []
+    try:
+        initial_pc = tested[0].read_pc()
+        initial_truth_pc = truth[0].read_pc()
+    except RegisterAccessError as error:
+        diagnostics.append(
+            _diagnostic(
+                "error",
+                "concrete-pc-unavailable",
+                f"Unable to read an initial concrete PC: {error}.",
+                concrete_index=0,
+            )
+        )
+        return ValidationReport(diagnostics=diagnostics)
+    if tested[0].arch != truth[0].arch:
+        diagnostics.append(
+            _diagnostic(
+                "error",
+                "concrete-architecture-mismatch",
+                f"Initial concrete states have architectures {tested[0].arch} "
+                f"and {truth[0].arch}.",
+                concrete_index=0,
+            )
+        )
+        return ValidationReport(diagnostics=diagnostics)
+    if initial_pc != initial_truth_pc:
+        diagnostics.append(
+            _diagnostic(
+                "incomplete",
+                "concrete-pc-mismatch",
+                f"Initial tested PC {hex(initial_pc)} does not match reference "
+                f"PC {hex(initial_truth_pc)}.",
+                concrete_index=0,
+            )
+        )
+        return ValidationReport(diagnostics=diagnostics)
 
-    # No errors in initial snapshot because we can't perform difference
-    # calculations on it
-    result = [{
-        'pc': test_states[0].read_register(PC_REGNAME),
-        'txl': test_states[0], 'ref': truth_states[0],
-        'errors': []
-    }]
+    entries.append(
+        {
+            "pc": initial_pc,
+            "txl": tested[0],
+            "ref": truth[0],
+            "errors": [],
+            "snap": tested[0],
+        }
+    )
 
-    it_prev = zip(iter(test_states), iter(truth_states))
-    it_cur = zip(iter(test_states[1:]), iter(truth_states[1:]))
+    for index in range(1, len(tested)):
+        previous_test = tested[index - 1]
+        previous_truth = truth[index - 1]
+        current_test = tested[index]
+        current_truth = truth[index]
+        try:
+            pc_test = current_test.read_pc()
+            pc_truth = current_truth.read_pc()
+        except RegisterAccessError as error:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "concrete-pc-unavailable",
+                    f"Unable to read concrete PC at state {index}: {error}.",
+                    concrete_index=index,
+                )
+            )
+            break
 
-    for txl, truth in it_cur:
-        prev_txl, prev_truth = next(it_prev)
+        if pc_test != pc_truth:
+            diagnostics.append(
+                _diagnostic(
+                    "incomplete",
+                    "concrete-pc-mismatch",
+                    f"Tested PC {hex(pc_test)} does not match reference PC "
+                    f"{hex(pc_truth)} at state {index}.",
+                    concrete_index=index,
+                )
+            )
+            break
+        if previous_test.arch != current_test.arch or previous_truth.arch != current_truth.arch:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "concrete-architecture-mismatch",
+                    f"Architecture changes across concrete transition {index - 1}.",
+                    concrete_index=index,
+                )
+            )
+            break
 
-        pc_txl = txl.read_register(PC_REGNAME)
-        pc_truth = truth.read_register(PC_REGNAME)
+        transform_truth = _calc_transformation(previous_truth, current_truth)
+        transform_test = _calc_transformation(previous_test, current_test)
+        entries.append(
+            {
+                "pc": pc_test,
+                "txl": transform_test,
+                "ref": transform_truth,
+                "errors": _find_errors(transform_test, transform_truth),
+                "snap": previous_test,
+            }
+        )
 
-        if pc_txl != pc_truth:
-            print(f'Unmatched program counter {hex(pc_txl)}'
-                  f' in translated code!')
-            continue
+    return ValidationReport(entries, diagnostics)
 
-        transform_truth = _calc_transformation(prev_truth, truth)
-        transform_txl = _calc_transformation(prev_txl, txl)
-        errors = _find_errors(transform_txl, transform_truth)
-        result.append({
-            'pc': pc_txl,
-            'txl': transform_txl, 'ref': transform_truth,
-            'errors': errors
-        })
 
-    return result
-
-def _find_register_errors(txl_from: ProgramState,
-                          txl_to: ProgramState,
-                          transform_truth: SymbolicTransform,
-                          is_uarch_dep: bool = False) \
-        -> list[Error]:
-    """Find errors in register values.
-
-    Errors might be:
-     - A register value was modified, but the tested state contains no
-       reference value for that register.
-     - The tested destination state's value for a register does not match
-       the value expected by the symbolic transformation.
-    """
-    # Calculate expected register values
+def _find_register_errors(
+    txl_from: ProgramState,
+    txl_to: ProgramState,
+    transform_truth: SymbolicTransform,
+    is_uarch_dep: bool = False,
+) -> list[Error]:
+    """Compare symbolic register outputs against a concrete destination."""
     try:
         truth = transform_truth.eval_register_transforms(txl_from)
-    except MemoryAccessError as err:
-        s, e = transform_truth.range
-        return [Error(
-            ErrorTypes.POSSIBLE,
-            f'Register transformations {hex(s)} -> {hex(e)} depend on'
-            f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
-            f' that are not entirely present in the tested state'
-            f' {hex(txl_from.read_register("pc"))}.',
-        )]
-    except RegisterAccessError as err:
-        s, e = transform_truth.range
+    except MemoryAccessError as error:
+        start, end = transform_truth.range
+        return [
+            Error(
+                ErrorTypes.POSSIBLE,
+                f"Register transformations {hex(start)} -> {hex(end)} depend on "
+                f"{error.mem_size} bytes at memory address {hex(error.mem_addr)} "
+                "that are not entirely present in the tested source state.",
+            )
+        ]
+    except RegisterAccessError as error:
+        start, end = transform_truth.range
         if is_uarch_dep:
-            return [Error(ErrorTypes.INCOMPLETE,
-                          f'Register transformations {hex(s)} -> {hex(e)} depend'
-                          f' on the value of microarchitecturally-dependent register {err.regname}, which is not'
-                          f' set in the tested state. Incorrect or missing values for such registers'
-                          f'are errors only if the program relies on them. Such registers generally'
-                          f'denote microarchitectural feature support and not all programs depend on'
-                          f'all features exposed by a microarchitecture')]
-        return [Error(ErrorTypes.INCOMPLETE,
-                      f'Register transformations {hex(s)} -> {hex(e)} depend'
-                      f' on the value of register {err.regname}, which is not'
-                      f' set in the tested state.')]
+            return [
+                Error(
+                    ErrorTypes.INCOMPLETE,
+                    f"Register transformations {hex(start)} -> {hex(end)} depend "
+                    "on the unavailable microarchitecturally-dependent register "
+                    f"{error.regname}.",
+                )
+            ]
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                f"Register transformations {hex(start)} -> {hex(end)} depend on "
+                f"the unavailable register {error.regname}.",
+            )
+        ]
 
-    # Compare expected values to actual values in the tested state
     errors = []
     for regname, truth_val in truth.items():
         try:
             txl_val = txl_to.read_register(regname)
         except RegisterAccessError:
-            errors.append(Error(ErrorTypes.INCOMPLETE,
-                                f'Value of register {regname} has changed, but'
-                                f' is not set in the tested state.'))
+            errors.append(
+                Error(
+                    ErrorTypes.INCOMPLETE,
+                    f"Value of register {regname} changed but is unavailable in "
+                    "the tested destination state.",
+                )
+            )
             continue
 
-        if txl_val != truth_val:
-            if is_uarch_dep:
-                errors.append(
-                    Error(
-                        ErrorTypes.POSSIBLE,
-                        f"Content of microarchitecture-specific register {regname} is different."
-                        f"This denotes an error only when relied upon"
-                        f" Expected value: {hex(truth_val)}, actual"
-                        f" value in the translation: {hex(txl_val)}.",
-                    )
+        if txl_val == truth_val:
+            continue
+        if is_uarch_dep:
+            errors.append(
+                Error(
+                    ErrorTypes.POSSIBLE,
+                    f"Content of microarchitecture-specific register {regname} "
+                    f"differs. Expected {hex(truth_val)}, actual {hex(txl_val)}.",
                 )
-            else:
-                errors.append(Error(ErrorTypes.CONFIRMED,
-                                    f'Content of register {regname} is false.'
-                                    f' Expected value: {hex(truth_val)}, actual'
-                                    f' value in the translation: {hex(txl_val)}.'))
+            )
+        else:
+            errors.append(
+                Error(
+                    ErrorTypes.CONFIRMED,
+                    f"Content of register {regname} is false. Expected "
+                    f"{hex(truth_val)}, actual {hex(txl_val)}.",
+                )
+            )
     return errors
 
-def _find_memory_errors(txl_from: ProgramState,
-                        txl_to: ProgramState,
-                        transform_truth: SymbolicTransform) \
-        -> list[Error]:
-    """Find errors in memory values.
 
-    Errors might be:
-     - A range of memory was written, but the tested state contains no
-       reference value for that range.
-     - The tested destination state's content for the tested range does not
-       match the value expected by the symbolic transformation.
-    """
-    # Calculate expected register values
+def _find_memory_errors(
+    txl_from: ProgramState,
+    txl_to: ProgramState,
+    transform_truth: SymbolicTransform,
+) -> list[Error]:
+    """Compare symbolic memory outputs against a concrete destination."""
     try:
         truth = transform_truth.eval_memory_transforms(txl_from)
-    except MemoryAccessError as err:
-        s, e = transform_truth.range
-        return [Error(ErrorTypes.INCOMPLETE,
-                      f'Memory transformations {hex(s)} -> {hex(e)} depend on'
-                      f' {err.mem_size} bytes at memory address {hex(err.mem_addr)}'
-                      f' that are not entirely present in the tested state at'
-                      f' {hex(txl_from.read_register("pc"))}.')]
-    except RegisterAccessError as err:
-        s, e = transform_truth.range
-        return [Error(ErrorTypes.INCOMPLETE,
-                      f'Memory transformations {hex(s)} -> {hex(e)} depend on'
-                      f' the value of register {err.regname}, which is not'
-                      f' set in the tested state.')]
+    except MemoryAccessError as error:
+        start, end = transform_truth.range
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                f"Memory transformations {hex(start)} -> {hex(end)} depend on "
+                f"{error.mem_size} bytes at memory address {hex(error.mem_addr)} "
+                "that are not entirely present in the tested source state.",
+            )
+        ]
+    except RegisterAccessError as error:
+        start, end = transform_truth.range
+        return [
+            Error(
+                ErrorTypes.INCOMPLETE,
+                f"Memory transformations {hex(start)} -> {hex(end)} depend on "
+                f"the unavailable register {error.regname}.",
+            )
+        ]
 
-    # Compare expected values to actual values in the tested state
     errors = []
-    for addr, truth_bytes in truth.items():
+    for address, truth_bytes in truth.items():
         size = len(truth_bytes)
         try:
-            txl_bytes = txl_to.read_memory(addr, size)
+            txl_bytes = txl_to.read_memory(address, size)
         except MemoryAccessError:
-            errors.append(Error(ErrorTypes.POSSIBLE,
-                                f'Memory range [{hex(addr)}, {hex(addr + size)})'
-                                f' is not set in the tested result state at'
-                                f' {hex(txl_to.read_register("pc"))}. This is'
-                                f' either an error in the translation or'
-                                f' the recorded test state is missing data.'))
+            errors.append(
+                Error(
+                    ErrorTypes.POSSIBLE,
+                    f"Memory range [{hex(address)}, {hex(address + size)}) is "
+                    "unavailable in the tested destination state.",
+                )
+            )
             continue
 
         if txl_bytes != truth_bytes:
-            errors.append(Error(ErrorTypes.CONFIRMED,
-                                f'Content of memory at {hex(addr)} is false.'
-                                f' Expected content: {truth_bytes.hex()},'
-                                f' actual content in the translation:'
-                                f' {txl_bytes.hex()}.'))
+            errors.append(
+                Error(
+                    ErrorTypes.CONFIRMED,
+                    f"Content of memory at {hex(address)} is false. Expected "
+                    f"{truth_bytes.hex()}, actual {txl_bytes.hex()}.",
+                )
+            )
     return errors
 
-def _find_errors_symbolic(txl_from: ProgramState,
-                          txl_to: ProgramState,
-                          transform_truth: SymbolicTransform) \
-        -> list[Error]:
-    """Tries to find errors in transformations between tested states.
 
-    Applies a transformation to a source state and tests whether the result
-    matches a given destination state.
-
-    :param txl_from:        Source state. This is a state from the tested
-                            program, and is assumed as the starting point for
-                            the transformation.
-    :param txl_to:          Destination state. This is a possibly faulty state
-                            from the tested program, and is tested for
-                            correctness with respect to the source state.
-    :param transform_truth: The symbolic transformation that maps the source
-                            state to the destination state.
-    """
-    from_pc = txl_from.read_register('PC')
-    to_pc = txl_to.read_register('PC')
-    assert((from_pc, to_pc) == transform_truth.range)
-
-    is_uarch_dep = txl_from.arch.is_instr_uarch_dep(transform_truth.instructions[0].to_string())
-
+def _find_errors_symbolic(
+    txl_from: ProgramState,
+    txl_to: ProgramState,
+    transform_truth: SymbolicTransform,
+) -> list[Error]:
+    """Apply one symbolic transform to its concrete source/destination pair."""
+    is_uarch_dep = any(
+        txl_from.arch.is_instr_uarch_dep(instruction.to_string())
+        for instruction in transform_truth.instructions
+    )
     errors = []
-    errors.extend(_find_register_errors(txl_from, txl_to, transform_truth, is_uarch_dep))
+    errors.extend(
+        _find_register_errors(txl_from, txl_to, transform_truth, is_uarch_dep)
+    )
     errors.extend(_find_memory_errors(txl_from, txl_to, transform_truth))
-
     return errors
 
-def compare_symbolic(test_states: Iterable[ProgramState],
-                     transforms: Iterable[SymbolicTransform]) \
-        -> list[dict]:
-    test_states = iter(test_states)
-    transforms = iter(transforms)
 
-    result = []
+def _coerce_transition_trace(
+    test_states: TransitionTrace[ProgramState, SymbolicTransform]
+    | Iterable[ProgramState]
+    | None,
+    transforms: Iterable[SymbolicTransform] | None,
+) -> tuple[
+    TransitionTrace[ProgramState, SymbolicTransform] | None,
+    list[TraceDiagnostic],
+]:
+    diagnostics: list[TraceDiagnostic] = []
+    if isinstance(test_states, TransitionTrace):
+        if transforms is not None:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "duplicate-transform-input",
+                    "compare_symbolic received a TransitionTrace and a second "
+                    "transform iterable.",
+                )
+            )
+            return None, diagnostics
+        return test_states, diagnostics
 
-    cur_state = next(test_states)   # The state before the transformation
-    transform = next(transforms)    # Transform that operates on `cur_state`
-    while True:
+    states = tuple(test_states or ())
+    symbolic = tuple(transforms or ())
+    if not states:
+        diagnostics.append(
+            _diagnostic(
+                "incomplete",
+                "empty-state-trace",
+                "Symbolic comparison requires at least one concrete state boundary.",
+            )
+        )
+        if symbolic:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "transition-trace-cardinality",
+                    f"Received 0 states for {len(symbolic)} transforms.",
+                )
+            )
+        return None, diagnostics
+    if len(states) != len(symbolic) + 1:
+        diagnostics.append(
+            _diagnostic(
+                "error",
+                "transition-trace-cardinality",
+                "Symbolic comparison requires exactly one more state than "
+                f"transforms: {len(states)} != {len(symbolic)} + 1.",
+            )
+        )
+        return None, diagnostics
+
+    environment = TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        architecture=states[0].arch.key,
+    )
+    return TransitionTrace(states, symbolic, environment), diagnostics
+
+
+def compare_symbolic(
+    test_states: TransitionTrace[ProgramState, SymbolicTransform]
+    | Iterable[ProgramState]
+    | None,
+    transforms: Iterable[SymbolicTransform] | None = None,
+    *,
+    diagnostics: Iterable[TraceDiagnostic] = (),
+) -> ValidationReport:
+    """Validate every transform against exactly two concrete state boundaries."""
+    transition_trace, shape_diagnostics = _coerce_transition_trace(
+        test_states, transforms
+    )
+    all_diagnostics = [*diagnostics, *shape_diagnostics]
+    if transition_trace is None:
+        return ValidationReport(diagnostics=all_diagnostics)
+
+    entries: list[ComparisonEntry] = []
+    for index, transition in enumerate(transition_trace):
+        source = transition.source
+        destination = transition.destination
+        transform = transition.transform
+
         try:
-            next_state = next(test_states) # The state after the transformation
+            source_pc = source.read_pc()
+            destination_pc = destination.read_pc()
+        except RegisterAccessError as error:
+            all_diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "transition-pc-unavailable",
+                    f"Unable to read transition {index} boundary PC: {error}.",
+                    concrete_index=index,
+                    transform_index=index,
+                )
+            )
+            entries.append(
+                {
+                    "pc": transform.addr,
+                    "txl": None,
+                    "ref": transform,
+                    "errors": [
+                        Error(
+                            ErrorTypes.INCOMPLETE,
+                            f"Transition boundary PC is unavailable: {error}.",
+                        )
+                    ],
+                    "snap": source,
+                }
+            )
+            continue
 
-            pc_cur = cur_state.read_register('PC')
-            pc_next = next_state.read_register('PC')
-            if (pc_cur, pc_next) != transform.range:
-                repr_range = lambda r: f'[{hex(r[0])} -> {hex(r[1])}]'
-                print(f'[WARNING] Test states {repr_range((pc_cur, pc_next))}'
-                      f' do not match the symbolic transformation'
-                      f' {repr_range(transform.range)} against which they are'
-                      f' tested! Skipping.')
-                cur_state = next_state
-                transform = next(transforms)
-                continue
+        entry_errors: list[Error] = []
+        if source.arch != destination.arch or source.arch != transform.arch:
+            message = (
+                f"Transition {index} mixes architectures: source={source.arch}, "
+                f"destination={destination.arch}, transform={transform.arch}."
+            )
+            all_diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "transition-architecture-mismatch",
+                    message,
+                    concrete_index=index,
+                    transform_index=index,
+                )
+            )
+            entry_errors.append(Error(ErrorTypes.INCOMPLETE, message))
+        elif (source_pc, destination_pc) != transform.range:
+            message = (
+                f"Concrete transition [{hex(source_pc)} -> {hex(destination_pc)}] "
+                f"does not match symbolic range [{hex(transform.range[0])} -> "
+                f"{hex(transform.range[1])}]."
+            )
+            all_diagnostics.append(
+                _diagnostic(
+                    "error",
+                    "transition-range-mismatch",
+                    message,
+                    concrete_index=index,
+                    transform_index=index,
+                )
+            )
+            entry_errors.append(Error(ErrorTypes.INCOMPLETE, message))
+        else:
+            entry_errors.extend(_find_errors_symbolic(source, destination, transform))
 
-            errors = _find_errors_symbolic(cur_state, next_state, transform)
-            result.append({
-                'pc': pc_cur,
-                'txl': _calc_transformation(cur_state, next_state),
-                'ref': transform,
-                'errors': errors,
-                'snap': cur_state,
-            })
+        try:
+            concrete_transform = _calc_transformation(source, destination)
+        except ValueError:
+            concrete_transform = None
+        entries.append(
+            {
+                "pc": source_pc,
+                "txl": concrete_transform,
+                "ref": transform,
+                "errors": entry_errors,
+                "snap": source,
+            }
+        )
 
-            # Step forward
-            cur_state = next_state
-            transform = next(transforms)
-        except StopIteration:
-            break
-
-    return result
+    return ValidationReport(entries, all_diagnostics)
