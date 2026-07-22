@@ -10,7 +10,7 @@ from focaccia.arch import supported_architectures
 logger = logging.getLogger('focaccia-lldb-target')
 debug = logger.debug
 info = logger.info
-warn = logger.warn
+warn = logger.warning
 
 class MemoryMap:
     """Description of a range of mapped memory.
@@ -29,14 +29,50 @@ class MemoryMap:
         return f'MemoryMap[0x{self.start_address:x}, 0x{self.end_address:x}]' \
                f': {self.name}'
 
-class ConcreteRegisterError(Exception):
+class ConcreteTargetError(RuntimeError):
+    """Base error for LLDB target operations."""
+
+
+class ConcreteRegisterError(ConcreteTargetError):
     pass
 
-class ConcreteMemoryError(Exception):
+
+class ConcreteMemoryError(ConcreteTargetError):
     pass
 
-class ConcreteSectionError(Exception):
+
+class ConcreteSectionError(ConcreteTargetError):
     pass
+
+
+class ConcreteExecutionError(ConcreteTargetError):
+    pass
+
+
+def _is_valid(value) -> bool:
+    checker = getattr(value, 'IsValid', None)
+    return value is not None and (bool(checker()) if checker is not None else True)
+
+
+def _error_succeeded(error) -> bool:
+    if error is None:
+        return True
+    if isinstance(error, bool):
+        return error
+    checker = getattr(error, 'Success', None)
+    if checker is not None:
+        return bool(checker())
+    success = getattr(error, 'success', None)
+    return bool(success) if success is not None else False
+
+
+def _error_message(error) -> str:
+    getter = getattr(error, 'GetCString', None)
+    if getter is not None:
+        message = getter()
+        if message:
+            return str(message)
+    return str(error)
 
 class LLDBConcreteTarget:
     from focaccia.arch import aarch64, x86
@@ -68,15 +104,29 @@ class LLDBConcreteTarget:
         :param target: LLDB SBTarget object representing an initialized target for the debugger.
         :param process: LLDB SBProcess object representing an initialized process (either local or remote).
         """
+        if not _is_valid(debugger):
+            raise ConcreteExecutionError('LLDB debugger is invalid.')
+        if not _is_valid(target):
+            raise ConcreteExecutionError('LLDB target is invalid.')
+        if not _is_valid(process):
+            raise ConcreteExecutionError('LLDB process is invalid.')
+
         self.debugger = debugger
         self.target = target
         self.process = process
 
         self.module = self.target.FindModule(self.target.GetExecutable())
+        if not _is_valid(self.module):
+            raise ConcreteExecutionError('LLDB target has no valid primary module.')
         self.interpreter = self.debugger.GetCommandInterpreter()
+        if not _is_valid(self.interpreter):
+            raise ConcreteExecutionError('LLDB command interpreter is invalid.')
 
         # Set up objects for process execution
         self.listener = self.debugger.GetListener()
+        self._check_process_state('initialize the target')
+        if self.is_exited():
+            raise ConcreteExecutionError('LLDB process exited before target initialization.')
 
         # Determine current arch
         self.archname = self.determine_arch()
@@ -85,11 +135,16 @@ class LLDBConcreteTarget:
         self.exec_time = 0
 
     def determine_arch(self):
-        archname = self.target.GetPlatform().GetTriple().split('-')[0]
+        platform = self.target.GetPlatform()
+        if not _is_valid(platform):
+            raise ConcreteExecutionError('LLDB target platform is invalid.')
+        triple = platform.GetTriple()
+        if not triple:
+            raise ConcreteExecutionError('LLDB target platform has no architecture triple.')
+        archname = triple.split('-')[0]
         if archname not in supported_architectures:
             err = f'LLDBConcreteTarget: Architecture {archname} is not' \
                   f' supported by Focaccia.'
-            print(f'[ERROR] {err}')
             raise NotImplementedError(err)
         return archname
 
@@ -101,41 +156,120 @@ class LLDBConcreteTarget:
         argc = self.target.GetLaunchInfo().GetNumArguments()
         return [launch_info.GetArgumentAtIndex(i) for i in range(argc)]
 
-    def is_exited(self):
-        """Signals whether the concrete process has exited.
-
-        :return: True if the process has exited. False otherwise.
-        """
+    def is_exited(self) -> bool:
+        """Return whether the concrete process has exited."""
         return self.process.GetState() == lldb.eStateExited
+
+    def _check_process_state(self, operation: str) -> None:
+        state = self.process.GetState()
+        allowed_states = {
+            getattr(lldb, name)
+            for name in ('eStateStopped', 'eStateExited')
+            if hasattr(lldb, name)
+        }
+        if state not in allowed_states:
+            raise ConcreteExecutionError(
+                f'LLDB process entered unexpected state {state!r} while '
+                f'attempting to {operation}.'
+            )
 
     def run(self):
         """Continue execution of the concrete process."""
         state = self.process.GetState()
         if state == lldb.eStateExited:
-            raise RuntimeError('Tried to resume process execution, but the'
-                               ' process has already exited.')
-        self.process.Continue()
+            raise ConcreteExecutionError(
+                'Tried to resume process execution, but the process has already exited.'
+            )
+        self._check_process_state('continue execution')
+        error = self.process.Continue()
+        if not _error_succeeded(error):
+            raise ConcreteExecutionError(
+                f'Unable to continue LLDB process: {_error_message(error)}.'
+            )
+        self._check_process_state('continue execution')
 
     def step(self):
         """Step forward by a single instruction."""
         start_time = time.time()
+        if self.is_exited():
+            raise ConcreteExecutionError('Cannot step an exited LLDB process.')
+        self._check_process_state('step one instruction')
         thread: lldb.SBThread = self.process.GetSelectedThread()
-        thread.StepInstruction(False)
-        self.exec_time += time.time() - start_time
+        if not _is_valid(thread):
+            raise ConcreteExecutionError('LLDB has no valid selected thread to step.')
+        try:
+            error = lldb.SBError()
+            thread.StepInstruction(False, error)
+            if not _error_succeeded(error):
+                raise ConcreteExecutionError(
+                    f'Unable to step LLDB process: {_error_message(error)}.'
+                )
+            self._check_process_state('step one instruction')
+        finally:
+            self.exec_time += time.time() - start_time
+
+    def _create_address_breakpoint(self, address: int):
+        breakpoint = self.target.BreakpointCreateByAddress(address)
+        if not _is_valid(breakpoint):
+            raise ConcreteExecutionError(
+                f'Unable to create LLDB breakpoint at {hex(address)}.'
+            )
+        locations = getattr(breakpoint, 'GetNumLocations', None)
+        if locations is not None and locations() == 0:
+            breakpoint_id = breakpoint.GetID()
+            cleanup_note = ''
+            if not self.target.BreakpointDelete(breakpoint_id):
+                cleanup_note = f' Breakpoint {breakpoint_id} also could not be deleted.'
+            raise ConcreteExecutionError(
+                f'LLDB breakpoint at {hex(address)} has no resolved location.'
+                f'{cleanup_note}'
+            )
+        return breakpoint
+
+    def _delete_breakpoint(self, breakpoint_id: int) -> None:
+        if not self.target.BreakpointDelete(breakpoint_id):
+            raise ConcreteExecutionError(
+                f'Unable to delete LLDB breakpoint {breakpoint_id}.'
+            )
 
     def run_until(self, address: int) -> None:
-        """Continue execution until the address is arrived, ignores other breakpoints"""
+        """Continue until ``address`` or process exit, always removing the breakpoint."""
         start_time = time.time()
-        bp = self.target.BreakpointCreateByAddress(address)
-        while True:
-            self.run()
-            if self.is_exited():
-                self.exec_time += time.time() - start_time
-                return
-            if self.read_pc() == address:
-                break
-        self.target.BreakpointDelete(bp.GetID())
-        self.exec_time += time.time() - start_time
+        if self.is_exited():
+            raise ConcreteExecutionError(
+                f'Cannot run an exited LLDB process to {hex(address)}.'
+            )
+        if self.read_pc() == address:
+            return
+        breakpoint = self._create_address_breakpoint(address)
+        breakpoint_id = breakpoint.GetID()
+        primary_error: BaseException | None = None
+        observed_stops: set[int] = set()
+        try:
+            while True:
+                self.run()
+                if self.is_exited():
+                    return
+                observed_pc = self.read_pc()
+                if observed_pc == address:
+                    return
+                if observed_pc in observed_stops:
+                    raise ConcreteExecutionError(
+                        f'LLDB repeatedly stopped at {hex(observed_pc)} while '
+                        f'waiting for {hex(address)}.'
+                    )
+                observed_stops.add(observed_pc)
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                self._delete_breakpoint(breakpoint_id)
+            except ConcreteExecutionError as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(str(cleanup_error))
+            self.exec_time += time.time() - start_time
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""
@@ -146,14 +280,15 @@ class LLDBConcreteTarget:
             try:
                 conc_val = self.read_register(regname)
                 state.write_register(regname, conc_val)
-            except KeyError:
-                pass
             except ConcreteRegisterError:
                 pass
 
         # Query and store memory state
         for mapping in self.get_mappings():
-            assert(mapping.end_address > mapping.start_address)
+            if mapping.end_address <= mapping.start_address:
+                raise ConcreteMemoryError(
+                    f'Invalid LLDB memory mapping {mapping}.'
+                )
             size = mapping.end_address - mapping.start_address
             try:
                 data = self.read_memory(mapping.start_address, size)
@@ -177,7 +312,12 @@ class LLDBConcreteTarget:
         """
         debug(f'Accessing register {regname}')
 
-        frame = self.process.GetSelectedThread().GetFrameAtIndex(0)
+        thread = self.process.GetSelectedThread()
+        if not _is_valid(thread):
+            raise ConcreteRegisterError('LLDB has no valid selected thread.')
+        frame = thread.GetFrameAtIndex(0)
+        if not _is_valid(frame):
+            raise ConcreteRegisterError('LLDB selected thread has no valid frame 0.')
 
         retry_list = self.register_retries[self.archname].get(regname, [])
         error_msg = f'[In LLDBConcreteTarget._get_register]: Register {regname} not found'
@@ -185,11 +325,48 @@ class LLDBConcreteTarget:
         reg = None
         for name in [regname, *retry_list]:
             reg = frame.FindRegister(name)
-            if reg.IsValid():
+            if _is_valid(reg):
                 break
-        if not reg.IsValid():
+        if not _is_valid(reg):
             raise ConcreteRegisterError(error_msg)
         return reg
+
+    def _validate_register_size(self, reg: lldb.SBValue, regname: str) -> None:
+        accessor = self.arch.get_reg_accessor(regname)
+        if accessor is None:
+            raise ConcreteRegisterError(f'No register accessor for {regname}.')
+        expected_size = (accessor.num_bits + 7) // 8
+        if reg.size != expected_size:
+            raise ConcreteRegisterError(
+                f'LLDB register {regname} has size {reg.size}, expected '
+                f'{expected_size} bytes.'
+            )
+
+    def _read_scalar_register_value(self, reg: lldb.SBValue, regname: str) -> int:
+        self._validate_register_size(reg, regname)
+        error = lldb.SBError()
+        value = reg.GetValueAsUnsigned(error, 0)
+        if not _error_succeeded(error):
+            raise ConcreteRegisterError(
+                f'Unable to read LLDB register {regname}: {_error_message(error)}.'
+            )
+        return value
+
+    def _read_wide_register_value(self, reg: lldb.SBValue, regname: str) -> int:
+        self._validate_register_size(reg, regname)
+        error = lldb.SBError()
+        raw_data = reg.data.ReadRawData(error, 0, reg.size)
+        if not _error_succeeded(error):
+            raise ConcreteRegisterError(
+                f'Unable to read LLDB register {regname}: {_error_message(error)}.'
+            )
+        raw = bytes(raw_data)
+        if len(raw) != reg.size:
+            raise ConcreteRegisterError(
+                f'Short LLDB register read for {regname}: expected {reg.size} bytes, '
+                f'received {len(raw)}.'
+            )
+        return int.from_bytes(raw, byteorder=self.arch.endianness)
 
     def read_flags(self) -> dict[str, int | bool]:
         """Read the current state flags.
@@ -211,7 +388,9 @@ class LLDBConcreteTarget:
             return {}
 
         flags_reg = self.flag_register_names[self.archname]
-        flags_val = self._get_register(flags_reg).GetValueAsUnsigned()
+        canonical = self._canonical_register_name(flags_reg)
+        reg = self._get_register(flags_reg)
+        flags_val = self._read_scalar_register_value(reg, canonical)
         return self.flag_register_decompose[self.archname](flags_val)
 
     def read_pc(self) -> int:
@@ -231,27 +410,36 @@ class LLDBConcreteTarget:
         if self.arch.is_constant_register(canonical):
             value = self.arch.get_constant_register_value(canonical)
             if value is None:
-                raise RuntimeError(f'Missing value for constant register {canonical}.')
+                raise ConcreteRegisterError(
+                    f'Missing value for constant register {canonical}.'
+                )
             return value
 
         try:
             reg = self._get_register(canonical.lower())
-            assert(reg.IsValid())
-            if reg.size > 8:  # reg is a vector register
-                reg.data.byte_order = lldb.eByteOrderLittle
-                val = 0
-                for ui64 in reversed(reg.data.uint64s):
-                    val <<= 64
-                    val |= ui64
-                return val
-            return reg.GetValueAsUnsigned()
+            if not _is_valid(reg):
+                raise ConcreteRegisterError(f'LLDB register {canonical} is invalid.')
+            if reg.size > 8:
+                return self._read_wide_register_value(reg, canonical)
+            return self._read_scalar_register_value(reg, canonical)
         except ConcreteRegisterError as err:
-            flags = self.read_flags()
-            if canonical in flags:
-                return flags[canonical]
-            reader = self.arch.get_reg_reader(canonical)
-            if reader:
-                return reader()
+            flags_reg = self.arch.to_regname(
+                self.flag_register_names.get(self.archname, '')
+            )
+            accessor = self.arch.get_reg_accessor(canonical)
+            flags_accessor = (
+                self.arch.get_reg_accessor(flags_reg)
+                if flags_reg is not None
+                else None
+            )
+            if (
+                accessor is not None
+                and flags_accessor is not None
+                and accessor.base_reg == flags_accessor.base_reg
+            ):
+                flags = self.read_flags()
+                if canonical in flags:
+                    return flags[canonical]
             raise ConcreteRegisterError(
                 f'[In LLDBConcreteTarget.read_register]: Unable to read'
                 f' register {regname}: {err}')
@@ -268,8 +456,8 @@ class LLDBConcreteTarget:
             return
         reg = self._get_register(canonical.lower())
         error = lldb.SBError()
-        reg.SetValueFromCString(hex(value), error)
-        if not error.success:
+        written = reg.SetValueFromCString(hex(value), error)
+        if not written or not _error_succeeded(error):
             raise ConcreteRegisterError(
                 f'[In LLDBConcreteTarget.write_register]: Unable to set'
                 f' {regname} to value {hex(value)}!')
@@ -280,11 +468,21 @@ class LLDBConcreteTarget:
         :raise ConcreteMemoryError: If unable to read `size` bytes from `addr`.
         """
         err = lldb.SBError()
+        if size < 0:
+            raise ValueError('A memory read size cannot be negative.')
         content = self.process.ReadMemory(addr, size, err)
-        if not err.success:
-            raise ConcreteMemoryError(f'Error when reading {size} bytes at'
-                                      f' address {hex(addr)}: {err}')
-        return content
+        if not _error_succeeded(err):
+            raise ConcreteMemoryError(
+                f'Error when reading {size} bytes at address {hex(addr)}: '
+                f'{_error_message(err)}'
+            )
+        data = bytes(content)
+        if len(data) != size:
+            raise ConcreteMemoryError(
+                f'Short LLDB memory read at {hex(addr)}: expected {size} bytes, '
+                f'received {len(data)}.'
+            )
+        return data
 
     def write_memory(self, addr: int, value: bytes):
         """Write bytes to memory.
@@ -293,9 +491,11 @@ class LLDBConcreteTarget:
         """
         err = lldb.SBError()
         res = self.process.WriteMemory(addr, value, err)
-        if not err.success or res != len(value):
-            raise ConcreteMemoryError(f'Error when writing to address'
-                                      f' {hex(addr)}: {err}')
+        if not _error_succeeded(err) or res != len(value):
+            raise ConcreteMemoryError(
+                f'Error when writing {len(value)} bytes to address {hex(addr)}: '
+                f'{_error_message(err)}; wrote {res} bytes.'
+            )
 
     def get_mappings(self) -> list[MemoryMap]:
         mmap = []
@@ -303,7 +503,10 @@ class LLDBConcreteTarget:
         region_list = self.process.GetMemoryRegions()
         for i in range(region_list.GetSize()):
             region = lldb.SBMemoryRegionInfo()
-            region_list.GetMemoryRegionAtIndex(i, region)
+            if not region_list.GetMemoryRegionAtIndex(i, region):
+                raise ConcreteMemoryError(
+                    f'LLDB could not read memory-region metadata at index {i}.'
+                )
 
             perms = f'{"r" if region.IsReadable() else "-"}' \
                     f'{"w" if region.IsWritable() else "-"}' \
@@ -316,28 +519,42 @@ class LLDBConcreteTarget:
                                   perms))
         return mmap
 
-    def set_breakpoint(self, addr):
-        command = f'b -a {addr} -s {self.module.GetFileSpec().GetFilename()}'
-        result = lldb.SBCommandReturnObject()
-        self.interpreter.HandleCommand(command, result)
+    def set_breakpoint(self, addr: int) -> int:
+        """Create an address breakpoint and return its LLDB identifier."""
+        return self._create_address_breakpoint(addr).GetID()
 
-    def remove_breakpoint(self, addr):
-        command = f'breakpoint delete {addr}'
-        result = lldb.SBCommandReturnObject()
-        self.interpreter.HandleCommand(command, result)
+    def remove_breakpoint(self, breakpoint_id: int) -> None:
+        """Delete a breakpoint by identifier, not by address."""
+        self._delete_breakpoint(breakpoint_id)
+
+    def _read_instruction(
+        self,
+        addr: int,
+        flavor: str | None = None,
+    ) -> lldb.SBInstruction:
+        address = lldb.SBAddress(addr, self.target)
+        if not _is_valid(address):
+            raise ConcreteExecutionError(f'Invalid LLDB address {hex(addr)}.')
+        instructions = (
+            self.target.ReadInstructions(address, 1, flavor)
+            if flavor is not None
+            else self.target.ReadInstructions(address, 1)
+        )
+        if len(instructions) != 1 or not _is_valid(instructions[0]):
+            raise ConcreteExecutionError(
+                f'LLDB returned no instruction at {hex(addr)}.'
+            )
+        return instructions[0]
 
     def get_basic_block(self, addr: int) -> list[lldb.SBInstruction]:
-        """Returns a basic block pointed by addr
-        a code section is considered a basic block only if
-        the last instruction is a brach, e.g. JUMP, CALL, RET
-        """
+        """Return the basic block starting at ``addr``."""
         block = []
-        while not self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0].is_branch:
-            block.append(self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0])
-            addr += self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0].size
-        block.append(self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1)[0])
-
-        return block
+        while True:
+            instruction = self._read_instruction(addr)
+            block.append(instruction)
+            if instruction.is_branch:
+                return block
+            addr += instruction.size
 
     def get_basic_block_inst(self, addr: int) -> list[str]:
         inst = []
@@ -366,11 +583,15 @@ class LLDBConcreteTarget:
         return addr
 
     def get_disassembly(self, addr: int) -> str:
-        inst: lldb.SBInstruction = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1, 'intel')[0]
-        mnemonic: str = inst.GetMnemonic(self.target).upper()
-        operands: str = inst.GetOperands(self.target).upper()
-        operands = operands.replace("0X", "0x")
-        return f'{mnemonic} {operands}'
+        flavor = 'intel' if self.archname == self.x86.archname else None
+        inst: lldb.SBInstruction = self._read_instruction(addr, flavor)
+        mnemonic = inst.GetMnemonic(self.target)
+        operands = inst.GetOperands(self.target)
+        if mnemonic is None or operands is None:
+            raise ConcreteExecutionError(
+                f'LLDB returned incomplete disassembly at {hex(addr)}.'
+            )
+        return f'{mnemonic.upper()} {operands.upper().replace("0X", "0x")}'
 
     def get_disassembly_bytes(self, addr: int):
         error = lldb.SBError()
@@ -379,11 +600,18 @@ class LLDBConcreteTarget:
         return inst.GetData(self.target).ReadRawData(error, 0, inst.GetByteSize())
 
     def get_instruction_size(self, addr: int) -> int:
-        inst = self.target.ReadInstructions(lldb.SBAddress(addr, self.target), 1, 'intel')[0]
-        return inst.GetByteSize()
+        inst = self._read_instruction(addr)
+        size = inst.GetByteSize()
+        if size <= 0:
+            raise ConcreteExecutionError(
+                f'LLDB returned an invalid instruction size at {hex(addr)}.'
+            )
+        return size
 
     def get_current_tid(self) -> int:
         thread: lldb.SBThread = self.process.GetSelectedThread()
+        if not _is_valid(thread):
+            raise ConcreteExecutionError('LLDB has no valid selected thread.')
         return thread.GetThreadID()
 
 class LLDBLocalTarget(LLDBConcreteTarget):
@@ -406,9 +634,13 @@ class LLDBLocalTarget(LLDBConcreteTarget):
             envp = [f'{k}={v}' for k, v in os.environ.items()]
 
         debugger = lldb.SBDebugger.Create()
+        if not _is_valid(debugger):
+            raise ConcreteExecutionError('Unable to create an LLDB debugger.')
         debugger.SetAsync(False)
         target = debugger.CreateTargetWithFileAndArch(executable, lldb.LLDB_ARCH_DEFAULT)
-        
+        if not _is_valid(target):
+            raise ConcreteExecutionError(f'Unable to create LLDB target for {executable}.')
+
         # Set up objects for process execution
         error = lldb.SBError()
         process = target.Launch(debugger.GetListener(),
@@ -418,8 +650,10 @@ class LLDBLocalTarget(LLDBConcreteTarget):
                                 0,
                                 True, error)
 
-        if not target.process.IsValid():
-            raise RuntimeError(f'Failed to launch LLDB target: {error.GetCString()}')
+        if not _error_succeeded(error) or not _is_valid(process):
+            raise ConcreteExecutionError(
+                f'Failed to launch LLDB target: {_error_message(error)}.'
+            )
 
         super().__init__(debugger, target, process)
 
@@ -431,17 +665,25 @@ class LLDBRemoteTarget(LLDBConcreteTarget):
         :raises RuntimeError: If failing to attach to a remote debug session.
         """
         debugger = lldb.SBDebugger.Create()
+        if not _is_valid(debugger):
+            raise ConcreteExecutionError('Unable to create an LLDB debugger.')
         debugger.SetAsync(False)
         target = debugger.CreateTarget(executable)
-        
+        if not _is_valid(target):
+            raise ConcreteExecutionError(
+                f'Unable to create LLDB target for remote endpoint {remote}.'
+            )
+
         # Set up objects for process execution
         error = lldb.SBError()
         process = target.ConnectRemote(debugger.GetListener(),
                                        f'connect://{remote}',
                                        None,
                                        error)
-        if not target.process.IsValid():
-            raise RuntimeError(f'Failed to connect via LLDB to remote target: {error.GetCString()}')
-        
+        if not _error_succeeded(error) or not _is_valid(process):
+            raise ConcreteExecutionError(
+                f'Failed to connect via LLDB to remote target: {_error_message(error)}.'
+            )
+
         super().__init__(debugger, target, process)
 

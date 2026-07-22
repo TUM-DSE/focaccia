@@ -441,6 +441,100 @@
       ];
     };
 
+    fix028CrossValidateOptionCheck = mkStaticUnitCheck {
+      name = "fix-028-cross-validate-option";
+      ruffTargets = [
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "capture_options"
+      ];
+    };
+
+    fix030NativeEventMatchingCheck = mkStaticUnitCheck {
+      name = "fix-030-native-event-matching";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "event_matching"
+      ];
+    };
+
+    fix031SpeculativeSynchronizationCheck = mkStaticUnitCheck {
+      name = "fix-031-speculative-synchronization";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "speculation or branch_mismatch or predicted_exit or unknown_destination or memory_write or register_write"
+      ];
+    };
+
+    nativeTargetErrorHandlingCheck = mkStaticUnitCheck {
+      name = "native-target-error-handling";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "lldb_target or run_until or breakpoint or lldb_scalar or lldb_memory_reads"
+      ];
+    };
+
+    nativeGapErrorBoundariesCheck = mkStaticUnitCheck {
+      name = "native-gap-error-boundaries";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "force_mode_records or symbolic_execution_not_implemented or disassembly_fallback_does_not_hide"
+      ];
+    };
+
+    nativeVectorRegisterByteOrderCheck = mkStaticUnitCheck {
+      name = "native-vector-register-byte-order";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "vector_reads or 80_bit_register"
+      ];
+    };
+
+    nativeScriptedTracingCheck = mkStaticUnitCheck {
+      name = "native-scripted-tracing";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_native_api.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "tests/test_native_tracing.py"
+      ];
+    };
+
     architectureIdentityCheck = mkStaticUnitCheck {
       name = "architecture-identity";
       ruffTargets = [
@@ -1014,6 +1108,13 @@
       disassembly-fallback = disassemblyFallbackCheck;
       remote-target-selection = remoteTargetSelectionCheck;
       oracle-program-routing = oracleProgramRoutingCheck;
+      fix-028-cross-validate-option = fix028CrossValidateOptionCheck;
+      fix-030-native-event-matching = fix030NativeEventMatchingCheck;
+      fix-031-speculative-synchronization = fix031SpeculativeSynchronizationCheck;
+      native-target-error-handling = nativeTargetErrorHandlingCheck;
+      native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
+      native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
+      native-scripted-tracing = nativeScriptedTracingCheck;
       architecture-identity = architectureIdentityCheck;
       sparse-memory-validity = sparseMemoryValidityCheck;
       register-validity = registerValidityCheck;

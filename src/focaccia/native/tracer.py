@@ -5,25 +5,43 @@ from __future__ import annotations
 import time
 import logging
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+from miasm.core.utils import Disasm_Exception
 
 from focaccia.arch import Arch
 from focaccia.utils import timebound, TimeoutError
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
-from focaccia.snapshot import ReadableProgramState, RegisterAccessError
+from focaccia.snapshot import (
+    MemoryAccessError,
+    ReadableProgramState,
+    RegisterAccessError,
+)
 from focaccia.symbolic import (
     DisassemblyContext,
     GapReason,
     Instruction,
+    SymbolEvaluationError,
+    SymbolicCompositionError,
     SymbolicTraceItem,
     SymbolicTransform,
     TraceGap,
+    UnsupportedInstructionError,
     run_instruction,
 )
 from focaccia.deterministic import Event, EventMatcher
 
-from .lldb_target import LLDBConcreteTarget, LLDBLocalTarget, LLDBRemoteTarget
+from .lldb_target import (
+    ConcreteExecutionError,
+    ConcreteMemoryError,
+    ConcreteRegisterError,
+    LLDBConcreteTarget,
+    LLDBLocalTarget,
+    LLDBRemoteTarget,
+)
 
 logger = logging.getLogger('focaccia-symbolic')
 debug = logger.debug
@@ -52,7 +70,13 @@ def _disassemble_instruction(ctx: DisassemblyContext,
                              pc: int) -> Instruction:
     try:
         return ctx.disassemble(pc)
-    except Exception as primary_error:
+    except (
+        Disasm_Exception,
+        ConcreteMemoryError,
+        MemoryAccessError,
+        ValueError,
+        NotImplementedError,
+    ) as primary_error:
         try:
             disassembly = target.get_disassembly(pc)
             return Instruction.from_string(
@@ -61,7 +85,13 @@ def _disassemble_instruction(ctx: DisassemblyContext,
                 pc,
                 target.get_instruction_size(pc),
             )
-        except Exception as fallback_error:
+        except (
+            Disasm_Exception,
+            ConcreteExecutionError,
+            ConcreteMemoryError,
+            ValueError,
+            NotImplementedError,
+        ) as fallback_error:
             raise DisassemblyError(pc, primary_error, fallback_error) from fallback_error
 
 def _events_for_environment(env: TraceEnvironment) -> list[Event]:
@@ -69,120 +99,280 @@ def _events_for_environment(env: TraceEnvironment) -> list[Event]:
         return []
     return env.detlog.events()
 
+_EVENT_SYNC_BASE_REGISTERS = {
+    'x86_64': frozenset(
+        {
+            'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+            'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
+        }
+    ),
+    'aarch64': frozenset({*(f'X{index}' for index in range(31)), 'SP'}),
+}
+
+
 def match_event(event: Event, target: ReadableProgramState) -> bool:
-    # TODO: match the rest of the state to be sure
-    if event.pc == target.read_pc():
-        for reg, value in event.registers.items():
-            if value == event.pc:
-                continue
-            try:
-                if target.read_register(reg) != value:
-                    print(f'Failed match for {reg}: {hex(value)} != {hex(target.read_register(reg))}')
-                    return False
-            except Exception as e:
-                warn(f'Unable to read register: {e}')
-        return True
-    return False
+    """Match one deterministic event using a named, architecture-specific subset."""
+    # The legacy RR reader still supplies its schema enum here; Step 11 will
+    # normalize that parser boundary. Enforce full identity for typed events.
+    if isinstance(event.arch, Arch) and event.arch != target.arch:
+        return False
+    arch = target.arch
+    try:
+        if event.pc != target.read_pc():
+            return False
+    except (RegisterAccessError, ConcreteRegisterError):
+        return False
+
+    pc_name = arch.to_regname('PC')
+    pc_accessor = arch.get_reg_accessor(pc_name) if pc_name is not None else None
+    if pc_accessor is None:
+        return False
+    synchronized_bases = _EVENT_SYNC_BASE_REGISTERS.get(arch.archname, frozenset())
+
+    for name, expected in event.registers.items():
+        canonical = arch.to_regname(name)
+        if canonical is None:
+            continue
+        accessor = arch.get_reg_accessor(canonical)
+        if accessor is None or accessor.base_reg == pc_accessor.base_reg:
+            continue
+        if accessor.base_reg not in synchronized_bases:
+            continue
+        try:
+            actual = target.read_register(canonical)
+        except (RegisterAccessError, ConcreteRegisterError):
+            return False
+        if actual != expected:
+            return False
+    return True
+
+
+class NativeTarget(Protocol):
+    arch: Arch
+
+    def read_pc(self) -> int: ...
+    def read_register(self, regname: str) -> int: ...
+    def read_flags(self) -> dict[str, int | bool]: ...
+    def read_memory(self, addr: int, size: int) -> bytes: ...
+    def write_register(self, regname: str, value: int) -> None: ...
+    def write_memory(self, addr: int, value: bytes) -> None: ...
+    def step(self) -> None: ...
+    def run_until(self, address: int) -> None: ...
+    def is_exited(self) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCacheKey:
+    address: int
+    size: int
+
+    @property
+    def end(self) -> int:
+        return self.address + self.size
+
+    def overlaps(self, address: int, size: int) -> bool:
+        return self.address < address + size and address < self.end
+
+
+class SpeculativeDivergenceError(RuntimeError):
+    """Raised when concrete execution does not reach the predicted PC."""
+
+    def __init__(self, expected: int, actual: int | None, predictions: tuple[int, ...]):
+        self.expected = expected
+        self.actual = actual
+        self.predictions = predictions
+        expected_text = 'process exit' if expected == 0 else hex(expected)
+        actual_text = 'process exit' if actual is None else hex(actual)
+        super().__init__(
+            f'Speculative execution expected {expected_text}, observed {actual_text}; '
+            f'predicted path: {[hex(pc) for pc in predictions]}.'
+        )
+
 
 class SpeculativeTracer(ReadableProgramState):
-    def __init__(self, target: LLDBConcreteTarget):
+    def __init__(self, target: NativeTarget):
         super().__init__(target.arch)
         self.target = target
         self.pc = target.read_pc()
-        self.speculative_pc: int | None = None
-        self.speculative_count: int = 0
-        
-        self.read_cache = {}
+        self._predicted_pcs: list[int] = []
+        self._register_cache: dict[str, int] = {}
+        self._memory_cache: dict[MemoryCacheKey, bytes] = {}
+        self._flags_cache: dict[str, int | bool] | None = None
 
-    def speculate(self, new_pc):
-        self.read_cache.clear()
+    @property
+    def speculative_pc(self) -> int | None:
+        return self._predicted_pcs[-1] if self._predicted_pcs else None
+
+    @property
+    def speculative_count(self) -> int:
+        return len(self._predicted_pcs)
+
+    def _clear_cache(self) -> None:
+        self._register_cache.clear()
+        self._memory_cache.clear()
+        self._flags_cache = None
+
+    def _clear_predictions(self) -> None:
+        self._predicted_pcs.clear()
+
+    def _verify_observed_pc(
+        self,
+        expected: int,
+        predictions: tuple[int, ...],
+    ) -> int | None:
+        if self.target.is_exited():
+            self.pc = 0
+            if expected == 0:
+                return None
+            raise SpeculativeDivergenceError(expected, None, predictions)
+
+        actual = self.target.read_pc()
+        self.pc = actual
+        if expected == 0 or actual != expected:
+            raise SpeculativeDivergenceError(expected, actual, predictions)
+        return actual
+
+    def speculate(self, new_pc: int | None) -> None:
+        self._clear_cache()
         if new_pc is None:
             self.progress_execution()
+            if self.target.is_exited():
+                return
             self.target.step()
             self.pc = 0 if self.target.is_exited() else self.target.read_pc()
-            self.speculative_pc = None
-            self.speculative_count = 0
             return
 
-        new_pc = int(new_pc)
-        self.speculative_pc = new_pc
-        self.speculative_count += 1
+        destination = int(new_pc)
+        if destination < 0:
+            raise ValueError('A speculative destination cannot be negative.')
+        self._predicted_pcs.append(destination)
 
-    def progress_execution(self) -> None:
-        if self.speculative_pc is not None and self.speculative_count != 0:
-            debug(f'Updating PC to {hex(self.speculative_pc)}')
-            if self.speculative_count == 1:
+    def progress_execution(self) -> int | None:
+        if not self._predicted_pcs:
+            return None if self.target.is_exited() else self.pc
+
+        predictions = tuple(self._predicted_pcs)
+        expected = predictions[-1]
+        debug(
+            f'Materializing {len(predictions)} speculative transitions at '
+            f'{"exit" if expected == 0 else hex(expected)}'
+        )
+        try:
+            if expected == 0:
+                if len(predictions) > 1:
+                    preterminal = predictions[-2]
+                    self.target.run_until(preterminal)
+                    self._verify_observed_pc(preterminal, predictions[:-1])
+                if self.target.is_exited():
+                    raise SpeculativeDivergenceError(expected, None, predictions)
+                self.target.step()
+            elif len(predictions) == 1:
                 self.target.step()
             else:
-                self.target.run_until(self.speculative_pc)
+                self.target.run_until(expected)
+            return self._verify_observed_pc(expected, predictions)
+        finally:
+            self._clear_predictions()
+            self._clear_cache()
 
-            self.pc = self.speculative_pc
-            self.speculative_pc = None
-            self.speculative_count = 0
+    def is_exited(self) -> bool:
+        if self.speculative_pc == 0:
+            self.progress_execution()
+        return self.target.is_exited()
 
-            self.read_cache.clear()
+    def run_until(self, addr: int) -> None:
+        self.progress_execution()
+        if self.target.is_exited():
+            raise RuntimeError(f'Cannot run an exited target to {hex(addr)}.')
+        if self.pc == addr:
+            return
+        try:
+            self.target.run_until(addr)
+            self._verify_observed_pc(addr, (addr,))
+        finally:
+            self._clear_cache()
 
-    def run_until(self, addr: int):
-        if self.speculative_pc:
-            raise Exception('Attempting manual execution with speculative execution enabled')
-        self.target.run_until(addr)
-        self.pc = addr
-
-    def step(self):
+    def step(self) -> None:
         self.progress_execution()
         if self.target.is_exited():
             return
-        self.target.step()
-        self.pc = 0 if self.target.is_exited() else self.target.read_pc()
-
-    def _cache(self, name: str, value):
-        self.read_cache[name] = value
-        return value
+        try:
+            self.target.step()
+            self.pc = 0 if self.target.is_exited() else self.target.read_pc()
+        finally:
+            self._clear_cache()
 
     def read_pc(self) -> int:
-        if self.speculative_pc is not None:
-            return self.speculative_pc
-        return self.pc
+        return self.speculative_pc if self.speculative_pc is not None else self.pc
 
     def read_flags(self) -> dict[str, int | bool]:
-        if 'flags' in self.read_cache:
-            return self.read_cache['flags']
         self.progress_execution()
-        return self._cache('flags', self.target.read_flags())
+        if self._flags_cache is None:
+            self._flags_cache = self.target.read_flags()
+        return self._flags_cache.copy()
 
     def read_register(self, reg: str) -> int:
-        regname = self.arch.to_regname(reg)
-        if regname is None:
+        canonical = self.arch.to_regname(reg)
+        if canonical is None:
             raise RegisterAccessError(reg, f'Not a register name: {reg}')
-
-        if reg in self.read_cache:
-            return self.read_cache[reg]
-
         self.progress_execution()
-        return self._cache(reg, self.target.read_register(regname))
+        if canonical not in self._register_cache:
+            self._register_cache[canonical] = self.target.read_register(canonical)
+        return self._register_cache[canonical]
 
-    def write_register(self, regname: str, value: int):
+    def _invalidate_register(self, regname: str) -> None:
+        written = self.arch.get_reg_accessor(regname)
+        if written is None:
+            raise RegisterAccessError(regname, f'Not a register name: {regname}')
+        zero_extends = self.arch.register_write_zero_extends(regname)
+        for cached_name in tuple(self._register_cache):
+            cached = self.arch.get_reg_accessor(cached_name)
+            if cached is None or cached.base_reg != written.base_reg:
+                continue
+            if zero_extends or cached.mask & written.mask:
+                del self._register_cache[cached_name]
+        if self._flags_cache is not None:
+            for flag_name in self._flags_cache:
+                flag = self.arch.get_reg_accessor(flag_name)
+                if flag is not None and flag.base_reg == written.base_reg:
+                    self._flags_cache = None
+                    break
+
+    def write_register(self, regname: str, value: int) -> None:
+        canonical = self.arch.to_regname(regname)
+        if canonical is None:
+            raise RegisterAccessError(regname, f'Not a register name: {regname}')
         self.progress_execution()
-        self.read_cache.pop(regname, None)
-        self.target.write_register(regname, value)
+        self._invalidate_register(canonical)
+        self.target.write_register(canonical, value)
+        written = self.arch.get_reg_accessor(canonical)
+        pc_name = self.arch.to_regname('PC')
+        pc = self.arch.get_reg_accessor(pc_name) if pc_name is not None else None
+        if written is not None and pc is not None and written.base_reg == pc.base_reg:
+            self.pc = self.target.read_pc()
 
     def read_instructions(self, addr: int, size: int) -> bytes:
         return self.target.read_memory(addr, size)
 
     def read_memory(self, addr: int, size: int) -> bytes:
+        if size < 0:
+            raise ValueError('A memory read size cannot be negative.')
         self.progress_execution()
-        cache_name = f'{addr}_{size}' 
-        if cache_name in self.read_cache:
-            return self.read_cache[cache_name]
-        return self._cache(cache_name, self.target.read_memory(addr, size))
+        key = MemoryCacheKey(addr, size)
+        if key not in self._memory_cache:
+            self._memory_cache[key] = self.target.read_memory(addr, size)
+        return self._memory_cache[key]
 
-    def write_memory(self, addr: int, value: bytes):
+    def write_memory(self, addr: int, value: bytes) -> None:
         self.progress_execution()
-        self.read_cache.pop(addr, None)
+        for key in tuple(self._memory_cache):
+            if key.overlaps(addr, len(value)):
+                del self._memory_cache[key]
         self.target.write_memory(addr, value)
 
     def __getattr__(self, name: str):
         return getattr(self.target, name)
+
 
 class SymbolicTracer:
     """A symbolic tracer that uses `LLDBConcreteTarget` with Miasm to simultaneously execute a
@@ -368,7 +558,9 @@ class SymbolicTracer:
                     ctx.lifter,
                 )
                 if new_pc is None:
-                    raise RuntimeError('Symbolic execution produced no destination PC.')
+                    raise SymbolEvaluationError(
+                        'Symbolic execution produced no destination PC.'
+                    )
             except TimeoutError as error:
                 if not self.force:
                     raise
@@ -379,7 +571,15 @@ class SymbolicTracer:
                 symbolic_error = error
                 gap_reason = 'symbolic-timeout'
                 new_pc, modified = None, {}
-            except Exception as error:
+            except (
+                UnsupportedInstructionError,
+                SymbolEvaluationError,
+                RegisterAccessError,
+                MemoryAccessError,
+                ConcreteRegisterError,
+                ConcreteMemoryError,
+                ValueError,
+            ) as error:
                 if not self.force:
                     raise
                 warn(
@@ -404,7 +604,10 @@ class SymbolicTracer:
                     instruction=instruction,
                 )
             elif self.cross_validate:
-                assert new_pc is not None
+                if new_pc is None:
+                    raise SymbolEvaluationError(
+                        'Cross-validation requires a destination PC.'
+                    )
                 # Verify generated equations against the concrete target before
                 # retaining them. A forced failure is an explicit gap.
                 destination = int(new_pc)
@@ -421,7 +624,7 @@ class SymbolicTracer:
                         pc,
                         destination,
                     )
-                except Exception as error:
+                except (SymbolicCompositionError, ValueError) as error:
                     if not self.force:
                         raise
                     cross_validation_error = error
@@ -437,7 +640,14 @@ class SymbolicTracer:
                                 instruction,
                                 candidate,
                             )
-                        except Exception as error:
+                        except (
+                            SymbolEvaluationError,
+                            RegisterAccessError,
+                            MemoryAccessError,
+                            ConcreteRegisterError,
+                            ConcreteMemoryError,
+                            ValueError,
+                        ) as error:
                             if not self.force:
                                 raise
                             cross_validation_error = error
@@ -449,7 +659,13 @@ class SymbolicTracer:
                 if candidate is not None and cross_validation_error is None:
                     try:
                         self.validate(instruction, candidate, pred_regs, pred_mems)
-                    except Exception as error:
+                    except (
+                        ValidationError,
+                        ConcreteRegisterError,
+                        ConcreteMemoryError,
+                        RegisterAccessError,
+                        MemoryAccessError,
+                    ) as error:
                         if not self.force:
                             raise
                         cross_validation_error = error
@@ -473,7 +689,10 @@ class SymbolicTracer:
                         instruction=instruction,
                     )
             else:
-                assert new_pc is not None
+                if new_pc is None:
+                    raise SymbolEvaluationError(
+                        'A symbolic transform requires a destination PC.'
+                    )
                 predicted_destination = int(new_pc)
                 symbolic_start = time.time()
                 try:
@@ -485,7 +704,7 @@ class SymbolicTracer:
                         pc,
                         predicted_destination,
                     )
-                except Exception as error:
+                except (SymbolicCompositionError, ValueError) as error:
                     if not self.force:
                         raise
                     warn(
@@ -531,9 +750,9 @@ class SymbolicTracer:
 
                 debug(f'Completed handling event: {post_event}')
 
-        print(f'Execution time: {self.target.target.exec_time}')
-        print(f'Symbolic time: {symbolic_time}')
-        print(f'Validation time: {self.validation_time}')
+        info(f'Execution time: {self.target.target.exec_time}')
+        info(f'Symbolic time: {symbolic_time}')
+        info(f'Validation time: {self.validation_time}')
         trace_env = self.env.with_architecture(arch.key)
         return MaterializedTrace(strace, trace_env, [transform.addr for transform in strace])
 

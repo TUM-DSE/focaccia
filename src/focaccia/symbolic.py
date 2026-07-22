@@ -36,6 +36,10 @@ class SymbolicCompositionError(ValueError):
     """Raised when symbolic transforms cannot be composed soundly."""
 
 
+class UnsupportedInstructionError(NotImplementedError):
+    """Raised when Miasm cannot lift an instruction."""
+
+
 def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     """Evaluate a symbol based on a concrete reference state.
 
@@ -930,7 +934,10 @@ def run_instruction(instr: miasm_instr,
             elif new_pc.is_cond():
                 # Explore conditional paths manually by constructing
                 # conditional states based on the possible outcomes.
-                assert(isinstance(new_pc, ExprCond))
+                if not isinstance(new_pc, ExprCond):
+                    raise SymbolEvaluationError(
+                        f'Conditional program counter has invalid type {type(new_pc)!r}.'
+                    )
                 cond = new_pc.cond
                 pc_iftrue, pc_iffalse = new_pc.src1, new_pc.src2
 
@@ -948,20 +955,28 @@ def run_instruction(instr: miasm_instr,
                 new_pc = eval_expr(new_pc, conc_state)
                 seen_locs.clear()
 
-        assert(isinstance(new_pc, ExprInt))
+        if not isinstance(new_pc, ExprInt):
+            raise SymbolEvaluationError(
+                f'Program counter remains unresolved as {new_pc!r}.'
+            )
         return new_pc, modified
 
-    # Lift instruction to IR
+    # Lift and execute the instruction through one typed unsupported boundary.
     ircfg = lifter.new_ircfg()
     try:
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
-        assert(isinstance(loc, Expr) or isinstance(loc, LocKey))
+        if not isinstance(loc, (Expr, LocKey)):
+            raise UnsupportedInstructionError(
+                f'Lifter returned an invalid location for {instr}: {loc!r}.'
+            )
+        new_pc, modified = execute_location(loc)
+    except UnsupportedInstructionError:
+        raise
     except NotImplementedError as err:
-        raise Exception(f'Unable to lift instruction {instr}: {err}')
+        raise UnsupportedInstructionError(
+            f'Unable to execute instruction {instr}: {err}'
+        ) from err
 
-    # Execute instruction symbolically
-    new_pc, modified = execute_location(loc)
     modified[lifter.pc] = new_pc  # Add PC update to state
-
     return new_pc, modified
 

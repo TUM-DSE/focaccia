@@ -2,6 +2,8 @@
 
 import argparse
 import logging
+from collections.abc import Callable
+from typing import TypeVar, overload
 
 from focaccia import parser, utils
 from focaccia.trace import TraceEnvironment
@@ -56,6 +58,39 @@ def make_argparser() -> argparse.ArgumentParser:
                       help='Symbolic trace output format')
     return prog
 
+TracerT = TypeVar('TracerT')
+
+
+@overload
+def create_symbolic_tracer(args, env: TraceEnvironment) -> SymbolicTracer: ...
+
+
+@overload
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., TracerT],
+) -> TracerT: ...
+
+
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., object] = SymbolicTracer,
+) -> object:
+    """Create a tracer from CLI options.
+
+    ``--debug`` controls logging only; semantic cross-validation is enabled
+    exclusively by ``--cross-validate``.
+    """
+    return tracer_factory(
+        env,
+        remote=args.remote,
+        cross_validate=args.cross_validate,
+        force=args.force,
+    )
+
+
 def main():
     args = make_argparser().parse_args()
 
@@ -80,8 +115,7 @@ def main():
                            nondeterminism_log=detlog,
                            start_address=args.start_address,
                            stop_address=args.stop_address)
-    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.debug,
-                            force=args.force)
+    tracer = create_symbolic_tracer(args, env)
 
     trace = tracer.trace(time_limit=args.insn_time_limit)
 

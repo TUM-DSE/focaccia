@@ -1,14 +1,21 @@
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from miasm.core.locationdb import LocationDB
 from miasm.expression.expression import ExprId, ExprInt
 
+from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import DisassemblyError, SpeculativeTracer, SymbolicTracer
-from focaccia.symbolic import DisassemblyContext, Instruction, TraceGap
+from focaccia.symbolic import (
+    DisassemblyContext,
+    Instruction,
+    TraceGap,
+    UnsupportedInstructionError,
+    run_instruction,
+)
 from focaccia.tools.capture_transforms import make_argparser
 from focaccia.trace import TraceEnvironment
 
@@ -22,7 +29,7 @@ class FakeRegister:
     def IsValid(self) -> bool:
         return True
 
-    def GetValueAsUnsigned(self) -> int:
+    def GetValueAsUnsigned(self, *_args) -> int:
         return self.value
 
 
@@ -197,6 +204,29 @@ def test_disassembly_fallback_uses_instruction_from_string(monkeypatch):
     assert calls == [("NOP", context.arch, 0x1000, 1)]
 
 
+def test_disassembly_fallback_does_not_hide_programming_errors():
+    programming_error = RuntimeError("fixture programming error")
+
+    class FakeContext:
+        arch = x86.ArchX86()
+
+        def disassemble(self, _pc: int) -> Instruction:
+            raise programming_error
+
+    class FakeTarget:
+        def get_disassembly(self, _pc: int) -> str:
+            raise AssertionError("fallback must not run")
+
+    with pytest.raises(RuntimeError) as raised:
+        tracer_module._disassemble_instruction(
+            cast(DisassemblyContext, FakeContext()),
+            cast(LLDBConcreteTarget, FakeTarget()),
+            0x1000,
+        )
+
+    assert raised.value is programming_error
+
+
 def test_disassembly_fallback_preserves_both_errors(monkeypatch):
     primary_error = ValueError("primary disassembler failed")
     fallback_error = ValueError("fallback disassembler failed")
@@ -318,8 +348,43 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
     assert "UNMODELED" in str(gap.cause)
 
 
+def test_symbolic_execution_not_implemented_error_is_typed(monkeypatch):
+    loc_db = LocationDB()
+    loc = loc_db.get_or_create_offset_location(0x1000)
+    execution_error = NotImplementedError("fixture execution is unsupported")
+
+    class FakeIrcfg:
+        def get_block(self, _loc):
+            return object()
+
+    class FakeLifter:
+        pc = ExprId("RIP", 64)
+
+        def new_ircfg(self):
+            return FakeIrcfg()
+
+        def add_instr_to_ircfg(self, *_args):
+            return loc
+
+    class FakeEngine:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def eval_updt_irblock(self, _block):
+            raise execution_error
+
+    monkeypatch.setattr(symbolic_module, "SymbolicExecutionEngine", FakeEngine)
+
+    with pytest.raises(UnsupportedInstructionError) as raised:
+        run_instruction(cast(Any, "FIXTURE"), cast(Any, object()), cast(Any, FakeLifter()))
+
+    assert raised.value.__cause__ is execution_error
+
+
 def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
-    symbolic_error = NotImplementedError("fixture instruction is unsupported")
+    symbolic_error = UnsupportedInstructionError(
+        "fixture instruction is unsupported"
+    )
 
     class FakeInstruction:
         instr = object()
