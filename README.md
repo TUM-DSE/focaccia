@@ -35,6 +35,10 @@ The above workflow works for reproducing most QEMU bugs but cannot handle the fo
 We provide alternative approaches for dealing with optimization bugs. Focaccia currently does not
 handle bugs in non-deterministic programs.
 
+Concurrent validation is not supported. The historical scheduler source is preserved under
+`focaccia.experimental` for possible redesign, but it has no CLI or flake entry point and is not part
+of the supported QEMU validation path.
+
 ### QEMU Optimization bugs 
 
 When a bug is suspected to be an optimization bug, you can use the Focaccia QEMU plugin. The QEMU

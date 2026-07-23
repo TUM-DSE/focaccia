@@ -140,7 +140,7 @@ def main():
         raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
                                    'Focaccia built without deterministic log support')
 
-    gdb_server = GDBServerStateIterator(args.remote, detlog, args.schedule)
+    gdb_server = GDBServerStateIterator(args.remote, detlog)
 
     executable = (
         gdb_server.binary if args.executable is None else args.executable

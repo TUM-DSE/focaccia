@@ -207,9 +207,13 @@
       ]
     );
 
+    developmentDependencies = workspace.deps.default // {
+      focaccia = [ "dev" ];
+    };
+
     pythonEnv = pythonSet.mkVirtualEnv "focaccia-env" workspace.deps.default;
-    pythonDevEnv = pythonSetEditable.mkVirtualEnv "focaccia-dev-env" workspace.deps.all;
-    pythonStaticUnitEnv = pythonSet.mkVirtualEnv "focaccia-static-unit-env" workspace.deps.all;
+    pythonDevEnv = pythonSetEditable.mkVirtualEnv "focaccia-dev-env" developmentDependencies;
+    pythonStaticUnitEnv = pythonSet.mkVirtualEnv "focaccia-static-unit-env" developmentDependencies;
 
     devEnv = pythonDevEnv.overrideAttrs (old: {
       buildPhase = ''
@@ -237,6 +241,11 @@
       UV_PYTHON = python.interpreter;
       UV_PYTHON_DOWNLOADS = "never";
     };
+
+    uvSyncWrapper = pkgs.writeShellScriptBin "uv-sync" ''
+      set -euo pipefail
+      exec ${pkgs.uv}/bin/uv sync --locked "$@"
+    '';
 
     uvShellHook = ''
       unset PYTHONPATH
@@ -283,7 +292,12 @@
       ];
     };
 
-    mkStaticUnitCheck = { name, ruffTargets, pytestTargets }:
+    mkStaticUnitCheck = {
+      name,
+      ruffTargets,
+      pytestTargets,
+      extraCheckPhase ? "",
+    }:
       pkgs.stdenv.mkDerivation {
         inherit name;
         src = staticUnitSource;
@@ -301,6 +315,7 @@
           python -m pytest -q -m 'not integration' \
             ${pkgs.lib.escapeShellArgs pytestTargets}
 
+          ${extraCheckPhase}
           touch "$out"
         '';
 
@@ -317,6 +332,8 @@
         "src/focaccia/arch/x86.py"
         "src/focaccia/cli.py"
         "src/focaccia/compare.py"
+        "src/focaccia/experimental/__init__.py"
+        "src/focaccia/experimental/scheduler.py"
         "src/focaccia/match.py"
         "src/focaccia/miasm_util.py"
         "src/focaccia/native/lldb_target.py"
@@ -324,6 +341,7 @@
         "src/focaccia/parser.py"
         "src/focaccia/persistence.py"
         "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/concurrency.py"
         "src/focaccia/qemu/deterministic.py"
         "src/focaccia/qemu/snapshot.py"
         "src/focaccia/qemu/state.py"
@@ -819,6 +837,52 @@
       ];
     };
 
+    schedulerQuarantineCheck = mkStaticUnitCheck {
+      name = "scheduler-quarantine";
+      ruffTargets = [
+        "src/focaccia/experimental/__init__.py"
+        "src/focaccia/experimental/scheduler.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/concurrency.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_scheduler_quarantine.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_scheduler_quarantine.py"
+        "-k"
+        "scheduler or concurrency or thread_creating"
+      ];
+      extraCheckPhase = ''
+        python -c 'import importlib.util; assert importlib.util.find_spec("ptrace") is None'
+        ${pythonEnv}/bin/python - <<'PY'
+        import importlib.metadata
+        import importlib.util
+
+        assert importlib.util.find_spec("ptrace") is None
+        assert importlib.util.find_spec("focaccia.experimental.scheduler") is not None
+        requirements = importlib.metadata.requires("focaccia") or []
+        ptrace = [item for item in requirements if item.startswith("python-ptrace")]
+        assert len(ptrace) == 1
+        assert "extra ==" in ptrace[0]
+        assert "experimental-scheduler" in ptrace[0]
+        PY
+      '';
+    };
+
+    uvSyncLockIntegrityCheck = pkgs.runCommand "uv-sync-lock-integrity" {} ''
+      wrapper=${uvSyncWrapper}/bin/uv-sync
+      ${pkgs.gnugrep}/bin/grep -F -- "uv sync --locked" "$wrapper"
+      if ${pkgs.gnugrep}/bin/grep -Fq "sed -i" "$wrapper" \
+        || ${pkgs.gnugrep}/bin/grep -Fq "riscv" "$wrapper"; then
+        echo "uv-sync must not text-filter the resolver lockfile" >&2
+        exit 1
+      fi
+      touch "$out"
+    '';
+
     qemuSparseMemoryCacheCheck = mkStaticUnitCheck {
       name = "qemu-sparse-memory-cache";
       ruffTargets = [
@@ -1162,11 +1226,7 @@
 
       uv-sync = {
         type = "app";
-        program = "${pkgs.writeShellScriptBin "uv-sync" ''
-          set -euo pipefail
-          ${pkgs.uv}/bin/uv sync
-          sed -i '/riscv/d' uv.lock
-        ''}/bin/uv-sync";
+        program = "${uvSyncWrapper}/bin/uv-sync";
       };
     };
 
@@ -1260,7 +1320,9 @@
       fix-021-plugin-framed-transport = fix021PluginFramedTransportCheck;
       fix-022-plugin-register-cache = fix022PluginRegisterCacheCheck;
       fix-033-plugin-connection-ownership = fix033PluginConnectionOwnershipCheck;
+      uv-sync-lock-integrity = uvSyncLockIntegrityCheck;
       fix-054-gdb-launch-encoding = fix054GdbLaunchEncodingCheck;
+      scheduler-quarantine = schedulerQuarantineCheck;
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
       qemu-sparse-memory-cache = qemuSparseMemoryCacheCheck;

@@ -122,12 +122,6 @@ observe guest state and validate it against a symbolic native trace.
         choices=["msgpack", "json"],
         help="Input symbolic trace format.",
     )
-    parser.add_argument(
-        "--schedule",
-        default=False,
-        action="store_true",
-        help="Enable experimental scheduling (unsupported; removed in Step 10).",
-    )
     return parser
 
 

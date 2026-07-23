@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from focaccia.arch import x86
+from focaccia.qemu.concurrency import UnsupportedConcurrencyError
 from focaccia.snapshot import (
     MemoryAccessError,
     ProgramState,
@@ -124,6 +125,43 @@ def test_gdb_unsupported_80_bit_scalar_is_not_truncated(monkeypatch):
     with pytest.raises(RegisterAccessError):
         ProgramState.read_register(state, "ST0")
 
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_thread_creating_syscall_is_rejected_before_gdb_step(monkeypatch):
+    target = load_target_module(monkeypatch)
+
+    class FakeIterator:
+        arch = x86.ArchX86()
+
+        def __init__(self):
+            self.current_state_calls = 0
+            self.step_calls = 0
+
+        def _syscall_number_register(self):
+            return "rax"
+
+        def current_state(self):
+            self.current_state_calls += 1
+            return object()
+
+        def _step(self):
+            self.step_calls += 1
+            raise AssertionError("A thread-creating syscall must not execute.")
+
+    iterator = FakeIterator()
+    event = SimpleNamespace(registers={"rax": 56})
+    post_event = SimpleNamespace()
+
+    with pytest.raises(UnsupportedConcurrencyError, match="clone"):
+        target.GDBServerStateIterator._handle_syscall(
+            cast(Any, iterator),
+            cast(Any, event),
+            cast(Any, post_event),
+        )
+
+    assert iterator.current_state_calls == 1
+    assert iterator.step_calls == 0
     sys.modules.pop("focaccia.qemu.target", None)
 
 

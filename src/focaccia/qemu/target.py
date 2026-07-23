@@ -1,6 +1,5 @@
 import gdb
 import time
-import socket
 import struct
 import logging
 from focaccia.deterministic import (
@@ -17,6 +16,11 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.arch import supported_architectures, Arch
+from focaccia.qemu.concurrency import (
+    reject_thread_creating_effect,
+    require_event_thread,
+    require_single_inferior,
+)
 from focaccia.qemu.deterministic import (
     emulated_system_calls,
     passthrough_system_calls,
@@ -30,7 +34,6 @@ debug = logger.debug
 info = logger.info
 warn = logger.warning
 
-DEST = "/tmp/memcached_scheduler.sock"
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     # Match just on PC
@@ -139,6 +142,7 @@ class GDBServerConnector:
         gdb.execute(f'target remote {remote}')
         gdb.execute('set scheduler-locking on')
         self._process = gdb.selected_inferior()
+        require_single_inferior(len(self._process.threads()))
 
         split = self._process.architecture().name().split(':')
         archname = split[1] if len(split) > 1 else split[0]
@@ -167,9 +171,6 @@ class GDBServerConnector:
 
     def is_exited(self) -> bool:
         return not self._process.is_valid() or len(self._process.threads()) == 0
-
-    def current_tid(self) -> int:
-        return gdb.selected_inferior().threads()[0].ptid[1]
 
     def get_sections(self) -> list[MemoryMapping]:
         mappings = []
@@ -233,17 +234,11 @@ class GDBServerConnector:
 
 
 class GDBServerStateIterator(GDBServerConnector):
-    def __init__(self, remote: str, deterministic_log: DeterministicLog, schedule: bool = False):
-        self.sock = None
-        if schedule:
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.connect(DEST)
-
+    def __init__(self, remote: str, deterministic_log: DeterministicLog):
         super().__init__(remote)
 
         self._deterministic_log = deterministic_log
         self._first_next = True
-        self._thread_num = 1
 
         self.event_start = time.time()
         events = self._deterministic_log.events()
@@ -257,6 +252,11 @@ class GDBServerStateIterator(GDBServerConnector):
                                     match_event,
                                     from_state=first_state)
         event = self._events.match(first_state)
+        if event is None:
+            raise RuntimeError(
+                "Unable to synchronize QEMU with the deterministic event log."
+            )
+        self._replay_tid = event.tid
 
         # TODO: handle AT_RANDOM correctly
         # at_random = bytes([0xd1, 0x8f, 0x3a, 0x37, 0xb8, 0xba, 0x05, 0x54, 0x70, 0xdf, 0x3f, 0x89, 0x93, 0x64, 0xc2, 0x3c])
@@ -264,15 +264,7 @@ class GDBServerStateIterator(GDBServerConnector):
         # actual_at_random = self._process.read_memory(0x7ffff6165d20, 16).tobytes()
         # assert(at_random == actual_at_random)
         
-        self._thread_count = 1
-        self._current_event_id = event.tid
-        self._thread_map = {
-            self._current_event_id: (self.current_tid(), self._thread_count)
-        }
-        self._thread_context = {
-        }
         info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
-        debug(f'Thread mapping at this point: {event.tid}: {self.current_tid()}')
 
 
     def _syscall_number_register(self) -> str:
@@ -291,6 +283,8 @@ class GDBServerStateIterator(GDBServerConnector):
 
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
+            if syscall.creates_thread:
+                reject_thread_creating_effect(syscall.name)
             info(f'Replaying system call number {hex(call)}: {syscall.name}')
 
             self.skip(post_event.pc)
@@ -356,21 +350,12 @@ class GDBServerStateIterator(GDBServerConnector):
         syscall = passthrough_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
             assert(call is not None)
+            if syscall.creates_thread:
+                reject_thread_creating_effect(syscall.name)
             info(f'System call number {hex(call)} passed through')
             self._step()
             if self.is_exited():
                 raise StopIteration
-
-            # Check if new thread was created
-            if syscall.creates_thread:
-                new_tid = self.current_state().read_register(syscall_reg)
-                event_new_tid = post_event.registers[syscall_reg]
-                self._thread_count += 1
-                self._thread_map[event_new_tid] = (new_tid, self._thread_count)
-                info(f'New thread created TID={hex(new_tid)} corresponds to native {hex(event_new_tid)}')
-                debug('Thread mapping at this point:')
-                for event_tid, (tid, _) in self._thread_map.items():
-                    debug(f'{event_tid}: {tid}')
 
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
@@ -431,41 +416,26 @@ class GDBServerStateIterator(GDBServerConnector):
         self._signal_frames.append(frame)
         return self.current_state()
 
-    def _handle_context_switch(self, event: SyscallEvent, post_event: SyscallEvent):
-        # Context switch
-        # TODO: handle return from pre-empt
-        self._thread_context[self._current_event_id] = event
-        self._current_event_id = post_event.tid
-        tid, num = self._thread_map[self._current_event_id]
-        self.context_switch(tid)
-        state = self.current_state()
-        debug(f'Scheduled {hex(tid)} that corresponds to native {hex(post_event.tid)}')
-
-        if self._current_event_id in self._thread_context:
-            event = self._thread_context.pop(self._current_event_id)
-        elif match_event(post_event, state):
-            event = post_event
-            post_event = self._events.match_pair(event)
-        else:
-            debug(f'New thread {hex(tid)} started at non-event instruction')
-            self._events.unmatch()
-            self._step()
-            print(hex(self.current_state().read_pc()))
-            return self.current_state()
-
     def _handle_event(self) -> ReadableProgramState | None:
         event = self._events.match(self.current_state())       
 
         if not event:
             return None
 
+        require_event_thread(
+            self._replay_tid,
+            event.tid,
+            context="Deterministic event",
+        )
         self.event_start = time.time()
         if isinstance(event, SyscallEvent):
             post_event = self._events.match_pair(event)
             assert(post_event is not None)
-
-            if post_event.tid != self._current_event_id:
-                self._handle_context_switch(event, post_event)
+            require_event_thread(
+                self._replay_tid,
+                post_event.tid,
+                context="Paired system-call event",
+            )
 
             self.event_time += time.time() - self.event_start
             return self._handle_syscall(event, post_event)
@@ -473,6 +443,11 @@ class GDBServerStateIterator(GDBServerConnector):
         if isinstance(event, SignalEvent):
             post_event = self._events.match_pair(event)
             assert(post_event is not None)
+            require_event_thread(
+                self._replay_tid,
+                post_event.tid,
+                context="Paired signal event",
+            )
             self.event_time += time.time() - self.event_start
             return self._handle_signal(event, post_event)
 
@@ -531,14 +506,5 @@ class GDBServerStateIterator(GDBServerConnector):
             bp.delete()
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
-
-    def context_switch(self, thread_number: int) -> None:
-        if self.sock is None:
-            raise NotImplementedError('Scheduling disabled')
-        data = thread_number.to_bytes(8, byteorder='little', signed=False)
-        self.sock.send(data)
-
-    def __del__(self):
-        print(f'Replay time: {self.event_time}')
 
 
