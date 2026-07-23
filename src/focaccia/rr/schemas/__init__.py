@@ -1,0 +1,1 @@
+"""Packaged RR schema resources."""

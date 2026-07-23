@@ -32,7 +32,14 @@ from focaccia.symbolic import (
     UnsupportedInstructionError,
     run_instruction,
 )
-from focaccia.deterministic import Event, EventMatcher
+from focaccia.deterministic import (
+    CursorState,
+    DeterministicCursor,
+    Event,
+    EventSynchronizationError,
+    SignalEvent,
+    SyscallEvent,
+)
 
 from .lldb_target import (
     ConcreteExecutionError,
@@ -94,9 +101,9 @@ def _disassemble_instruction(ctx: DisassemblyContext,
         ) as fallback_error:
             raise DisassemblyError(pc, primary_error, fallback_error) from fallback_error
 
-def _events_for_environment(env: TraceEnvironment) -> list[Event]:
+def _events_for_environment(env: TraceEnvironment) -> tuple[Event, ...]:
     if env.detlog is None:
-        return []
+        return ()
     return env.detlog.events()
 
 _EVENT_SYNC_BASE_REGISTERS = {
@@ -112,11 +119,11 @@ _EVENT_SYNC_BASE_REGISTERS = {
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     """Match one deterministic event using a named, architecture-specific subset."""
-    # The legacy RR reader still supplies its schema enum here; Step 11 will
-    # normalize that parser boundary. Enforce full identity for typed events.
-    if isinstance(event.arch, Arch) and event.arch != target.arch:
+    if event.arch != target.arch:
         return False
     arch = target.arch
+    if event.pc is None:
+        return False
     try:
         if event.pc != target.read_pc():
             return False
@@ -497,7 +504,10 @@ class SymbolicTracer:
         ctx = DisassemblyContext(self.target)
         arch = ctx.arch
 
-        event_matcher = EventMatcher(_events_for_environment(self.env), match_event, self.target)
+        event_matcher = DeterministicCursor(
+            _events_for_environment(self.env),
+            match_event,
+        )
         if logger.isEnabledFor(logging.DEBUG):
             debug('Tracing program with the following non-deterministic events')
             for event in event_matcher.events:
@@ -538,8 +548,20 @@ class SymbolicTracer:
                     break
                 continue
 
+            if event_matcher.state is CursorState.SYNCHRONIZED:
+                pending_event = event_matcher.peek()
+                if pending_event is not None and pending_event.pc is None:
+                    raise EventSynchronizationError(
+                        f"RR event {pending_event.event_count} "
+                        f"({pending_event.event_type}) has no program counter and "
+                        "cannot be synchronized by the native tracer."
+                    )
             event = event_matcher.match(self.target)
-            post_event = event_matcher.match_pair(event)
+            post_event = (
+                event_matcher.match_pair(event)
+                if isinstance(event, (SyscallEvent, SignalEvent))
+                else None
+            )
             in_event = event is not None or self.target.arch.is_instr_syscall(
                 str(instruction)
             )

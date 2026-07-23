@@ -107,9 +107,6 @@ def main():
     detlog = None
     if args.deterministic_log:
         detlog = DeterministicLog(args.deterministic_log)
-        if detlog.base_directory is None:
-            raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
-                                      'Focaccia built without deterministic log support')
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), 
                            nondeterminism_log=detlog,

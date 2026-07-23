@@ -332,6 +332,7 @@
         "src/focaccia/arch/x86.py"
         "src/focaccia/cli.py"
         "src/focaccia/compare.py"
+        "src/focaccia/deterministic.py"
         "src/focaccia/experimental/__init__.py"
         "src/focaccia/experimental/scheduler.py"
         "src/focaccia/match.py"
@@ -349,6 +350,7 @@
         "src/focaccia/qemu/transport.py"
         "src/focaccia/qemu/validation_server.py"
         "src/focaccia/reproducer.py"
+        "src/focaccia/rr"
         "src/focaccia/snapshot.py"
         "src/focaccia/symbolic.py"
         "src/focaccia/tools/capture_transforms.py"
@@ -837,6 +839,174 @@
       ];
     };
 
+    explicitEmptyEventLogCheck = mkStaticUnitCheck {
+      name = "explicit-empty-event-log";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_native_api.py"
+        "-k"
+        "none_selects_explicit_empty_log or missing_deterministic_log_provides_empty_events or qemu_iterator_accepts_explicit_empty_event_log"
+      ];
+    };
+
+    deterministicImportBoundaryCheck = mkStaticUnitCheck {
+      name = "deterministic-import-boundary";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "tests/test_deterministic.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "-k"
+        "only_parser_dependencies or unrelated_adapter_import"
+      ];
+    };
+
+    rrSchemaV85PackagingCheck = mkStaticUnitCheck {
+      name = "rr-schema-v85-packaging";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/rr"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_rr_adapter.py"
+        "-k"
+        "packaged_schema or rr_version_mismatch"
+      ];
+      extraCheckPhase = ''
+        fixture="$PWD/tests/fixtures/deterministic/empty-x86"
+        workdir="$TMPDIR/rr-schema-check"
+        mkdir -p "$workdir"
+        cd "$workdir"
+        ${pythonEnv}/bin/python - "$fixture" <<'PY'
+        import importlib.resources
+        import sys
+
+        from focaccia.deterministic import DeterministicLog
+        from focaccia.rr.adapter import (
+            RR_SCHEMA,
+            RR_SCHEMA_ID,
+            RR_SCHEMA_VERSION,
+            RR_TRACE_VERSION,
+        )
+
+        resources = importlib.resources.files("focaccia.rr.schemas")
+        assert resources.joinpath("rr_trace_v85.capnp").is_file()
+        assert resources.joinpath("RR-LICENSE").is_file()
+        log = DeterministicLog(sys.argv[1])
+        assert log.metadata is not None
+        assert log.metadata.trace_version == RR_TRACE_VERSION == 85
+        assert log.metadata.schema_version == RR_SCHEMA_VERSION == "rr-trace-v85"
+        assert log.metadata.schema_id == RR_SCHEMA_ID == "0xcaa0b1486c12c629"
+        assert f"{RR_SCHEMA.schema.node.id:#x}" == RR_SCHEMA_ID
+        PY
+      '';
+    };
+
+    rrRegisterLayoutsCheck = mkStaticUnitCheck {
+      name = "rr-register-layouts";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/rr/adapter.py"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_rr_adapter.py"
+        "-k"
+        "register_layout or register_decoders or aarch64_fixture"
+      ];
+    };
+
+    rrMemoryWriteRangesCheck = mkStaticUnitCheck {
+      name = "rr-memory-write-ranges";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/rr/adapter.py"
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_rr_adapter.py"
+        "-k"
+        "memory_write_ranges or fully_known_memory or x86_fixture_decodes or memory_write_parser or qemu_replay_rejects_unknown_holes"
+      ];
+    };
+
+    rrCompressedStreamsCheck = mkStaticUnitCheck {
+      name = "rr-compressed-streams";
+      ruffTargets = [
+        "src/focaccia/rr/adapter.py"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_rr_adapter.py"
+        "-k"
+        "compressed_reader or x86_fixture_decodes"
+      ];
+    };
+
+    rrTaskEventVariantsCheck = mkStaticUnitCheck {
+      name = "rr-task-event-variants";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/rr/adapter.py"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_rr_adapter.py"
+        "-k"
+        "all_task_variants or unknown_task_and_event"
+      ];
+    };
+
+    deterministicEventCursorCheck = mkStaticUnitCheck {
+      name = "deterministic-event-cursor";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "cursor_has_explicit or cursor_unsynchronized or cursor_configured or cursor_rejects_malformed or cursor_validates_signal or cursor_rejects_missing or qemu_event_loop_fails"
+      ];
+    };
+
+    deterministicMappingCursorCheck = mkStaticUnitCheck {
+      name = "deterministic-mapping-cursor";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "tests/test_deterministic.py"
+        "tests/test_rr_adapter.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "tests/test_rr_adapter.py"
+        "-k"
+        "mapping_cursor or mapping_gaps"
+      ];
+    };
+
     schedulerQuarantineCheck = mkStaticUnitCheck {
       name = "scheduler-quarantine";
       ruffTargets = [
@@ -1322,6 +1492,15 @@
       fix-033-plugin-connection-ownership = fix033PluginConnectionOwnershipCheck;
       uv-sync-lock-integrity = uvSyncLockIntegrityCheck;
       fix-054-gdb-launch-encoding = fix054GdbLaunchEncodingCheck;
+      explicit-empty-event-log = explicitEmptyEventLogCheck;
+      deterministic-import-boundary = deterministicImportBoundaryCheck;
+      rr-schema-v85-packaging = rrSchemaV85PackagingCheck;
+      rr-register-layouts = rrRegisterLayoutsCheck;
+      rr-memory-write-ranges = rrMemoryWriteRangesCheck;
+      rr-compressed-streams = rrCompressedStreamsCheck;
+      rr-task-event-variants = rrTaskEventVariantsCheck;
+      deterministic-event-cursor = deterministicEventCursorCheck;
+      deterministic-mapping-cursor = deterministicMappingCursorCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;

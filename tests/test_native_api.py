@@ -6,6 +6,7 @@ from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
+from focaccia.deterministic import CursorState
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import DisassemblyError, SpeculativeTracer, SymbolicTracer
@@ -43,7 +44,7 @@ def _environment() -> TraceEnvironment:
 
 
 def test_missing_deterministic_log_provides_empty_events():
-    assert tracer_module._events_for_environment(_environment()) == []
+    assert tracer_module._events_for_environment(_environment()) == ()
 
 
 def test_lldb_target_read_pc_normalizes_x86_alias(monkeypatch):
@@ -273,8 +274,9 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
         loc_db = LocationDB()
         lifter = object()
 
-    class FakeEventMatcher:
+    class FakeCursor:
         events = []
+        state = CursorState.EXHAUSTED
 
         def __init__(self, *_args):
             pass
@@ -327,7 +329,7 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
         "_disassemble_instruction",
         lambda _ctx, _target, _pc: instruction,
     )
-    monkeypatch.setattr(tracer_module, "EventMatcher", FakeEventMatcher)
+    monkeypatch.setattr(tracer_module, "DeterministicCursor", FakeCursor)
     monkeypatch.setattr(tracer_module, "timebound", unsupported_output)
 
     tracer = object.__new__(SymbolicTracer)
@@ -399,8 +401,9 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
         loc_db = LocationDB()
         lifter = object()
 
-    class FakeEventMatcher:
+    class FakeCursor:
         events = []
+        state = CursorState.EXHAUSTED
 
         def __init__(self, *_args):
             pass
@@ -446,7 +449,7 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
         "_disassemble_instruction",
         lambda _ctx, _target, _pc: instruction,
     )
-    monkeypatch.setattr(tracer_module, "EventMatcher", FakeEventMatcher)
+    monkeypatch.setattr(tracer_module, "DeterministicCursor", FakeCursor)
     monkeypatch.setattr(tracer_module, "timebound", fail_symbolically)
 
     tracer = object.__new__(SymbolicTracer)

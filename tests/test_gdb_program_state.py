@@ -6,6 +6,18 @@ from typing import Any, cast
 import pytest
 
 from focaccia.arch import x86
+from focaccia.deterministic import (
+    CursorState,
+    DeterministicCursor,
+    DeterministicLog,
+    Event,
+    EventSynchronizationError,
+    KnownMemoryRange,
+    MemoryWrite,
+    SyscallEvent,
+    UnknownMemoryRange,
+    UnknownMemoryRangeError,
+)
 from focaccia.qemu.concurrency import UnsupportedConcurrencyError
 from focaccia.snapshot import (
     MemoryAccessError,
@@ -150,8 +162,31 @@ def test_thread_creating_syscall_is_rejected_before_gdb_step(monkeypatch):
             raise AssertionError("A thread-creating syscall must not execute.")
 
     iterator = FakeIterator()
-    event = SimpleNamespace(registers={"rax": 56})
-    post_event = SimpleNamespace()
+    arch = x86.ArchX86()
+    event = SyscallEvent(
+        0x1000,
+        1,
+        arch,
+        {"rip": 0x1000, "rax": 56},
+        (),
+        arch,
+        56,
+        "entering",
+        False,
+        event_count=1,
+    )
+    post_event = SyscallEvent(
+        0x1002,
+        1,
+        arch,
+        {"rip": 0x1002, "rax": 0},
+        (),
+        arch,
+        56,
+        "exiting",
+        False,
+        event_count=2,
+    )
 
     with pytest.raises(UnsupportedConcurrencyError, match="clone"):
         target.GDBServerStateIterator._handle_syscall(
@@ -180,4 +215,112 @@ def test_gdb_state_uses_sparse_exact_memory_cache(monkeypatch):
     with pytest.raises(MemoryAccessError):
         state.read_memory(0x2000, 1)
 
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_iterator_accepts_explicit_empty_event_log(monkeypatch):
+    target = load_target_module(monkeypatch)
+
+    class State:
+        def read_pc(self) -> int:
+            return 0x1000
+
+    monkeypatch.setattr(target.GDBServerConnector, "__init__", lambda _self, _remote: None)
+    monkeypatch.setattr(
+        target.GDBServerStateIterator,
+        "current_state",
+        lambda _self: State(),
+    )
+
+    iterator = target.GDBServerStateIterator("unused", DeterministicLog(None))
+
+    assert iterator._replay_tid is None
+    assert iterator._events.state is CursorState.EXHAUSTED
+    assert iterator._events.events == ()
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_replay_rejects_events_without_synchronization_pc(monkeypatch):
+    target = load_target_module(monkeypatch)
+    event = Event(None, 1, x86.ArchX86(), {}, (), "syscallbufReset", 1)
+
+    with pytest.raises(EventSynchronizationError, match="has no program counter"):
+        target.require_event_pc(event)
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_event_loop_fails_on_pending_event_without_pc(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    first = Event(0x1000, 1, arch, {"rip": 0x1000}, (), "sched", 1)
+    pending = Event(None, 1, arch, {}, (), "syscallbufReset", 2)
+    cursor = DeterministicCursor(
+        (first, pending),
+        lambda event, pc: event.pc == pc,
+    )
+    assert cursor.match(0x1000) is first
+
+    class FakeIterator:
+        _events = cursor
+
+        def current_state(self) -> object:
+            raise AssertionError("The target must not advance past an unknown-PC event.")
+
+    with pytest.raises(EventSynchronizationError, match="syscallbufReset"):
+        target.GDBServerStateIterator._handle_event(cast(Any, FakeIterator()))
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_replay_rejects_unknown_holes_before_changing_target_state(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    write = MemoryWrite(
+        101,
+        0x2000,
+        4,
+        (KnownMemoryRange(0, b"ab"),),
+        (UnknownMemoryRange(2, 2),),
+    )
+    pre = SyscallEvent(
+        0x1000,
+        101,
+        arch,
+        {"rip": 0x1000, "rax": 0},
+        (),
+        arch,
+        0,
+        "entering",
+        False,
+        event_count=1,
+    )
+    post = SyscallEvent(
+        0x1002,
+        101,
+        arch,
+        {"rip": 0x1002, "rax": 4},
+        (write,),
+        arch,
+        0,
+        "exiting",
+        False,
+        event_count=2,
+    )
+
+    class FakeIterator:
+        changed_target = False
+        arch = x86.ArchX86()
+
+        def _syscall_number_register(self) -> str:
+            return "rax"
+
+        def current_state(self) -> object:
+            return object()
+
+        def skip(self, _new_pc: int) -> None:
+            self.changed_target = True
+
+    fake = FakeIterator()
+    with pytest.raises(UnknownMemoryRangeError, match="unknown ranges"):
+        target.GDBServerStateIterator._handle_syscall(cast(Any, fake), pre, post)
+    assert not fake.changed_target
     sys.modules.pop("focaccia.qemu.target", None)

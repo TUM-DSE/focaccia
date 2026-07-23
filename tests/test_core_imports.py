@@ -19,7 +19,7 @@ INTEGRATION_MODULES = (
     "focaccia.native",
     "focaccia.qemu",
     "focaccia.deterministic",
-    "focaccia._deterministic_impl",
+    "focaccia.rr.adapter",
 )
 
 

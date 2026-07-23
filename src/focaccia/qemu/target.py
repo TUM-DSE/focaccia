@@ -5,8 +5,9 @@ import logging
 from focaccia.deterministic import (
     DeterministicLog,
     Event,
+    EventSynchronizationError,
     SignalEvent,
-    EventMatcher,
+    DeterministicCursor,
     SyscallEvent,
     MemoryMapping,
 )
@@ -36,11 +37,23 @@ warn = logger.warning
 
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
-    # Match just on PC
+    # Match just on PC. Some valid RR bookkeeping events record no registers.
+    if event.pc is None:
+        return False
     debug(f'Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}')
     if event.pc == target.read_pc():
         return True
     return False
+
+
+def require_event_pc(event: Event) -> int:
+    if event.pc is None:
+        raise EventSynchronizationError(
+            f"RR event {event.event_count} ({event.event_type}) has no program counter "
+            "and cannot be synchronized by the QEMU replay backend."
+        )
+    return event.pc
+
 
 class GDBProgramState(CachedBackendProgramState):
     """One stopped GDB inferior state with canonical sparse caching."""
@@ -224,7 +237,7 @@ class GDBServerConnector:
             mapping = MemoryMapping(0,
                                     start,
                                     end,
-                                    '',
+                                    'debugger',
                                     offset,
                                     0,
                                     0)
@@ -248,15 +261,13 @@ class GDBServerStateIterator(GDBServerConnector):
         self._signal_restorers = {}
 
         first_state = self.current_state()
-        self._events = EventMatcher(events,
-                                    match_event,
-                                    from_state=first_state)
-        event = self._events.match(first_state)
-        if event is None:
+        self._events = DeterministicCursor(events, match_event)
+        event = self._events.synchronize(first_state)
+        if event is None and events:
             raise RuntimeError(
                 "Unable to synchronize QEMU with the deterministic event log."
             )
-        self._replay_tid = event.tid
+        self._replay_tid = event.tid if event is not None else None
 
         # TODO: handle AT_RANDOM correctly
         # at_random = bytes([0xd1, 0x8f, 0x3a, 0x37, 0xb8, 0xba, 0x05, 0x54, 0x70, 0xdf, 0x3f, 0x89, 0x93, 0x64, 0xc2, 0x3c])
@@ -264,7 +275,11 @@ class GDBServerStateIterator(GDBServerConnector):
         # actual_at_random = self._process.read_memory(0x7ffff6165d20, 16).tobytes()
         # assert(at_random == actual_at_random)
         
-        info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+        if event is not None:
+            require_event_pc(event)
+            info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+        else:
+            info(f'Started at PC={hex(first_state.read_pc())} without an RR event log')
 
 
     def _syscall_number_register(self) -> str:
@@ -275,19 +290,29 @@ class GDBServerStateIterator(GDBServerConnector):
                 f'Syscall replay is unsupported for {self.arch.serialized_name}.'
             ) from error
 
-    def _handle_syscall(self, event: Event, post_event: Event) -> ReadableProgramState:
+    def _handle_syscall(
+        self,
+        event: SyscallEvent,
+        post_event: SyscallEvent,
+    ) -> ReadableProgramState:
         syscall_reg = self._syscall_number_register()
-        call = event.registers.get(syscall_reg)
+        call = event.syscall_number
         state = self.current_state()
         next_state = None
 
         syscall = emulated_system_calls[self.arch.archname].get(call, None)
         if syscall is not None:
+            # Validate every payload before changing QEMU state. Unknown holes
+            # cannot be replayed by inventing zero bytes.
+            materialized_writes = tuple(
+                (memory_write, memory_write.materialize())
+                for memory_write in post_event.mem_writes
+            )
             if syscall.creates_thread:
                 reject_thread_creating_effect(syscall.name)
             info(f'Replaying system call number {hex(call)}: {syscall.name}')
 
-            self.skip(post_event.pc)
+            self.skip(require_event_pc(post_event))
             next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
             patchup_regs = [syscall_reg, 'rip', *(syscall.patchup_registers or [])]
@@ -295,8 +320,8 @@ class GDBServerStateIterator(GDBServerConnector):
                 gdb.execute(f'set ${reg} = {post_event.registers.get(reg)}', to_string=True)
                 next_state.write_register(reg, post_event.registers.get(reg))
 
-            for mem in post_event.mem_writes:
-                addr, data = mem.address, mem.data
+            for mem, data in materialized_writes:
+                addr = mem.address
                 done = False
                 for reg in syscall.patchup_address_registers:
                     value = post_event.registers[reg]
@@ -310,9 +335,6 @@ class GDBServerStateIterator(GDBServerConnector):
 
                 info(f'Replaying write to {hex(addr)} with data:\n{data.hex(" ")}')
 
-                # Insert holes into data
-                for hole in mem.holes:
-                    data[hole.offset:hole.offset] = b'\x00' * hole.size
                 self._process.write_memory(addr, data)
 
             if syscall.return_from_signal:
@@ -368,7 +390,7 @@ class GDBServerStateIterator(GDBServerConnector):
 
     def _handle_signal(self, event: SignalEvent, post_event: SignalEvent):
         info('Handling signal event')
-        sighandler_pc = post_event.pc
+        sighandler_pc = require_event_pc(post_event)
 
         state = self.current_state()
         rsp = state.read_register('rsp')
@@ -417,11 +439,16 @@ class GDBServerStateIterator(GDBServerConnector):
         return self.current_state()
 
     def _handle_event(self) -> ReadableProgramState | None:
-        event = self._events.match(self.current_state())       
+        pending_event = self._events.peek()
+        if pending_event is not None:
+            require_event_pc(pending_event)
+        event = self._events.match(self.current_state())
 
         if not event:
             return None
 
+        if self._replay_tid is None:
+            raise RuntimeError("A deterministic event was found without a replay thread.")
         require_event_thread(
             self._replay_tid,
             event.tid,
@@ -430,7 +457,8 @@ class GDBServerStateIterator(GDBServerConnector):
         self.event_start = time.time()
         if isinstance(event, SyscallEvent):
             post_event = self._events.match_pair(event)
-            assert(post_event is not None)
+            if not isinstance(post_event, SyscallEvent):
+                raise RuntimeError("The deterministic cursor returned a non-syscall pair.")
             require_event_thread(
                 self._replay_tid,
                 post_event.tid,
@@ -442,7 +470,8 @@ class GDBServerStateIterator(GDBServerConnector):
 
         if isinstance(event, SignalEvent):
             post_event = self._events.match_pair(event)
-            assert(post_event is not None)
+            if not isinstance(post_event, SignalEvent):
+                raise RuntimeError("The deterministic cursor returned a non-signal pair.")
             require_event_thread(
                 self._replay_tid,
                 post_event.tid,
@@ -477,9 +506,10 @@ class GDBServerStateIterator(GDBServerConnector):
 
     def run_until(self, addr: int) -> ReadableProgramState:
         events_handled = 0
-        event = self._events.next()
+        event = self._events.peek()
         while event:
-            state = self._run_until_any([addr, event.pc])
+            event_pc = require_event_pc(event)
+            state = self._run_until_any([addr, event_pc])
             if state.read_pc() == addr:
                 # Check if we started at the very _start
                 self._first_next = events_handled == 0
@@ -489,7 +519,7 @@ class GDBServerStateIterator(GDBServerConnector):
             if self.is_exited():
                 raise Exception(f'Exited before reaching start address {hex(addr)}')
 
-            event = self._events.next()
+            event = self._events.peek()
             events_handled += 1
         return self._run_until_any([addr])
 

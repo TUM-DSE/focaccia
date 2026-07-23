@@ -136,9 +136,6 @@ def main():
     logging.basicConfig(level=logging_level, force=True)
 
     detlog = DeterministicLog(args.deterministic_log)
-    if args.deterministic_log and detlog.base_directory is None:
-        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
-                                   'Focaccia built without deterministic log support')
 
     gdb_server = GDBServerStateIterator(args.remote, detlog)
 
