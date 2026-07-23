@@ -1,6 +1,5 @@
 import gdb
 import time
-import struct
 import logging
 from focaccia.deterministic import (
     DeterministicLog,
@@ -17,23 +16,18 @@ from focaccia.snapshot import (
     MemoryAccessError,
 )
 from focaccia.arch import supported_architectures, Arch
-from focaccia.qemu.concurrency import (
-    reject_thread_creating_effect,
-    require_event_thread,
-    require_single_inferior,
-)
-from focaccia.qemu.deterministic import (
-    emulated_system_calls,
-    passthrough_system_calls,
-    syscall_number_registers,
-)
+from focaccia.qemu.concurrency import require_event_thread, require_single_inferior
+from focaccia.qemu.replay import X86ReplayEngine
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
-from focaccia.qemu.x86 import SigContext, SigInfo, UContext, SigFrame
+from focaccia.qemu.syscall import (
+    ReplayCoverageReport,
+    SyscallPolicy,
+    UnsupportedReplayEffect,
+)
 
 logger = logging.getLogger('focaccia-qemu-target')
 debug = logger.debug
 info = logger.info
-warn = logger.warning
 
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
@@ -169,8 +163,27 @@ class GDBServerConnector:
     def current_state(self) -> ReadableProgramState:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
-    def skip(self, new_pc: int):
-        gdb.execute(f'set $pc = {hex(new_pc)}')
+    def skip(self, new_pc: int) -> None:
+        gdb.execute(f'set $pc = {hex(new_pc)}', to_string=True)
+
+    def write_target_register(self, register: str, value: int) -> None:
+        wire_name = "eflags" if register.lower() == "rflags" else register.lower()
+        gdb.execute(f'set ${wire_name} = {hex(value)}', to_string=True)
+
+    def write_target_memory(self, address: int, data: bytes) -> None:
+        self._process.write_memory(address, data)
+
+    def reset_signal_handler_fp_state(self) -> None:
+        raise UnsupportedReplayEffect(
+            "The QEMU GDB backend cannot reset the complete x86-64 signal-handler "
+            "FP/XSTATE (the remote stub does not expose writable x87 tag state)."
+        )
+
+    def execute_replay_instruction(self) -> ReadableProgramState | None:
+        try:
+            return self._step()
+        except StopIteration:
+            return None
 
     def _step(self):
         pc = gdb.selected_frame().read_register('pc')
@@ -257,8 +270,7 @@ class GDBServerStateIterator(GDBServerConnector):
         events = self._deterministic_log.events()
         self.event_time = time.time() - self.event_start 
 
-        self._signal_frames = []
-        self._signal_restorers = {}
+        self._replay = X86ReplayEngine(self.arch) if events else None
 
         first_state = self.current_state()
         self._events = DeterministicCursor(events, match_event)
@@ -282,161 +294,42 @@ class GDBServerStateIterator(GDBServerConnector):
             info(f'Started at PC={hex(first_state.read_pc())} without an RR event log')
 
 
-    def _syscall_number_register(self) -> str:
-        try:
-            return syscall_number_registers[self.arch.archname]
-        except KeyError as error:
-            raise NotImplementedError(
-                f'Syscall replay is unsupported for {self.arch.serialized_name}.'
-            ) from error
+    def _require_replay_engine(self) -> X86ReplayEngine:
+        if self._replay is None:
+            raise RuntimeError("A deterministic event was found without a replay engine.")
+        return self._replay
+
+    def replay_coverage_report(self) -> ReplayCoverageReport | None:
+        """Return an immutable effect-coverage snapshot, if replay is active."""
+        return self._replay.coverage_report() if self._replay is not None else None
 
     def _handle_syscall(
         self,
         event: SyscallEvent,
-        post_event: SyscallEvent,
+        post_event: SyscallEvent | None,
+        *,
+        policy: SyscallPolicy | None = None,
     ) -> ReadableProgramState:
-        syscall_reg = self._syscall_number_register()
-        call = event.syscall_number
-        state = self.current_state()
-        next_state = None
+        replay = self._require_replay_engine()
+        selected_policy = policy or replay.prepare_syscall(event)
+        info(
+            f"Handling system call {selected_policy.name} ({event.syscall_number:#x}) "
+            f"with {selected_policy.strategy.value}"
+        )
+        return replay.replay_syscall(
+            self,
+            event,
+            post_event,
+            policy=selected_policy,
+        )
 
-        syscall = emulated_system_calls[self.arch.archname].get(call, None)
-        if syscall is not None:
-            # Validate every payload before changing QEMU state. Unknown holes
-            # cannot be replayed by inventing zero bytes.
-            materialized_writes = tuple(
-                (memory_write, memory_write.materialize())
-                for memory_write in post_event.mem_writes
-            )
-            if syscall.creates_thread:
-                reject_thread_creating_effect(syscall.name)
-            info(f'Replaying system call number {hex(call)}: {syscall.name}')
-
-            self.skip(require_event_pc(post_event))
-            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
-
-            patchup_regs = [syscall_reg, 'rip', *(syscall.patchup_registers or [])]
-            for reg in patchup_regs:
-                gdb.execute(f'set ${reg} = {post_event.registers.get(reg)}', to_string=True)
-                next_state.write_register(reg, post_event.registers.get(reg))
-
-            for mem, data in materialized_writes:
-                addr = mem.address
-                done = False
-                for reg in syscall.patchup_address_registers:
-                    value = post_event.registers[reg]
-                    if value == addr:
-                        addr = next_state.read_register(reg)
-                        done = True
-                        break
-
-                if done is False:
-                    raise RuntimeError(f'Cannot translate address {hex(addr)}')
-
-                info(f'Replaying write to {hex(addr)} with data:\n{data.hex(" ")}')
-
-                self._process.write_memory(addr, data)
-
-            if syscall.return_from_signal:
-                frame = self._signal_frames.pop()
-                debug(f'Handling return from signal with frame: {frame}')
-
-                sc = frame.uctx.mcontext
-                gdb.parse_and_eval(f'$r8 ={sc.r8}')
-                gdb.parse_and_eval(f'$r9 ={sc.r9}')
-                gdb.parse_and_eval(f'$r10 ={sc.r10}')
-                gdb.parse_and_eval(f'$r11 ={sc.r11}')
-                gdb.parse_and_eval(f'$r12 ={sc.r12}')
-                gdb.parse_and_eval(f'$r13 ={sc.r13}')
-                gdb.parse_and_eval(f'$r14 ={sc.r14}')
-                gdb.parse_and_eval(f'$r15 ={sc.r15}')
-                gdb.parse_and_eval(f'$rdi ={sc.rdi}')
-                gdb.parse_and_eval(f'$rsi ={sc.rsi}')
-                gdb.parse_and_eval(f'$rbp ={sc.rbp}')
-                gdb.parse_and_eval(f'$rdx ={sc.rdx}')
-                gdb.parse_and_eval(f'$rax ={sc.rax}')
-                gdb.parse_and_eval(f'$rcx ={sc.rcx}')
-                gdb.parse_and_eval(f'$rsp ={sc.rsp}')
-                gdb.parse_and_eval(f'$rip ={sc.rip}')
-                return self.current_state()
-
-                # TODO: restart syscall
-
-            if syscall.sets_signal_restorer:
-                restorer_addr = self._process.read_memory(state.read_register('rsi') + 0x10, 8)
-                restorer_addr = int.from_bytes(restorer_addr, byteorder='little')
-                signo = event.registers['rdi']
-                debug(f'System call {syscall.name} sets signal restorer for {signo} = {hex(restorer_addr)}')
-                self._signal_restorers[signo] = restorer_addr
-
-        syscall = passthrough_system_calls[self.arch.archname].get(call, None)
-        if syscall is not None:
-            assert(call is not None)
-            if syscall.creates_thread:
-                reject_thread_creating_effect(syscall.name)
-            info(f'System call number {hex(call)} passed through')
-            self._step()
-            if self.is_exited():
-                raise StopIteration
-
-            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
-
-        if not next_state:
-            info(f'System call number {hex(call)} not replayed')
-            self._step()
-            next_state = GDBProgramState(self._process, gdb.selected_frame(), self.arch)
-
-        return next_state
-
-    def _handle_signal(self, event: SignalEvent, post_event: SignalEvent):
-        info('Handling signal event')
-        sighandler_pc = require_event_pc(post_event)
-
-        state = self.current_state()
-        rsp = state.read_register('rsp')
-
-        sc = SigContext()
-        sc.r8 = state.read_register('r8')
-        sc.r9 = state.read_register('r9')
-        sc.r10 = state.read_register('r10')
-        sc.r11 = state.read_register('r11')
-        sc.r12 = state.read_register('r12')
-        sc.r13 = state.read_register('r13')
-        sc.r14 = state.read_register('r14')
-        sc.r15 = state.read_register('r15')
-        sc.rdi = state.read_register('rdi')
-        sc.rsi = state.read_register('rsi')
-        sc.rbp = state.read_register('rbp')
-        sc.rbx = state.read_register('rbx')
-        sc.rdx = state.read_register('rdx')
-        sc.rax = state.read_register('rax')
-        sc.rcx = state.read_register('rcx')
-        sc.rsp = state.read_register('rsp')
-        sc.rip = state.read_register('rip')
-        sc.eflags = state.read_register('eflags')
-
-        sigmask = 0
-        uctx = UContext(sigmask=sigmask, mcontext=sc)
-        si_signo, si_errno, si_code = struct.unpack_from("<iii", event.signal_number.siginfo, 0)
-        si_signo = 2
-        siginfo = SigInfo(si_signo=si_signo, si_errno=si_errno, si_code=si_code,
-                          si_pid=post_event.tid, si_uid=0)
-
-        restorer_addr = self._signal_restorers[si_signo]
-        frame = SigFrame(sp_new=rsp - 0xd78, pretcode=restorer_addr, uctx=uctx, siginfo=siginfo)
-        self._process.write_memory(rsp - 0xd78, frame.to_bytes())
-
-        gdb.execute(f'set $pc = {hex(sighandler_pc)}')
-        patchup_regs = ['rdi']
-        for reg in patchup_regs:
-            gdb.parse_and_eval(f'${reg}={post_event.registers.get(reg)}')
-
-        gdb.parse_and_eval('$rsp = $rsp - 0xd78')
-        gdb.parse_and_eval('$rdx = $rsp + 0x8')
-        gdb.parse_and_eval('$rsi = $rsp + 0x2c8')
-
-        self._signal_frames.append(frame)
-        return self.current_state()
+    def _handle_signal(
+        self,
+        event: SignalEvent,
+        post_event: SignalEvent,
+    ) -> ReadableProgramState | None:
+        info(f"Replaying signal {event.descriptor.signal_number}")
+        return self._require_replay_engine().replay_signal(self, event, post_event)
 
     def _handle_event(self) -> ReadableProgramState | None:
         pending_event = self._events.peek()
@@ -456,17 +349,23 @@ class GDBServerStateIterator(GDBServerConnector):
         )
         self.event_start = time.time()
         if isinstance(event, SyscallEvent):
-            post_event = self._events.match_pair(event)
-            if not isinstance(post_event, SyscallEvent):
-                raise RuntimeError("The deterministic cursor returned a non-syscall pair.")
-            require_event_thread(
-                self._replay_tid,
-                post_event.tid,
-                context="Paired system-call event",
-            )
+            policy = self._require_replay_engine().prepare_syscall(event)
+            post_event = None
+            if policy.requires_post_event:
+                matched = self._events.match_pair(event)
+                if not isinstance(matched, SyscallEvent):
+                    raise RuntimeError(
+                        "The deterministic cursor returned a non-syscall pair."
+                    )
+                require_event_thread(
+                    self._replay_tid,
+                    matched.tid,
+                    context="Paired system-call event",
+                )
+                post_event = matched
 
             self.event_time += time.time() - self.event_start
-            return self._handle_syscall(event, post_event)
+            return self._handle_syscall(event, post_event, policy=policy)
 
         if isinstance(event, SignalEvent):
             post_event = self._events.match_pair(event)
@@ -480,8 +379,8 @@ class GDBServerStateIterator(GDBServerConnector):
             self.event_time += time.time() - self.event_start
             return self._handle_signal(event, post_event)
 
-        warn(f'Event handling for events of type {event.event_type} not implemented')
-        return None
+        self.event_time += time.time() - self.event_start
+        return self._require_replay_engine().replay_bookkeeping_event(self, event)
 
     def __iter__(self):
         return self

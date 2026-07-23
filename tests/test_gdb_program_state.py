@@ -19,9 +19,12 @@ from focaccia.deterministic import (
     UnknownMemoryRangeError,
 )
 from focaccia.qemu.concurrency import UnsupportedConcurrencyError
+from focaccia.qemu.replay import X86ReplayEngine
+from focaccia.qemu.syscall import UnsupportedReplayEffect
 from focaccia.snapshot import (
     MemoryAccessError,
     ProgramState,
+    ReadableProgramState,
     RegisterAccessError,
 )
 
@@ -149,9 +152,10 @@ def test_thread_creating_syscall_is_rejected_before_gdb_step(monkeypatch):
         def __init__(self):
             self.current_state_calls = 0
             self.step_calls = 0
+            self.replay = X86ReplayEngine(self.arch)
 
-        def _syscall_number_register(self):
-            return "rax"
+        def _require_replay_engine(self):
+            return self.replay
 
         def current_state(self):
             self.current_state_calls += 1
@@ -195,7 +199,7 @@ def test_thread_creating_syscall_is_rejected_before_gdb_step(monkeypatch):
             cast(Any, post_event),
         )
 
-    assert iterator.current_state_calls == 1
+    assert iterator.current_state_calls == 0
     assert iterator.step_calls == 0
     sys.modules.pop("focaccia.qemu.target", None)
 
@@ -237,6 +241,15 @@ def test_qemu_iterator_accepts_explicit_empty_event_log(monkeypatch):
     assert iterator._replay_tid is None
     assert iterator._events.state is CursorState.EXHAUSTED
     assert iterator._events.events == ()
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_gdb_signal_replay_rejects_unwritable_complete_fp_state(monkeypatch):
+    target = load_target_module(monkeypatch)
+
+    with pytest.raises(UnsupportedReplayEffect, match="x87 tag state"):
+        target.GDBServerConnector.reset_signal_handler_fp_state(cast(Any, object()))
+
     sys.modules.pop("focaccia.qemu.target", None)
 
 
@@ -310,11 +323,17 @@ def test_qemu_replay_rejects_unknown_holes_before_changing_target_state(monkeypa
         changed_target = False
         arch = x86.ArchX86()
 
-        def _syscall_number_register(self) -> str:
-            return "rax"
+        def __init__(self):
+            self.replay = X86ReplayEngine(self.arch)
+            self.state = ProgramState(self.arch)
+            self.state.write_register("rip", 0x1000)
+            self.state.write_register("rax", 0)
 
-        def current_state(self) -> object:
-            return object()
+        def _require_replay_engine(self):
+            return self.replay
+
+        def current_state(self) -> ReadableProgramState:
+            return self.state
 
         def skip(self, _new_pc: int) -> None:
             self.changed_target = True

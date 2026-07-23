@@ -344,11 +344,14 @@
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/concurrency.py"
         "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/replay.py"
         "src/focaccia/qemu/snapshot.py"
         "src/focaccia/qemu/state.py"
+        "src/focaccia/qemu/syscall.py"
         "src/focaccia/qemu/target.py"
         "src/focaccia/qemu/transport.py"
         "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/qemu/x86.py"
         "src/focaccia/reproducer.py"
         "src/focaccia/rr"
         "src/focaccia/snapshot.py"
@@ -1007,6 +1010,100 @@
       ];
     };
 
+    x86SyscallEffectPoliciesCheck = mkStaticUnitCheck {
+      name = "x86-syscall-effect-policies";
+      ruffTargets = [
+        "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "policy or nested_output or opened_descriptor or rr_extra_effects"
+      ];
+    };
+
+    x86ReplayFailClosedCheck = mkStaticUnitCheck {
+      name = "x86-replay-fail-closed";
+      ruffTargets = [
+        "src/focaccia/qemu/concurrency.py"
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_replay.py"
+        "-k"
+        "unknown_syscall or unsafe_ioctl or thread_creating or unknown_holes or file_backed_mmap or unclassified_rr_event or unexpected_recorded_writes or unwritable_complete_fp_state"
+      ];
+    };
+
+    x86NestedOutputReplayCheck = mkStaticUnitCheck {
+      name = "x86-nested-output-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "read_translates_output or readv_nested or iovec_result"
+      ];
+    };
+
+    x86SignalFrameAbiCheck = mkStaticUnitCheck {
+      name = "x86-signal-frame-abi";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_signal_replay.py"
+        "-k"
+        "uapi_offset or recorded_signal_frame or variable_xstate or signal_delivery or malformed_fpstate or frame_context or sigaction"
+      ];
+    };
+
+    x86SignalReturnCheck = mkStaticUnitCheck {
+      name = "x86-signal-return";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_signal_replay.py"
+        "-k"
+        "sigreturn"
+      ];
+    };
+
+    replayEffectCoverageCheck = mkStaticUnitCheck {
+      name = "replay-effect-coverage";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "coverage or safe_passthrough or terminal_exit"
+      ];
+    };
+
     schedulerQuarantineCheck = mkStaticUnitCheck {
       name = "scheduler-quarantine";
       ruffTargets = [
@@ -1501,6 +1598,12 @@
       rr-task-event-variants = rrTaskEventVariantsCheck;
       deterministic-event-cursor = deterministicEventCursorCheck;
       deterministic-mapping-cursor = deterministicMappingCursorCheck;
+      x86-syscall-effect-policies = x86SyscallEffectPoliciesCheck;
+      x86-replay-fail-closed = x86ReplayFailClosedCheck;
+      x86-nested-output-replay = x86NestedOutputReplayCheck;
+      x86-signal-frame-abi = x86SignalFrameAbiCheck;
+      x86-signal-return = x86SignalReturnCheck;
+      replay-effect-coverage = replayEffectCoverageCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;

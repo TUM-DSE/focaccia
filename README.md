@@ -79,7 +79,22 @@ Note: `rr record` may fail on Zen and Zen+ AMD CPUs. It is generally possible to
 by specifying flag `-F` but keep in mind that replaying may fail unexpectedly sometimes on such
 CPUs.
 
-Note: we currently do not support validating such programs on QEMU.
+The project now has a fixture-backed, fail-closed **x86-64 single-thread replay
+engine** for this workflow. Every encountered syscall/RR effect is classified as
+recorded replay, execute-and-reconcile, narrowly safe passthrough, or rejection;
+an unclassified call is never executed on the live host. The unit support
+includes direct and `iovec` outputs, virtual descriptor/signal state, anonymous
+mapping reconciliation, Linux x86-64 signal-frame validation, and a fixture
+model of `rt_sigreturn`. Variant-dependent `ioctl`, `recvmsg`/descriptor
+passing, file-backed mappings, task creation, interrupted-syscall restart, and
+unknown RR events are rejected. Live GDB signal-handler delivery also currently
+rejects before mutation because QEMU's remote stub cannot reset all x87
+FP/XSTATE required by the Linux handler-entry ABI.
+
+This is not yet an end-to-end support claim: RR→QEMU smoke/application checks
+remain opt-in and pending on a designated tracing-capable runner. AArch64 replay
+and concurrent replay remain unsupported. Use `replay_coverage_report()` on the
+GDB state iterator for the handled/rejected effect record of a run.
 
 ### Box64
 
