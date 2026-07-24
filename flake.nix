@@ -364,6 +364,19 @@
       pytestTargets = [ "tests" ];
     };
 
+    reproducerMemoryLayoutCheck = mkStaticUnitCheck {
+      name = "reproducer-memory-layout";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py"
+        "-k"
+        "memory"
+      ];
+    };
+
     registerApiMigrationCheck = mkStaticUnitCheck {
       name = "register-api-migration";
       ruffTargets = [
@@ -1556,6 +1569,7 @@
     checks = {
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
+      reproducer-memory-layout = reproducerMemoryLayoutCheck;
       register-api-migration = registerApiMigrationCheck;
       cli-imports = cliImportsCheck;
       native-read-pc = nativeReadPcCheck;
