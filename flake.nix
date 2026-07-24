@@ -377,6 +377,19 @@
       ];
     };
 
+    reproducerStateRestorationCheck = mkStaticUnitCheck {
+      name = "reproducer-state-restoration";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py"
+        "-k"
+        "state_restore or state_restoration"
+      ];
+    };
+
     registerApiMigrationCheck = mkStaticUnitCheck {
       name = "register-api-migration";
       ruffTargets = [
@@ -1570,6 +1583,7 @@
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
+      reproducer-state-restoration = reproducerStateRestorationCheck;
       register-api-migration = registerApiMigrationCheck;
       cli-imports = cliImportsCheck;
       native-read-pc = nativeReadPcCheck;
