@@ -122,6 +122,21 @@ observe guest state and validate it against a symbolic native trace.
         choices=["msgpack", "json"],
         help="Input symbolic trace format.",
     )
+    parser.add_argument(
+        "--report",
+        help="Write a versioned JSON validation and replay-coverage report.",
+    )
+    parser.add_argument(
+        "--run-manifest",
+        help="Verify this content-bound RR/QEMU run manifest before validation.",
+    )
+    parser.add_argument(
+        "--run-input",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Bind a named input file required by --run-manifest (repeatable).",
+    )
     return parser
 
 
@@ -134,8 +149,19 @@ def validate_backend_options(
             parser.error("--remote and --use-socket select different backends")
         if args.guest_arch is None:
             parser.error("--guest-arch is required with --use-socket")
+        if args.report is not None or args.run_manifest is not None or args.run_input:
+            parser.error(
+                "--report and run-manifest verification currently require the GDB backend"
+            )
     elif args.remote is None:
         parser.error("--remote is required unless --use-socket is specified")
+    if args.run_manifest is not None:
+        if args.deterministic_log is None:
+            parser.error("--run-manifest requires --deterministic-log")
+        if args.executable is None:
+            parser.error("--run-manifest requires --executable")
+    elif args.run_input:
+        parser.error("--run-input requires --run-manifest")
 
 
 def make_gdb_trace_environment(executable: str | None) -> TraceEnvironment:

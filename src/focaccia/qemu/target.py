@@ -7,6 +7,7 @@ from focaccia.deterministic import (
     EventSynchronizationError,
     SignalEvent,
     DeterministicCursor,
+    CursorState,
     SyscallEvent,
     MemoryMapping,
 )
@@ -30,7 +31,19 @@ debug = logger.debug
 info = logger.info
 
 
+def _is_synchronization_candidate(event: Event) -> bool:
+    # Pair post-events are consumed transactionally and are never synchronization
+    # candidates on their own.
+    if isinstance(event, SyscallEvent):
+        return event.syscall_state in ("entering", "enteringPtrace")
+    if isinstance(event, SignalEvent):
+        return event.signal_variant == "signal"
+    return True
+
+
 def match_event(event: Event, target: ReadableProgramState) -> bool:
+    if not _is_synchronization_candidate(event):
+        return False
     # Match just on PC. Some valid RR bookkeeping events record no registers.
     if event.pc is None:
         return False
@@ -275,10 +288,6 @@ class GDBServerStateIterator(GDBServerConnector):
         first_state = self.current_state()
         self._events = DeterministicCursor(events, match_event)
         event = self._events.synchronize(first_state)
-        if event is None and events:
-            raise RuntimeError(
-                "Unable to synchronize QEMU with the deterministic event log."
-            )
         self._replay_tid = event.tid if event is not None else None
 
         # TODO: handle AT_RANDOM correctly
@@ -290,9 +299,44 @@ class GDBServerStateIterator(GDBServerConnector):
         if event is not None:
             require_event_pc(event)
             info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+        elif events:
+            self._next_synchronization_event()
+            info(
+                f'Started at PC={hex(first_state.read_pc())} before the first '
+                'synchronizable RR event'
+            )
         else:
             info(f'Started at PC={hex(first_state.read_pc())} without an RR event log')
 
+    def _synchronize_at_state(self, state: ReadableProgramState) -> Event | None:
+        event = self._events.synchronize(state)
+        if event is not None:
+            require_event_pc(event)
+            if self._replay_tid is None:
+                self._replay_tid = event.tid
+            else:
+                require_event_thread(
+                    self._replay_tid,
+                    event.tid,
+                    context="Initial deterministic event",
+                )
+        return event
+
+    def _next_synchronization_event(self) -> Event | None:
+        if self._events.state is not CursorState.UNSYNCHRONIZED:
+            return self._events.peek()
+        for position, event in enumerate(self._events.events):
+            event_count = event.event_count or position + 1
+            if event_count in self._events.skipped_event_counts:
+                continue
+            if event.pc is not None and _is_synchronization_candidate(event):
+                return event
+        if self._events.events:
+            raise EventSynchronizationError(
+                "The deterministic log has no event with a program counter at which "
+                "QEMU can synchronize."
+            )
+        return None
 
     def _require_replay_engine(self) -> X86ReplayEngine:
         if self._replay is None:
@@ -332,16 +376,17 @@ class GDBServerStateIterator(GDBServerConnector):
         return self._require_replay_engine().replay_signal(self, event, post_event)
 
     def _handle_event(self) -> ReadableProgramState | None:
-        pending_event = self._events.peek()
-        if pending_event is not None:
-            require_event_pc(pending_event)
+        if self._events.state is CursorState.SYNCHRONIZED:
+            pending_event = self._events.peek()
+            if pending_event is not None:
+                require_event_pc(pending_event)
         event = self._events.match(self.current_state())
 
         if not event:
             return None
 
         if self._replay_tid is None:
-            raise RuntimeError("A deterministic event was found without a replay thread.")
+            self._replay_tid = event.tid
         require_event_thread(
             self._replay_tid,
             event.tid,
@@ -405,22 +450,70 @@ class GDBServerStateIterator(GDBServerConnector):
 
     def run_until(self, addr: int) -> ReadableProgramState:
         events_handled = 0
-        event = self._events.peek()
+        if self._replay is None:
+            return self._run_until_any([addr])
+
+        state = self.current_state()
+        while (
+            self._events.state is CursorState.UNSYNCHRONIZED
+            and state.read_pc() != addr
+        ):
+            if self._synchronize_at_state(state) is not None:
+                handled_state = self._handle_event()
+                events_handled += 1
+                if self.is_exited():
+                    raise RuntimeError(
+                        f'Exited before reaching start address {hex(addr)}'
+                    )
+                state = handled_state or self.current_state()
+            else:
+                try:
+                    state = self._step()
+                except StopIteration as error:
+                    raise RuntimeError(
+                        f'Exited before reaching start address {hex(addr)}'
+                    ) from error
+
+        if state.read_pc() == addr:
+            self._synchronize_at_state(state)
+            self._first_next = events_handled == 0
+            return state
+        if self._events.state is CursorState.EXHAUSTED:
+            raise EventSynchronizationError(
+                "The deterministic event log was exhausted before QEMU reached "
+                f"the trace start address {addr:#x}."
+            )
+
+        event = self._next_synchronization_event()
         while event:
             event_pc = require_event_pc(event)
-            state = self._run_until_any([addr, event_pc])
+            state = self.current_state()
+            self._synchronize_at_state(state)
             if state.read_pc() == addr:
                 # Check if we started at the very _start
                 self._first_next = events_handled == 0
                 return state
+            if state.read_pc() != event_pc:
+                state = self._run_until_any(list(dict.fromkeys((addr, event_pc))))
+                self._synchronize_at_state(state)
+                if state.read_pc() == addr:
+                    self._first_next = events_handled == 0
+                    return state
 
-            self._handle_event()
+            handled_state = self._handle_event()
             if self.is_exited():
-                raise Exception(f'Exited before reaching start address {hex(addr)}')
+                raise RuntimeError(f'Exited before reaching start address {hex(addr)}')
+            if handled_state is None and self._events.state is CursorState.UNSYNCHRONIZED:
+                raise EventSynchronizationError(
+                    f"QEMU stopped at RR event PC {event_pc:#x} but the event log "
+                    "did not synchronize."
+                )
 
-            event = self._events.peek()
+            event = self._next_synchronization_event()
             events_handled += 1
-        return self._run_until_any([addr])
+        state = self._run_until_any([addr])
+        self._synchronize_at_state(state)
+        return state
 
     def _run_until_any(self, addresses: list[int]) -> ReadableProgramState:
         info(f'Executing until {[hex(x) for x in addresses]}')

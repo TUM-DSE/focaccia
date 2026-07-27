@@ -6,6 +6,7 @@ But please use `tools/validate_qemu.py` instead because we have some more setup
 work to do.
 """
 
+import argparse
 import logging
 import os
 import time
@@ -29,12 +30,21 @@ from focaccia.tools.validate_qemu import (
     validate_backend_options,
     verbosity,
 )
+from focaccia.qemu.integration import (
+    load_replay_run_manifest,
+    validate_replay_run_manifest,
+)
+from focaccia.qemu.report import (
+    write_validation_failure_report,
+    write_validation_report,
+)
 from focaccia.qemu.snapshot import collect_minimal_snapshot, snapshot_diagnostics
 from focaccia.qemu.target import GDBServerStateIterator
 
 logger = logging.getLogger('focaccia-qemu-validator')
 debug = logger.debug
 info = logger.info
+
 
 def collect_conc_trace(
     gdb: GDBServerStateIterator,
@@ -126,7 +136,34 @@ def collect_conc_trace(
         result.pending_transform,
     )
 
-def main():
+
+def _parse_run_inputs(values: list[str]) -> dict[str, str]:
+    inputs: dict[str, str] = {}
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator or not name or not path:
+            raise ValueError(f"Invalid --run-input {value!r}; expected NAME=PATH.")
+        if name in inputs:
+            raise ValueError(f"Duplicate --run-input name {name!r}.")
+        inputs[name] = path
+    return inputs
+
+
+def _write_failure_report(
+    args: argparse.Namespace,
+    error: Exception,
+    gdb_server: GDBServerStateIterator | None,
+) -> None:
+    if args.report is None:
+        return
+    coverage = gdb_server.replay_coverage_report() if gdb_server is not None else None
+    try:
+        write_validation_failure_report(args.report, error, coverage)
+    except OSError as report_error:
+        logger.error("Unable to write validation failure report: %s", report_error)
+
+
+def main() -> None:
     argument_parser = make_argparser()
     forwarded_arguments = decode_gdb_arguments(os.environ)
     args = argument_parser.parse_args(forwarded_arguments)
@@ -135,33 +172,39 @@ def main():
     logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
     logging.basicConfig(level=logging_level, force=True)
 
-    detlog = DeterministicLog(args.deterministic_log)
-
-    gdb_server = GDBServerStateIterator(args.remote, detlog)
-
-    executable = (
-        gdb_server.binary if args.executable is None else args.executable
-    )
-    env = make_gdb_trace_environment(executable)
+    gdb_server: GDBServerStateIterator | None = None
 
     # Keep streaming trace input open until collection consumes it.
     mode = "r" if args.trace_type == "json" else "rb"
     try:
+        detlog = DeterministicLog(args.deterministic_log)
         with open(args.symb_trace, mode) as trace_file:
             if args.trace_type == "json":
                 symb_transforms = parser.parse_transformations(trace_file)
             else:
                 symb_transforms = parser.stream_transformation(trace_file)
-            matched = collect_conc_trace(gdb_server, symb_transforms)
-    except (OSError, ValueError) as error:
-        raise RuntimeError(
-            f"Failed to parse or collect the QEMU trace: {error}"
-        ) from error
 
-    # Verify and print result
-    if not args.quiet:
+            if args.run_manifest is not None:
+                manifest = load_replay_run_manifest(args.run_manifest)
+                validate_replay_run_manifest(
+                    manifest,
+                    binary_path=args.executable,
+                    input_paths=_parse_run_inputs(args.run_input),
+                    argv=manifest.argv,
+                    oracle_path=args.symb_trace,
+                    trace_environment=symb_transforms.env,
+                    deterministic_log=detlog,
+                )
+
+            gdb_server = GDBServerStateIterator(args.remote, detlog)
+            executable = (
+                gdb_server.binary if args.executable is None else args.executable
+            )
+            env = make_gdb_trace_environment(executable)
+            matched = collect_conc_trace(gdb_server, symb_transforms)
+
         validation_start = time.time()
-        report = compare_symbolic(
+        validation_report = compare_symbolic(
             matched.trace,
             diagnostics=matched.diagnostics,
         )
@@ -171,7 +214,7 @@ def main():
                 if matched.trace is not None
                 else None
             )
-            report = report.with_entry(
+            validation_report = validation_report.with_entry(
                 {
                     "pc": matched.pending_transform.addr,
                     "txl": None,
@@ -187,25 +230,35 @@ def main():
                 }
             )
         validation_time = time.time() - validation_start
-        print(f"Validation time: {validation_time}")
-        print_result(report, verbosity[args.error_level])
+        if not args.quiet:
+            print(f"Validation time: {validation_time}")
+            print_result(validation_report, verbosity[args.error_level])
+        if args.report:
+            write_validation_report(
+                args.report,
+                validation_report,
+                gdb_server.replay_coverage_report(),
+            )
 
-    if args.output:
-        from focaccia.parser import serialize_snapshots
+        if args.output:
+            from focaccia.parser import serialize_snapshots
 
-        states = (
-            matched.trace.state_boundaries
-            if matched.trace is not None
-            else ()
-        )
-        output_env = env
-        if states:
-            output_env = env.with_architecture(states[0].arch.key)
-        elif symb_transforms.env.architecture is not None:
-            output_env = env.with_architecture(symb_transforms.env.architecture)
-        with open(args.output, "w") as file:
-            serialize_snapshots(MaterializedTrace(states, output_env), file)
+            states = (
+                matched.trace.state_boundaries
+                if matched.trace is not None
+                else ()
+            )
+            output_env = env
+            if states:
+                output_env = env.with_architecture(states[0].arch.key)
+            elif symb_transforms.env.architecture is not None:
+                output_env = env.with_architecture(symb_transforms.env.architecture)
+            with open(args.output, "w") as file:
+                serialize_snapshots(MaterializedTrace(states, output_env), file)
+    except Exception as error:
+        _write_failure_report(args, error, gdb_server)
+        raise
+
 
 if __name__ == "__main__":
     main()
-

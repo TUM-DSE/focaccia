@@ -51,6 +51,57 @@ def test_plugin_backend_requires_guest_arch_and_rejects_remote():
         validate_backend_options(parser, ambiguous)
 
 
+def test_run_manifest_requires_gdb_replay_artifacts():
+    parser = make_argparser()
+    missing = parser.parse_args(
+        [
+            "--symb-trace",
+            "/tmp/trace",
+            "--remote",
+            "localhost:1234",
+            "--run-manifest",
+            "/tmp/manifest",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        validate_backend_options(parser, missing)
+
+    complete = parser.parse_args(
+        [
+            "--symb-trace",
+            "/tmp/trace",
+            "--remote",
+            "localhost:1234",
+            "--run-manifest",
+            "/tmp/manifest",
+            "--run-input",
+            "input=/tmp/input",
+            "--deterministic-log",
+            "/tmp/rr",
+            "--executable",
+            "/tmp/program",
+            "--report",
+            "/tmp/report",
+        ]
+    )
+    validate_backend_options(parser, complete)
+
+    plugin = parser.parse_args(
+        [
+            "--symb-trace",
+            "/tmp/trace",
+            "--use-socket",
+            "/tmp/plugin",
+            "--guest-arch",
+            "x86_64",
+            "--report",
+            "/tmp/report",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        validate_backend_options(parser, plugin)
+
+
 def test_gdb_argument_payload_round_trips_spaces_quotes_and_backslashes():
     arguments = [
         "--symb-trace",

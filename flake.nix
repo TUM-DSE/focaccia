@@ -236,6 +236,51 @@
       src = ./rr;
     });
 
+    validateQemuWrapper = pkgs.writeShellScriptBin "validate-qemu" ''
+      exec ${pythonEnv}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
+    '';
+
+    x86FileReadFixture =
+      if system == "x86_64-linux" then
+        pkgs.stdenv.mkDerivation {
+          pname = "focaccia-x86-file-read-fixture";
+          version = "1";
+          src = ./tests/fixtures/integration;
+
+          dontConfigure = true;
+          dontStrip = true;
+          hardeningDisable = [ "all" ];
+          nativeBuildInputs = [ pkgs.binutils ];
+
+          buildPhase = ''
+            set -euo pipefail
+            $CC -nostdlib -static -no-pie -Wl,--build-id=none \
+              -o file-read x86_64-file-read.S
+            ${pkgs.binutils}/bin/readelf -h file-read | \
+              ${pkgs.gnugrep}/bin/grep -F 'Type:' | \
+              ${pkgs.gnugrep}/bin/grep -F 'EXEC'
+            ${pkgs.binutils}/bin/readelf -h file-read | \
+              ${pkgs.gnugrep}/bin/grep -F 'Advanced Micro Devices X86-64'
+            if ${pkgs.binutils}/bin/readelf -l file-read | \
+                ${pkgs.gnugrep}/bin/grep -Fq 'INTERP'; then
+              echo 'Smoke fixture unexpectedly has an ELF interpreter' >&2
+              exit 1
+            fi
+            ${pkgs.binutils}/bin/nm file-read | \
+              ${pkgs.gnugrep}/bin/grep -F ' _focaccia_trace_start'
+            ${pkgs.binutils}/bin/nm file-read | \
+              ${pkgs.gnugrep}/bin/grep -F ' _focaccia_trace_stop'
+          '';
+
+          installPhase = ''
+            mkdir -p "$out/bin" "$out/share/focaccia-smoke"
+            cp file-read "$out/bin/file-read"
+            cp input.txt "$out/share/focaccia-smoke/input.txt"
+          '';
+        }
+      else
+        null;
+
     uvEnv = {
       UV_NO_SYNC = "1";
       UV_PYTHON = python.interpreter;
@@ -344,7 +389,9 @@
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/concurrency.py"
         "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/integration.py"
         "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/report.py"
         "src/focaccia/qemu/snapshot.py"
         "src/focaccia/qemu/state.py"
         "src/focaccia/qemu/syscall.py"
@@ -357,6 +404,7 @@
         "src/focaccia/snapshot.py"
         "src/focaccia/symbolic.py"
         "src/focaccia/tools/capture_transforms.py"
+        "src/focaccia/tools/rr_qemu_smoke.py"
         "src/focaccia/tools/validate_qemu.py"
         "src/focaccia/trace.py"
         "tests"
@@ -1130,6 +1178,52 @@
       ];
     };
 
+    qemuReplayStartSynchronizationCheck = mkStaticUnitCheck {
+      name = "qemu-replay-start-synchronization";
+      ruffTargets = [
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "start_before_first_rr_event or without_any_synchronization_pc or synchronizes_when_first_rr_event_is_reached or steps_safely or post_event_is_not or run_until_replays"
+      ];
+    };
+
+    qemuStructuredReplayReportCheck = mkStaticUnitCheck {
+      name = "qemu-structured-replay-report";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_report.py"
+      ];
+    };
+
+    rrQemuRunManifestCheck = mkStaticUnitCheck {
+      name = "rr-qemu-run-manifest";
+      ruffTargets = [
+        "src/focaccia/qemu/integration.py"
+        "tests/test_qemu_integration.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_integration.py" ];
+    };
+
+    rrQemuSmokeHarnessCheck = mkStaticUnitCheck {
+      name = "rr-qemu-smoke-harness";
+      ruffTargets = [
+        "src/focaccia/tools/rr_qemu_smoke.py"
+        "tests/test_rr_qemu_smoke.py"
+      ];
+      pytestTargets = [ "tests/test_rr_qemu_smoke.py" ];
+    };
+
     schedulerQuarantineCheck = mkStaticUnitCheck {
       name = "scheduler-quarantine";
       ruffTargets = [
@@ -1490,6 +1584,9 @@
       qemu-plugin = qemu-submodule.packages.${system}.default;
 
       default = focaccia;
+    } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+      x86-file-read-fixture = x86FileReadFixture;
+      rr-v85 = rr;
     };
 
     apps = {
@@ -1510,16 +1607,38 @@
 
       validate-qemu = {
         type = "app";
-        program = let
-          wrapper = pkgs.writeShellScriptBin "validate-qemu" ''
-            exec ${packages.focaccia}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
-          '';
-        in "${wrapper}/bin/validate-qemu";
+        program = "${validateQemuWrapper}/bin/validate-qemu";
+      };
+
+      qemu-x86_64 = {
+        type = "app";
+        program = "${packages.qemu-plugin}/bin/qemu-x86_64";
       };
 
       uv-sync = {
         type = "app";
         program = "${uvSyncWrapper}/bin/uv-sync";
+      };
+    } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+      rr-v85 = {
+        type = "app";
+        program = "${rr}/bin/rr";
+      };
+
+      rr-qemu-smoke = {
+        type = "app";
+        program = let
+          wrapper = pkgs.writeShellScriptBin "rr-qemu-smoke" ''
+            export FOCACCIA_RR=${rr}/bin/rr
+            export FOCACCIA_QEMU_X86_64=${packages.qemu-plugin}/bin/qemu-x86_64
+            export FOCACCIA_CAPTURE_TRANSFORMS=${packages.focaccia}/bin/capture-transforms
+            export FOCACCIA_VALIDATE_QEMU=${validateQemuWrapper}/bin/validate-qemu
+            export FOCACCIA_NM=${pkgs.binutils}/bin/nm
+            export FOCACCIA_SMOKE_BINARY=${x86FileReadFixture}/bin/file-read
+            export FOCACCIA_SMOKE_INPUT=${x86FileReadFixture}/share/focaccia-smoke/input.txt
+            exec ${packages.focaccia}/bin/rr-qemu-smoke "$@"
+          '';
+        in "${wrapper}/bin/rr-qemu-smoke";
       };
     };
 
@@ -1632,6 +1751,10 @@
       x86-signal-frame-abi = x86SignalFrameAbiCheck;
       x86-signal-return = x86SignalReturnCheck;
       replay-effect-coverage = replayEffectCoverageCheck;
+      qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
+      qemu-structured-replay-report = qemuStructuredReplayReportCheck;
+      rr-qemu-run-manifest = rrQemuRunManifestCheck;
+      rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
@@ -1655,6 +1778,8 @@
       fix-029-explicit-trace-gaps = fix029ExplicitTraceGapsCheck;
       fix-062-target-environment-symbols = fix062TargetEnvironmentSymbolsCheck;
       fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
+    } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+      rr-qemu-file-read-fixture = x86FileReadFixture;
     };
   });
 }

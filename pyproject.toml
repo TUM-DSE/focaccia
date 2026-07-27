@@ -39,6 +39,7 @@ focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
 validate-qemu = "focaccia.tools.validate_qemu:main"
 capture-transforms = "focaccia.tools.capture_transforms:main"
+rr-qemu-smoke = "focaccia.tools.rr_qemu_smoke:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -21,9 +21,9 @@ A number of additional tools are included to simplify use when validating QEMU:
 `capture-transforms`, `convert-log`, `validate-qemu`, `validation_server`. They enable the following workflow.
 
 ```bash
-capture-transforms -o oracle.trace bug.out
-qemu-x86_64 -g 12345 bug.out &
-validate-qemu --symb-trace oracle.trace --remote localhost:12345
+nix run .#capture-transforms -- -o oracle.trace ./bug.out
+nix run .#qemu-x86_64 -- -g 12345 ./bug.out &
+nix run .#validate-qemu -- --symb-trace oracle.trace --remote localhost:12345
 ```
 
 The above workflow works for reproducing most QEMU bugs but cannot handle the following two cases:
@@ -32,8 +32,9 @@ The above workflow works for reproducing most QEMU bugs but cannot handle the fo
 
 2. Bugs in non-deterministic programs
 
-We provide alternative approaches for dealing with optimization bugs. Focaccia currently does not
-handle bugs in non-deterministic programs.
+We provide alternative approaches for optimization bugs and a bounded, fail-closed x86-64 replay
+path for selected RR-recorded effects. That replay path is narrower than general non-deterministic
+program support.
 
 Concurrent validation is not supported. The historical scheduler source is preserved under
 `focaccia.experimental` for possible redesign, but it has no CLI or flake entry point and is not part
@@ -48,7 +49,7 @@ the Nix flake.
 It is used as follows:
 
 ```bash
-validate-qemu --symb-trace oracle.trace --use-socket=/tmp/focaccia.sock --guest_arch=arch
+nix run .#validate-qemu -- --symb-trace oracle.trace --use-socket=/tmp/focaccia.sock --guest-arch=arch
 ```
 
 Once the server prints `Listening for QEMU Plugin connection at /tmp/focaccia.sock...`, QEMU can be
@@ -67,9 +68,11 @@ Focaccia includes support for tracing non-deterministic programs using the RR de
 similar workflow:
 
 ```bash
-rr record -o bug.rr.out
-rr replay -s 12345 bug.rr.out
-capture-transforms --remote localhost:12345 --deterministic-log bug.rr.out -o oracle.trace bug.out
+nix run .#rr-v85 -- record -n -o bug.rr.out ./bug.out
+nix run .#rr-v85 -- replay -s 12345 bug.rr.out
+nix run .#capture-transforms -- \
+  --remote localhost:12345 --deterministic-log bug.rr.out \
+  -o oracle.trace ./bug.out
 ```
 
 Note: the `rr replay` call prints the correct binary name to use when invoking `capture-transforms`,
@@ -91,10 +94,29 @@ unknown RR events are rejected. Live GDB signal-handler delivery also currently
 rejects before mutation because QEMU's remote stub cannot reset all x87
 FP/XSTATE required by the Linux handler-entry ABI.
 
-This is not yet an end-to-end support claim: RR→QEMU smoke/application checks
-remain opt-in and pending on a designated tracing-capable runner. AArch64 replay
-and concurrent replay remain unsupported. Use `replay_coverage_report()` on the
-GDB state iterator for the handled/rejected effect record of a run.
+The flake now exposes pinned `rr-v85` and `qemu-x86_64` apps plus an x86-64-only
+bounded smoke harness for a static, non-PIE, single-thread `openat`/`read`/`write`/
+`close` fixture. Inspect its exact plan without launching a target:
+
+```bash
+nix run .#rr-qemu-smoke -- \
+  --run-directory "$PWD/focaccia-smoke" --dry-run
+```
+
+On a separately approved native x86-64 tracing runner, omit `--dry-run` to run
+the bounded workflow. The output directory retains the exact command plan,
+RR trace, symbolic oracle, content-bound run manifest, logs, structured
+validation/replay-coverage report, and final result. Existing directories are
+never overwritten. `validate-qemu --report FILE` also persists structured
+coverage for a manual GDB validation; `--run-manifest` plus repeated
+`--run-input NAME=PATH` verifies producer/consumer identities before connecting
+to QEMU.
+
+This harness has not yet been executed as an authoritative project check, so it
+is not an end-to-end support claim. Its x86 fixture build check and the live
+smoke run remain pending on the designated native x86-64 runner. AArch64 replay,
+live signal-handler delivery, concurrent replay, and general application replay
+remain unsupported.
 
 ### Box64
 

@@ -244,6 +244,188 @@ def test_qemu_iterator_accepts_explicit_empty_event_log(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
+def test_qemu_iterator_can_start_before_first_rr_event(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    event = Event(0x2000, 7, arch, {"rip": 0x2000}, (), "sched", 1)
+
+    class FakeLog:
+        def events(self) -> tuple[Event, ...]:
+            return (event,)
+
+    class State:
+        def read_pc(self) -> int:
+            return 0x1000
+
+    def initialize(connector, _remote: str) -> None:
+        connector.arch = arch
+
+    monkeypatch.setattr(target.GDBServerConnector, "__init__", initialize)
+    monkeypatch.setattr(
+        target.GDBServerStateIterator,
+        "current_state",
+        lambda _self: State(),
+    )
+
+    iterator = target.GDBServerStateIterator("unused", cast(Any, FakeLog()))
+
+    assert iterator._events.state is CursorState.UNSYNCHRONIZED
+    assert iterator._replay_tid is None
+    assert iterator._next_synchronization_event() is event
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_iterator_rejects_a_log_without_any_synchronization_pc(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    event = Event(None, 7, arch, {}, (), "sched", 1)
+
+    class FakeLog:
+        def events(self) -> tuple[Event, ...]:
+            return (event,)
+
+    class State:
+        def read_pc(self) -> int:
+            return 0x1000
+
+    def initialize(connector, _remote: str) -> None:
+        connector.arch = arch
+
+    monkeypatch.setattr(target.GDBServerConnector, "__init__", initialize)
+    monkeypatch.setattr(
+        target.GDBServerStateIterator,
+        "current_state",
+        lambda _self: State(),
+    )
+
+    with pytest.raises(EventSynchronizationError, match="no event with a program counter"):
+        target.GDBServerStateIterator("unused", cast(Any, FakeLog()))
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_qemu_event_loop_synchronizes_when_first_rr_event_is_reached(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    event = Event(0x2000, 7, arch, {"rip": 0x2000}, (), "sched", 1)
+    state = ProgramState(arch)
+    state.write_register("rip", 0x2000)
+
+    guest_arch = arch
+
+    class FakeIterator:
+        _events = DeterministicCursor((event,), target.match_event)
+        _replay_tid = None
+        event_start = 0.0
+        event_time = 0.0
+        replay = X86ReplayEngine(guest_arch)
+        arch = guest_arch
+
+        def current_state(self) -> ReadableProgramState:
+            return state
+
+        def _require_replay_engine(self) -> X86ReplayEngine:
+            return self.replay
+
+    iterator = FakeIterator()
+
+    assert target.GDBServerStateIterator._handle_event(cast(Any, iterator)) is None
+    assert iterator._replay_tid == 7
+    assert iterator._events.state is CursorState.EXHAUSTED
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_run_until_steps_safely_until_the_first_rr_synchronization(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    event = Event(0x3000, 7, arch, {"rip": 0x3000}, (), "sched", 1)
+    initial = ProgramState(arch)
+    initial.write_register("rip", 0x2000)
+    destination = ProgramState(arch)
+    destination.write_register("rip", 0x3000)
+    iterator = object.__new__(target.GDBServerStateIterator)
+    iterator._events = DeterministicCursor((event,), target.match_event)
+    iterator._replay_tid = None
+    iterator._replay = X86ReplayEngine(arch)
+    iterator._first_next = True
+    iterator.event_start = 0.0
+    iterator.event_time = 0.0
+    iterator.arch = arch
+    iterator.current_state = lambda: initial
+    iterator.is_exited = lambda: False
+    steps: list[int] = []
+
+    def step() -> ReadableProgramState:
+        steps.append(1)
+        return destination
+
+    iterator._step = step
+    iterator._run_until_any = lambda _addresses: (_ for _ in ()).throw(
+        AssertionError("Unsynchronized replay must not continue past event PCs.")
+    )
+
+    assert iterator.run_until(0x3000) is destination
+    assert iterator._events.state is CursorState.SYNCHRONIZED
+    assert iterator._replay_tid == 7
+    assert steps == [1]
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_rr_post_event_is_not_an_initial_synchronization_candidate(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    state = ProgramState(arch)
+    state.write_register("rip", 0x2000)
+    post_event = SyscallEvent(
+        0x2000,
+        7,
+        arch,
+        {"rip": 0x2000, "rax": 0},
+        (),
+        arch,
+        0,
+        "exiting",
+        False,
+        event_count=1,
+    )
+
+    assert not target.match_event(post_event, state)
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    event = Event(0x2000, 7, arch, {"rip": 0x2000}, (), "sched", 1)
+    start_event = Event(0x3000, 7, arch, {"rip": 0x3000}, (), "sched", 2)
+    initial = ProgramState(arch)
+    initial.write_register("rip", 0x2000)
+    destination = ProgramState(arch)
+    destination.write_register("rip", 0x3000)
+    iterator = object.__new__(target.GDBServerStateIterator)
+    iterator._events = DeterministicCursor((event, start_event), target.match_event)
+    iterator._replay_tid = None
+    iterator._replay = X86ReplayEngine(arch)
+    iterator._first_next = True
+    iterator.event_start = 0.0
+    iterator.event_time = 0.0
+    iterator.arch = arch
+    stops: list[list[int]] = []
+    iterator.current_state = lambda: initial
+    iterator.is_exited = lambda: False
+
+    def run_until_any(addresses: list[int]) -> ReadableProgramState:
+        stops.append(addresses)
+        return destination
+
+    iterator._run_until_any = run_until_any
+
+    assert iterator.run_until(0x3000) is destination
+    assert iterator._events.state is CursorState.SYNCHRONIZED
+    assert iterator._replay_tid == 7
+    assert stops == [[0x3000]]
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
 def test_gdb_signal_replay_rejects_unwritable_complete_fp_state(monkeypatch):
     target = load_target_module(monkeypatch)
 
