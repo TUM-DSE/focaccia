@@ -94,9 +94,11 @@ unknown RR events are rejected. Live GDB signal-handler delivery also currently
 rejects before mutation because QEMU's remote stub cannot reset all x87
 FP/XSTATE required by the Linux handler-entry ABI.
 
-The flake now exposes pinned `rr-v85` and `qemu-x86_64` apps plus an x86-64-only
-bounded smoke harness for a static, non-PIE, single-thread `openat`/`read`/`write`/
-`close` fixture. Inspect its exact plan without launching a target:
+The flake exposes the pinned `rr-v85` app on both x86-64 and AArch64. Native
+AArch64 recording requires an RR-supported microarchitecture such as Arm
+Neoverse. The `qemu-x86_64` app and the bounded smoke harness use a static,
+non-PIE, single-thread x86-64 `openat`/`read`/`write`/`close` fixture. Inspect
+that harness's exact plan without launching a target:
 
 ```bash
 nix run .#rr-qemu-smoke -- \
@@ -114,9 +116,10 @@ to QEMU.
 
 This harness has not yet been executed as an authoritative project check, so it
 is not an end-to-end support claim. Its x86 fixture build check and the live
-smoke run remain pending on the designated native x86-64 runner. AArch64 replay,
-live signal-handler delivery, concurrent replay, and general application replay
-remain unsupported.
+smoke run remain pending on the designated native x86-64 runner. Native
+AArch64 RR record/replay is exposed for oracle capture, but AArch64 QEMU-side
+deterministic effect replay is not yet implemented. Live signal-handler
+delivery, concurrent replay, and general application replay remain unsupported.
 
 ### Box64
 

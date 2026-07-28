@@ -1569,6 +1569,14 @@
       pytestTargets = [ "tests/test_environment_symbols.py" ];
     };
 
+    aarch64NativeRrToolCheck = pkgs.runCommand "fix-027-aarch64-native-rr-tool" {
+      nativeBuildInputs = [ rr pkgs.gnugrep ];
+    } ''
+      mkdir -p "$out"
+      rr --version | tee "$out/version.txt"
+      grep -F 'rr version' "$out/version.txt"
+    '';
+
   in rec {
     packages = rec {
       focaccia = pythonEnv.overrideAttrs (old: {
@@ -1583,10 +1591,11 @@
 
       qemu-plugin = qemu-submodule.packages.${system}.default;
 
+      rr-v85 = rr;
+
       default = focaccia;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       x86-file-read-fixture = x86FileReadFixture;
-      rr-v85 = rr;
     };
 
     apps = {
@@ -1615,16 +1624,16 @@
         program = "${packages.qemu-plugin}/bin/qemu-x86_64";
       };
 
-      uv-sync = {
-        type = "app";
-        program = "${uvSyncWrapper}/bin/uv-sync";
-      };
-    } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-v85 = {
         type = "app";
         program = "${rr}/bin/rr";
       };
 
+      uv-sync = {
+        type = "app";
+        program = "${uvSyncWrapper}/bin/uv-sync";
+      };
+    } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-qemu-smoke = {
         type = "app";
         program = let
@@ -1780,6 +1789,8 @@
       fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-qemu-file-read-fixture = x86FileReadFixture;
+    } // pkgs.lib.optionalAttrs (system == "aarch64-linux") {
+      fix-027-aarch64-native-rr-tool = aarch64NativeRrToolCheck;
     };
   });
 }
