@@ -68,8 +68,8 @@ Focaccia includes support for tracing non-deterministic programs using the RR de
 similar workflow:
 
 ```bash
-nix run .#rr-v85 -- record -n -o bug.rr.out ./bug.out
-nix run .#rr-v85 -- replay -s 12345 bug.rr.out
+nix run .#rr -- record -n -o bug.rr.out ./bug.out
+nix run .#rr -- replay -s 12345 bug.rr.out
 nix run .#capture-transforms -- \
   --remote localhost:12345 --deterministic-log bug.rr.out \
   -o oracle.trace ./bug.out
@@ -94,7 +94,7 @@ unknown RR events are rejected. Live GDB signal-handler delivery also currently
 rejects before mutation because QEMU's remote stub cannot reset all x87
 FP/XSTATE required by the Linux handler-entry ABI.
 
-The flake exposes the pinned `rr-v85` app on both x86-64 and AArch64. Native
+The flake exposes the pinned `rr` app on both x86-64 and AArch64. Native
 AArch64 recording requires an RR-supported microarchitecture such as Arm
 Neoverse. The `qemu-x86_64` app and the bounded smoke harness use a static,
 non-PIE, single-thread x86-64 `openat`/`read`/`write`/`close` fixture. Inspect

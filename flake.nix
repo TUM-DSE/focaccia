@@ -230,7 +230,7 @@
 
     gdbInternal = pkgs.gdb.override { python3 = python; };
 
-    rr = pkgs.rr.overrideAttrs (old: {
+    rrTool = pkgs.rr.overrideAttrs (old: {
       pname = "focaccia-rr";
       version = "git";
       src = ./rr;
@@ -1570,7 +1570,7 @@
     };
 
     aarch64NativeRrToolCheck = pkgs.runCommand "fix-027-aarch64-native-rr-tool" {
-      nativeBuildInputs = [ rr pkgs.gnugrep ];
+      nativeBuildInputs = [ rrTool pkgs.gnugrep ];
     } ''
       mkdir -p "$out"
       rr --version | tee "$out/version.txt"
@@ -1591,7 +1591,7 @@
 
       qemu-plugin = qemu-submodule.packages.${system}.default;
 
-      rr-v85 = rr;
+      rr = rrTool;
 
       default = focaccia;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
@@ -1624,9 +1624,9 @@
         program = "${packages.qemu-plugin}/bin/qemu-x86_64";
       };
 
-      rr-v85 = {
+      rr = {
         type = "app";
-        program = "${rr}/bin/rr";
+        program = "${rrTool}/bin/rr";
       };
 
       uv-sync = {
@@ -1638,7 +1638,7 @@
         type = "app";
         program = let
           wrapper = pkgs.writeShellScriptBin "rr-qemu-smoke" ''
-            export FOCACCIA_RR=${rr}/bin/rr
+            export FOCACCIA_RR=${rrTool}/bin/rr
             export FOCACCIA_QEMU_X86_64=${packages.qemu-plugin}/bin/qemu-x86_64
             export FOCACCIA_CAPTURE_TRANSFORMS=${packages.focaccia}/bin/capture-transforms
             export FOCACCIA_VALIDATE_QEMU=${validateQemuWrapper}/bin/validate-qemu
@@ -1683,13 +1683,13 @@
 
       musl-extra = mkMuslShell {
         name = "focaccia-musl-extra";
-        extraPackages = [ rr pkgs.capnproto ];
+        extraPackages = [ rrTool pkgs.capnproto ];
       };
 
       musl-all = mkMuslShell {
         name = "focaccia-musl-all";
         extraPackages = [
-          rr
+          rrTool
           pkgs.capnproto
           musl-pkgs.cmake
           musl-pkgs.stdenv
