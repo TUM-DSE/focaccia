@@ -144,4 +144,4 @@ def test_syscall_replay_policy_lives_in_qemu_backend():
         assert not hasattr(arch, "get_pasthru_syscalls")
         assert not hasattr(arch, "get_syscall_reg")
 
-    assert syscall_number_registers == {"x86_64": "rax"}
+    assert syscall_number_registers == {"x86_64": "rax", "aarch64": "x8"}

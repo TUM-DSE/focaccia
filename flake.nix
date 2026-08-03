@@ -387,6 +387,7 @@
         "src/focaccia/parser.py"
         "src/focaccia/persistence.py"
         "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/aarch64.py"
         "src/focaccia/qemu/concurrency.py"
         "src/focaccia/qemu/deterministic.py"
         "src/focaccia/qemu/integration.py"
@@ -1569,6 +1570,18 @@
       pytestTargets = [ "tests/test_environment_symbols.py" ];
     };
 
+    fix027Aarch64DeterministicReplayCheck = mkStaticUnitCheck {
+      name = "fix-027-aarch64-deterministic-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/aarch64.py"
+        "src/focaccia/qemu/deterministic.py"
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_aarch64_replay.py"
+      ];
+      pytestTargets = [ "tests/test_aarch64_replay.py" ];
+    };
+
     aarch64NativeRrToolCheck = pkgs.runCommand "fix-027-aarch64-native-rr-tool" {
       nativeBuildInputs = [ rrTool pkgs.gnugrep ];
     } ''
@@ -1787,6 +1800,7 @@
       fix-029-explicit-trace-gaps = fix029ExplicitTraceGapsCheck;
       fix-062-target-environment-symbols = fix062TargetEnvironmentSymbolsCheck;
       fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
+      fix-027-aarch64-deterministic-replay = fix027Aarch64DeterministicReplayCheck;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-qemu-file-read-fixture = x86FileReadFixture;
     } // pkgs.lib.optionalAttrs (system == "aarch64-linux") {

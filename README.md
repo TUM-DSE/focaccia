@@ -82,17 +82,19 @@ Note: `rr record` may fail on Zen and Zen+ AMD CPUs. It is generally possible to
 by specifying flag `-F` but keep in mind that replaying may fail unexpectedly sometimes on such
 CPUs.
 
-The project now has a fixture-backed, fail-closed **x86-64 single-thread replay
-engine** for this workflow. Every encountered syscall/RR effect is classified as
-recorded replay, execute-and-reconcile, narrowly safe passthrough, or rejection;
-an unclassified call is never executed on the live host. The unit support
-includes direct and `iovec` outputs, virtual descriptor/signal state, anonymous
-mapping reconciliation, Linux x86-64 signal-frame validation, and a fixture
-model of `rt_sigreturn`. Variant-dependent `ioctl`, `recvmsg`/descriptor
-passing, file-backed mappings, task creation, interrupted-syscall restart, and
-unknown RR events are rejected. Live GDB signal-handler delivery also currently
-rejects before mutation because QEMU's remote stub cannot reset all x87
-FP/XSTATE required by the Linux handler-entry ABI.
+The project now has fixture-backed, fail-closed **x86-64 and AArch64
+single-thread replay engines** for this workflow. Every encountered syscall/RR
+effect is classified as recorded replay, execute-and-reconcile, narrowly safe
+passthrough, or rejection; an unclassified call is never executed on the live
+host. Both engines cover bounded direct and `iovec` outputs, virtual
+descriptors, common file/socket effects, anonymous mapping reconciliation, and
+terminal calls. The x86-64 engine additionally validates Linux signal frames
+and has a fixture model of `rt_sigreturn`. AArch64 signal delivery/return,
+variant-dependent `ioctl`, nested `recvmsg`/descriptor passing, file-backed
+mappings, task creation, interrupted-syscall restart, and unknown RR events are
+rejected. Live x86-64 GDB signal-handler delivery also rejects before mutation
+because QEMU's remote stub cannot reset all x87 FP/XSTATE required by the Linux
+handler-entry ABI.
 
 The flake exposes the pinned `rr` app on both x86-64 and AArch64. Native
 AArch64 recording requires an RR-supported microarchitecture such as Arm
@@ -117,9 +119,11 @@ to QEMU.
 This harness has not yet been executed as an authoritative project check, so it
 is not an end-to-end support claim. Its x86 fixture build check and the live
 smoke run remain pending on the designated native x86-64 runner. Native
-AArch64 RR record/replay is exposed for oracle capture, but AArch64 QEMU-side
-deterministic effect replay is not yet implemented. Live signal-handler
-delivery, concurrent replay, and general application replay remain unsupported.
+AArch64 RR record/replay is exposed for oracle capture, and its QEMU-side
+syscall replay baseline is covered by synthetic RR/fake-target checks. No live
+AArch64 RR-to-QEMU run has passed, so this is not an end-to-end AArch64 support
+claim. AArch64 signal delivery/return, live signal-handler delivery, concurrent
+replay, and general application replay remain unsupported.
 
 ### Box64
 

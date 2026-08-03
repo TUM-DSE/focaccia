@@ -529,7 +529,7 @@ class DirectMemoryOutputs:
 
 @dataclass(frozen=True, slots=True)
 class IovecResultOutputs:
-    """Replay a result byte stream through a target x86-64 iovec array."""
+    """Replay a result byte stream through a target 64-bit Linux iovec array."""
 
     iovec_register: str = "rsi"
     count_register: str = "rdx"
@@ -619,7 +619,7 @@ def _validate_target_effects(effects: Sequence[MemoryReplayEffect]) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SyscallPolicy:
-    """Complete policy for one x86-64 system-call number."""
+    """Complete policy for one architecture-specific system-call number."""
 
     number: int
     name: str

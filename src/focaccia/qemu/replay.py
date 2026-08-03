@@ -1,7 +1,9 @@
-"""Fail-closed x86-64 deterministic replay engine.
+"""Fail-closed, architecture-dispatched deterministic replay engines.
 
-This module contains no GDB dependency. Tests drive it through an in-memory
-fake target; ``qemu.target`` supplies the thin debugger adapter.
+This module contains no GDB dependency. Tests drive it through in-memory fake
+targets; ``qemu.target`` supplies the thin debugger adapter. x86-64 includes
+fixture-backed signal handling, while the bounded AArch64 baseline explicitly
+rejects signal delivery and return before target mutation.
 """
 
 from __future__ import annotations
@@ -48,9 +50,20 @@ from focaccia.qemu.syscall import (
     TerminationReplayEffect,
     UnsupportedReplayEffect,
 )
+from focaccia.qemu.aarch64 import (
+    EXIT_GROUP_SYSCALL as AARCH64_EXIT_GROUP_SYSCALL,
+    PC_REGISTER as AARCH64_PC_REGISTER,
+    RESULT_REGISTER as AARCH64_RESULT_REGISTER,
+    SYSCALL_ARGUMENT_REGISTERS as AARCH64_SYSCALL_ARGUMENT_REGISTERS,
+    SYSCALL_EXECUTION_BOUNDARY_REGISTERS as AARCH64_EXECUTION_BOUNDARY_REGISTERS,
+    SYSCALL_NUMBER_REGISTER as AARCH64_SYSCALL_NUMBER_REGISTER,
+    SYSCALL_RECORDED_RESULT_REGISTERS as AARCH64_RECORDED_RESULT_REGISTERS,
+    THREAD_CREATING_SYSCALLS as AARCH64_THREAD_CREATING_SYSCALLS,
+)
 from focaccia.qemu.x86 import (
-    SYSCALL_NUMBER_REGISTER,
-    SYSCALL_RECORDED_RESULT_REGISTERS,
+    SYSCALL_ARGUMENT_REGISTERS as X86_64_SYSCALL_ARGUMENT_REGISTERS,
+    SYSCALL_NUMBER_REGISTER as X86_64_SYSCALL_NUMBER_REGISTER,
+    SYSCALL_RECORDED_RESULT_REGISTERS as X86_64_RECORDED_RESULT_REGISTERS,
     X86KernelSigaction,
     X86RecordedSignalFrame,
 )
@@ -86,8 +99,8 @@ _SIG_SETMASK = 2
 _BLOCKABLE_SIGNAL_MASK = ((1 << 64) - 1) & ~((1 << (9 - 1)) | (1 << (19 - 1)))
 
 
-class X86ReplayTarget(Protocol):
-    """Mutation/execution boundary needed by ``X86ReplayEngine``."""
+class ReplayTarget(Protocol):
+    """Mutation/execution boundary needed by a deterministic replay engine."""
 
     @property
     def arch(self) -> Arch: ...
@@ -105,6 +118,10 @@ class X86ReplayTarget(Protocol):
     def execute_replay_instruction(self) -> ReadableProgramState | None: ...
 
     def is_exited(self) -> bool: ...
+
+
+# Compatibility name retained for existing type annotations and callers.
+X86ReplayTarget = ReplayTarget
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +177,16 @@ class X86ReplayState:
 
 
 class X86ReplayEngine:
-    """Classify and apply deterministic actions without live-host fallback."""
+    """Classify and apply deterministic x86-64 actions without live-host fallback."""
+
+    syscall_number_register = X86_64_SYSCALL_NUMBER_REGISTER
+    syscall_argument_registers = X86_64_SYSCALL_ARGUMENT_REGISTERS
+    recorded_result_registers = X86_64_RECORDED_RESULT_REGISTERS
+    execution_boundary_registers = ("rcx", "r11")
+    result_register = "rax"
+    pc_register = "rip"
+    thread_creating_syscalls = _THREAD_CREATING_SYSCALLS
+    exit_group_syscall = 231
 
     def __init__(self, arch: Arch):
         if arch.archname != "x86_64" or arch.endianness != "little":
@@ -168,7 +194,7 @@ class X86ReplayEngine:
                 f"Deterministic replay is unsupported for {arch.serialized_name}."
             )
         self.arch = arch
-        self.policies = syscall_policies["x86_64"]
+        self.policies = syscall_policies[arch.archname]
         self.state = X86ReplayState()
         self.coverage = ReplayCoverage()
 
@@ -200,8 +226,9 @@ class X86ReplayEngine:
             raise
         if policy is None:
             message = (
-                f"Unclassified x86-64 system call {event.syscall_number} at RR event "
-                f"{event.event_count}; deterministic replay refuses live execution."
+                f"Unclassified {self.arch.serialized_name} system call "
+                f"{event.syscall_number} at RR event {event.event_count}; "
+                "deterministic replay refuses live execution."
             )
             self.coverage.record(
                 event_count=event.event_count,
@@ -223,7 +250,7 @@ class X86ReplayEngine:
                 outcome=CoverageOutcome.REJECTED,
                 detail=policy.reject_reason,
             )
-            if policy.number in _THREAD_CREATING_SYSCALLS:
+            if policy.number in self.thread_creating_syscalls:
                 reject_thread_creating_effect(policy.name)
             raise UnsupportedReplayEffect(
                 f"System call {policy.name} ({policy.number}) is rejected: "
@@ -316,7 +343,7 @@ class X86ReplayEngine:
                     f"rt_sigreturn RSP is {actual_rsp:#x}, expected {expected_rsp:#x}."
                 )
         writes = self._materialize_writes(post_event)
-        result = _signed_u64(self._event_register(post_event, "rax"))
+        result = _signed_u64(self._event_register(post_event, self.result_register))
         context = SyscallReplayContext(pre_event, post_event, target_state, result)
         memory_effects = policy.outputs.plan(context, writes)
         self._check_execution_guard(policy, context)
@@ -351,7 +378,12 @@ class X86ReplayEngine:
                 self._apply_recorded_effects(
                     target,
                     post_event,
-                    (RegisterReplayEffect("rax", self._event_register(post_event, "rax")),),
+                    (
+                        RegisterReplayEffect(
+                            self.result_register,
+                            self._event_register(post_event, self.result_register),
+                        ),
+                    ),
                     memory_effects,
                     set_pc=False,
                 )
@@ -617,7 +649,7 @@ class X86ReplayEngine:
             raise ReplayEventError(
                 f"System call expects PC {event.pc:#x}, target has " f"{target_state.read_pc():#x}."
             )
-        observed_number = target_state.read_register(SYSCALL_NUMBER_REGISTER)
+        observed_number = target_state.read_register(self.syscall_number_register)
         if observed_number != event.syscall_number:
             raise ReplayEventError(
                 f"RR records system call {event.syscall_number}, target requests "
@@ -654,8 +686,10 @@ class X86ReplayEngine:
             )
         if post_event.pc is None:
             raise ReplayEventError("System-call post-event has no PC.")
-        if self._event_register(post_event, "rip") != post_event.pc:
-            raise ReplayEventError("System-call post-event RIP differs from its PC.")
+        if self._event_register(post_event, self.pc_register) != post_event.pc:
+            raise ReplayEventError(
+                f"System-call post-event {self.pc_register.upper()} differs from its PC."
+            )
 
     @staticmethod
     def _materialize_writes(event: Event) -> tuple[MaterializedMemoryWrite, ...]:
@@ -682,7 +716,7 @@ class X86ReplayEngine:
     ) -> tuple[RegisterReplayEffect, ...]:
         return tuple(
             RegisterReplayEffect(register, self._event_register(post_event, register))
-            for register in SYSCALL_RECORDED_RESULT_REGISTERS
+            for register in self.recorded_result_registers
         )
 
     @staticmethod
@@ -713,7 +747,11 @@ class X86ReplayEngine:
                 f"Executed system call reached {state.read_pc():#x}, expected "
                 f"{post_event.pc!r}."
             )
-        self._reconcile_event_registers(state, post_event, ("rcx", "r11"))
+        self._reconcile_event_registers(
+            state,
+            post_event,
+            self.execution_boundary_registers,
+        )
 
     def _reconcile_exact(
         self,
@@ -726,7 +764,7 @@ class X86ReplayEngine:
         self._reconcile_event_registers(
             state,
             post_event,
-            ("rax", *extra_registers),
+            (self.result_register, *extra_registers),
         )
         for effect in memory_effects:
             actual = state.read_memory(effect.target_address, len(effect.data))
@@ -772,10 +810,12 @@ class X86ReplayEngine:
         if policy.execution_guard is ExecutionGuard.NONE:
             return
         if policy.execution_guard is ExecutionGuard.ANONYMOUS_MMAP:
-            recorded_flags = self._event_register(context.pre_event, "r10")
-            target_flags = context.target_state.read_register("r10")
-            recorded_fd = _signed_u64(self._event_register(context.pre_event, "r8"))
-            target_fd = _signed_u64(context.target_state.read_register("r8"))
+            flags_register = self.syscall_argument_registers[3]
+            fd_register = self.syscall_argument_registers[4]
+            recorded_flags = self._event_register(context.pre_event, flags_register)
+            target_flags = context.target_state.read_register(flags_register)
+            recorded_fd = _signed_u64(self._event_register(context.pre_event, fd_register))
+            target_fd = _signed_u64(context.target_state.read_register(fd_register))
             if target_flags != recorded_flags or target_fd != recorded_fd:
                 raise ReplayEventError("mmap flags or descriptor differ from RR.")
             if recorded_flags & _MAP_ANONYMOUS == 0 or recorded_fd != -1:
@@ -807,7 +847,9 @@ class X86ReplayEngine:
             descriptors = (result,) if result >= 0 else ()
             effects.append(DescriptorReplayEffect(action, descriptors))
         elif action is SyscallStateAction.CLOSE_FD:
-            fd = _signed_u64(self._event_register(context.pre_event, "rdi"))
+            fd = _signed_u64(
+                self._event_register(context.pre_event, self.syscall_argument_registers[0])
+            )
             descriptors = (fd,) if result == 0 else ()
             effects.append(DescriptorReplayEffect(action, descriptors))
         elif action is SyscallStateAction.DUP_FD:
@@ -845,15 +887,25 @@ class X86ReplayEngine:
             effects.append(
                 MappingReplayEffect(
                     policy.number,
-                    self._event_register(context.pre_event, "rdi"),
-                    self._event_register(context.pre_event, "rsi"),
+                    self._event_register(
+                        context.pre_event,
+                        self.syscall_argument_registers[0],
+                    ),
+                    self._event_register(
+                        context.pre_event,
+                        self.syscall_argument_registers[1],
+                    ),
                 )
             )
         elif action is SyscallStateAction.TERMINATE:
             effects.append(
                 TerminationReplayEffect(
-                    self._event_register(context.pre_event, "rdi") & 0xFF,
-                    policy.number == 231,
+                    self._event_register(
+                        context.pre_event,
+                        self.syscall_argument_registers[0],
+                    )
+                    & 0xFF,
+                    policy.number == self.exit_group_syscall,
                 )
             )
         else:
@@ -924,10 +976,12 @@ class X86ReplayEngine:
         if extra.kind == "writeOffset":
             if extra.write_offset is None or extra.write_offset < 0:
                 raise ReplayEventError("RR writeOffset extra has no valid offset.")
-            fd = _signed_u64(self._event_register(context.pre_event, "rdi"))
+            fd = _signed_u64(
+                self._event_register(context.pre_event, self.syscall_argument_registers[0])
+            )
             if fd < 0:
                 raise ReplayEventError("RR writeOffset extra uses a negative descriptor.")
-            advance = max(context.result, 0) if policy.number in (1, 20) else 0
+            advance = max(context.result, 0) if policy.name in ("write", "writev") else 0
             return (DescriptorOffsetReplayEffect(fd, extra.write_offset + advance),)
         if extra.kind == "openedFds":
             if not extra.opened_fds:
@@ -958,7 +1012,12 @@ class X86ReplayEngine:
             if policy.state_action is SyscallStateAction.ACCEPT_FD:
                 fd = context.result
             else:
-                fd = _signed_u64(self._event_register(context.pre_event, "rdi"))
+                fd = _signed_u64(
+                    self._event_register(
+                        context.pre_event,
+                        self.syscall_argument_registers[0],
+                    )
+                )
             if fd < 0:
                 raise ReplayEventError("RR socketAddrs extra has no successful descriptor.")
             return (SocketAddressReplayEffect(fd, local, remote),)
@@ -1129,6 +1188,62 @@ class X86ReplayEngine:
             detail="terminal effect",
         )
         raise StopIteration
+
+
+class AArch64ReplayEngine(X86ReplayEngine):
+    """Fixture-backed AArch64 syscall replay with fail-closed signals."""
+
+    syscall_number_register = AARCH64_SYSCALL_NUMBER_REGISTER
+    syscall_argument_registers = AARCH64_SYSCALL_ARGUMENT_REGISTERS
+    recorded_result_registers = AARCH64_RECORDED_RESULT_REGISTERS
+    execution_boundary_registers = AARCH64_EXECUTION_BOUNDARY_REGISTERS
+    result_register = AARCH64_RESULT_REGISTER
+    pc_register = AARCH64_PC_REGISTER
+    thread_creating_syscalls = AARCH64_THREAD_CREATING_SYSCALLS
+    exit_group_syscall = AARCH64_EXIT_GROUP_SYSCALL
+
+    def __init__(self, arch: Arch):
+        if arch.archname != "aarch64" or arch.endianness != "little":
+            raise UnsupportedReplayEffect(
+                f"Deterministic replay is unsupported for {arch.serialized_name}."
+            )
+        self.arch = arch
+        self.policies = syscall_policies[arch.archname]
+        self.state = X86ReplayState()
+        self.coverage = ReplayCoverage()
+
+    def replay_signal(
+        self,
+        target: ReplayTarget,
+        pre_event: SignalEvent,
+        post_event: SignalEvent,
+    ) -> ReadableProgramState | None:
+        """Reject AArch64 signal delivery before observing or changing QEMU."""
+        del target, post_event
+        signal_number = pre_event.descriptor.signal_number
+        message = (
+            f"AArch64 signal {signal_number} delivery is not fixture-backed; "
+            "deterministic replay refuses target mutation."
+        )
+        self.coverage.record(
+            event_count=pre_event.event_count,
+            effect=f"signal:{signal_number}",
+            strategy=ReplayStrategy.REJECT,
+            outcome=CoverageOutcome.REJECTED,
+            detail=message,
+        )
+        raise UnsupportedReplayEffect(message, event_count=pre_event.event_count)
+
+
+def make_replay_engine(arch: Arch) -> X86ReplayEngine | AArch64ReplayEngine:
+    """Construct the fail-closed deterministic engine for a supported guest ISA."""
+    if arch.archname == "x86_64" and arch.endianness == "little":
+        return X86ReplayEngine(arch)
+    if arch.archname == "aarch64" and arch.endianness == "little":
+        return AArch64ReplayEngine(arch)
+    raise UnsupportedReplayEffect(
+        f"Deterministic replay is unsupported for {arch.serialized_name}."
+    )
 
 
 def _signed_u64(value: int) -> int:

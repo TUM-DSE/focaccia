@@ -18,7 +18,11 @@ from focaccia.snapshot import (
 )
 from focaccia.arch import supported_architectures, Arch
 from focaccia.qemu.concurrency import require_event_thread, require_single_inferior
-from focaccia.qemu.replay import X86ReplayEngine
+from focaccia.qemu.replay import (
+    AArch64ReplayEngine,
+    X86ReplayEngine,
+    make_replay_engine,
+)
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
 from focaccia.qemu.syscall import (
     ReplayCoverageReport,
@@ -283,7 +287,7 @@ class GDBServerStateIterator(GDBServerConnector):
         events = self._deterministic_log.events()
         self.event_time = time.time() - self.event_start 
 
-        self._replay = X86ReplayEngine(self.arch) if events else None
+        self._replay = make_replay_engine(self.arch) if events else None
 
         first_state = self.current_state()
         self._events = DeterministicCursor(events, match_event)
@@ -338,7 +342,7 @@ class GDBServerStateIterator(GDBServerConnector):
             )
         return None
 
-    def _require_replay_engine(self) -> X86ReplayEngine:
+    def _require_replay_engine(self) -> X86ReplayEngine | AArch64ReplayEngine:
         if self._replay is None:
             raise RuntimeError("A deterministic event was found without a replay engine.")
         return self._replay
