@@ -880,6 +880,39 @@ class DeterministicCursor(Generic[StateT]):
         self._set_position(self._event_position + 1)
         return post_event
 
+    def match_terminal(self, event: Event) -> Event:
+        """Consume the terminal exit marker following a system-call pre-event."""
+        if event is not self._last_consumed:
+            raise EventPairError("The pre-event is not the cursor's last consumed event.")
+        if not isinstance(event, SyscallEvent) or event.syscall_state not in (
+            "entering",
+            "enteringPtrace",
+        ):
+            raise EventPairError("A terminal transition requires a system-call pre-event.")
+        if self._event_position >= len(self.events):
+            raise EventPairError(
+                f"Event {event.event_count or self._event_position} has no exit marker."
+            )
+
+        terminal = self.events[self._event_position]
+        if terminal.event_type != "exit":
+            raise EventPairError(
+                f"A terminal system call must be followed by an exit event, got "
+                f"{terminal.event_type!r}."
+            )
+        if terminal.tid != event.tid:
+            raise EventPairError(
+                f"Terminal events use different threads: {event.tid} and {terminal.tid}."
+            )
+        if terminal.arch != event.arch:
+            raise EventPairError("Terminal events use different architectures.")
+        if terminal.pc is not None:
+            raise EventPairError("A terminal exit event must not have a program counter.")
+
+        self._last_consumed = terminal
+        self._set_position(self._event_position + 1)
+        return terminal
+
     @staticmethod
     def _validate_pair(pre_event: Event, post_event: Event) -> None:
         if pre_event.tid != post_event.tid:

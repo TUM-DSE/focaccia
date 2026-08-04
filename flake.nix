@@ -674,6 +674,24 @@
       ];
     };
 
+    fix083NativeTerminalSyscallCheck = mkStaticUnitCheck {
+      name = "fix-083-native-terminal-syscall";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/native/tracer.py"
+        "tests/test_deterministic.py"
+        "tests/test_native_api.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_deterministic.py"
+        "tests/test_native_api.py"
+        "tests/test_native_tracing.py"
+        "-k"
+        "terminal_syscall"
+      ];
+    };
+
     nativeGapErrorBoundariesCheck = mkStaticUnitCheck {
       name = "native-gap-error-boundaries";
       ruffTargets = [
@@ -1854,6 +1872,7 @@
       fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
       fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
+      fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;

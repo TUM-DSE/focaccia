@@ -31,12 +31,15 @@ class ScriptedTarget:
         pc: int = 0x1000,
         steps: list[int | None] | None = None,
         run_results: dict[int, int | None] | None = None,
+        runs_before_exit: int = 0,
     ):
         self.pc = pc
         self.exited = False
         self.steps = list(steps or [])
         self.run_results = dict(run_results or {})
         self.step_calls = 0
+        self.run_calls = 0
+        self.runs_before_exit = runs_before_exit
         self.run_until_calls: list[int] = []
         self.register_reads: list[str] = []
         self.memory_reads: list[tuple[int, int]] = []
@@ -91,6 +94,13 @@ class ScriptedTarget:
             return
         self.pc = destination
         self.registers["RIP"] = destination
+
+    def run(self) -> None:
+        self.run_calls += 1
+        if self.runs_before_exit:
+            self.runs_before_exit -= 1
+        else:
+            self.exited = True
 
     def run_until(self, address: int) -> None:
         self.run_until_calls.append(address)
@@ -183,6 +193,18 @@ def test_predicted_exit_is_materialized_before_reporting_exit():
     assert tracer.is_exited()
     assert tracer.read_pc() == 0
     assert target.step_calls == 1
+
+
+def test_terminal_syscall_run_to_exit_uses_bounded_continues():
+    target = ScriptedTarget(runs_before_exit=1)
+    tracer = speculative(target)
+
+    tracer.run_to_exit()
+
+    assert tracer.is_exited()
+    assert tracer.read_pc() == 0
+    assert target.run_calls == 2
+    assert target.step_calls == 0
 
 
 def test_unknown_destination_step_records_a_concrete_exit():

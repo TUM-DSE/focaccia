@@ -10,6 +10,7 @@ from focaccia.arch import x86
 from focaccia.deterministic import (
     CursorState,
     DeterministicCursor,
+    Event,
     SignalDescriptor,
     SignalEvent,
     SyscallEvent,
@@ -226,6 +227,73 @@ def test_recorded_syscall_control_output_is_not_architectural_state():
         )
         is wrong_marker
     )
+
+
+def test_native_terminal_syscall_consumes_exit_marker_and_targets_exit():
+    arch = x86.ArchX86()
+    pre_event = SyscallEvent(
+        0x1000,
+        1,
+        arch,
+        {"rip": 0x1000, "rax": 231},
+        (),
+        arch,
+        231,
+        "entering",
+        False,
+        event_count=19,
+    )
+    terminal = Event(None, 1, arch, {}, (), "exit", 20)
+
+    class SyscallInstruction:
+        def __str__(self) -> str:
+            return "SYSCALL"
+
+    class EventState(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+        def read_pc(self) -> int:
+            return 0x1000
+
+    cursor: DeterministicCursor[ReadableProgramState] = DeterministicCursor(
+        (pre_event, terminal),
+        lambda item, current: item.pc == current.read_pc(),
+    )
+    event, post_event, requires_event_step = (
+        tracer_module._match_deterministic_event(cursor, EventState())
+    )
+    assert event is pre_event
+    assert post_event is terminal
+    assert requires_event_step
+    assert cursor.state is CursorState.EXHAUSTED
+
+    instruction = cast(Instruction, SyscallInstruction())
+    pc_output = ExprId("RIP", 64)
+    marker = ExprId("exception_flags", 32)
+    outputs: dict[Expr, Expr] = {
+        marker: ExprInt(EXCEPT_SYSCALL, 32),
+        pc_output: ExprInt(0x1002, 64),
+    }
+    destination, outputs = tracer_module._terminal_syscall_transition(
+        ExprInt(0x1002, 64),
+        outputs,
+        pre_event,
+        terminal,
+        instruction,
+        pc_output,
+        arch,
+    )
+    assert destination == ExprInt(0, 64)
+    assert outputs[pc_output] == ExprInt(0, 64)
+    architectural = tracer_module._architectural_outputs_for_recorded_syscall(
+        outputs,
+        pre_event,
+        terminal,
+        instruction,
+    )
+    assert marker not in architectural
+    SymbolicTransform(1, architectural, [instruction], arch, 0x1000, 0)
 
 
 def test_lldb_target_read_pc_normalizes_x86_alias(monkeypatch):

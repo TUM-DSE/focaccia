@@ -133,8 +133,40 @@ def _match_deterministic_event(
 ) -> tuple[Event | None, Event | None, bool]:
     event = cursor.match(target)
     is_pre_event = _is_pre_event(event)
-    post_event = cursor.match_pair(event) if is_pre_event else None
-    return event, post_event, is_pre_event
+    if not is_pre_event:
+        return event, None, False
+
+    pending = cursor.peek()
+    if isinstance(event, SyscallEvent) and pending is not None:
+        if pending.event_type == "exit":
+            return event, cursor.match_terminal(event), True
+    return event, cursor.match_pair(event), True
+
+
+def _is_terminal_event(event: Event | None) -> bool:
+    return event is not None and event.event_type == "exit"
+
+
+def _terminal_syscall_transition(
+    destination: ExprInt | None,
+    outputs: dict[Expr, Expr],
+    event: Event | None,
+    post_event: Event | None,
+    instruction: Instruction,
+    pc_output: Expr,
+    arch: Arch,
+) -> tuple[ExprInt | None, dict[Expr, Expr]]:
+    if (
+        not isinstance(event, SyscallEvent)
+        or not _is_terminal_event(post_event)
+        or not str(instruction).upper().startswith("SYSCALL")
+    ):
+        return destination, outputs
+
+    terminal = ExprInt(0, arch.ptr_size)
+    normalized = dict(outputs)
+    normalized[pc_output] = terminal
+    return terminal, normalized
 
 
 def _architectural_outputs_for_recorded_syscall(
@@ -145,7 +177,9 @@ def _architectural_outputs_for_recorded_syscall(
 ) -> dict[Expr, Expr]:
     if (
         not isinstance(event, SyscallEvent)
-        or not isinstance(post_event, SyscallEvent)
+        or not (
+            isinstance(post_event, SyscallEvent) or _is_terminal_event(post_event)
+        )
         or not str(instruction).upper().startswith("SYSCALL")
     ):
         return outputs
@@ -217,6 +251,7 @@ class NativeTarget(Protocol):
     def write_register(self, regname: str, value: int) -> None: ...
     def write_memory(self, addr: int, value: bytes) -> None: ...
     def step(self) -> None: ...
+    def run(self) -> None: ...
     def run_until(self, address: int) -> None: ...
     def is_exited(self) -> bool: ...
 
@@ -361,6 +396,27 @@ class SpeculativeTracer(ReadableProgramState):
             self.target.run_until(addr)
             self._verify_observed_pc(addr, (addr,))
         finally:
+            self._clear_cache()
+
+    def run_to_exit(self) -> None:
+        self.progress_execution()
+        if self.target.is_exited():
+            self.pc = 0
+            return
+        try:
+            # RR reports the recorded terminal signal as an intermediate stop
+            # before a subsequent continue reports eStateExited. Keep this
+            # transaction bounded so an unexpected stop cannot loop forever.
+            for _ in range(4):
+                self.target.run()
+                if self.target.is_exited():
+                    self.pc = 0
+                    return
+            actual = self.target.read_pc()
+            self.pc = actual
+            raise SpeculativeDivergenceError(0, actual, (0,))
+        finally:
+            self._clear_predictions()
             self._clear_cache()
 
     def step(self) -> None:
@@ -520,7 +576,17 @@ class SymbolicTracer:
                                       f'\nFaulty transformation: {transform}')
         self.validation_time += time.time() - start
 
-    def progress(self, new_pc, step: bool = False) -> int | None:
+    def progress(
+        self,
+        new_pc,
+        step: bool = False,
+        terminal: bool = False,
+    ) -> int | None:
+        if terminal:
+            info(f'Running terminal event at {hex(self.target.read_pc())}')
+            self.target.run_to_exit()
+            return None
+
         self.target.speculate(new_pc)
         if step:
             info(f'Stepping through event at {hex(self.target.read_pc())}')
@@ -625,6 +691,7 @@ class SymbolicTracer:
                 self.target,
             )
             in_event = is_pre_event or self.target.arch.is_instr_syscall(str(instruction))
+            terminal_event = _is_terminal_event(post_event)
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
@@ -639,6 +706,16 @@ class SymbolicTracer:
                     conc_state,
                     ctx.lifter,
                 )
+                if terminal_event:
+                    new_pc, modified = _terminal_syscall_transition(
+                        new_pc,
+                        modified,
+                        event,
+                        post_event,
+                        instruction,
+                        ctx.lifter.pc,
+                        arch,
+                    )
                 modified = _architectural_outputs_for_recorded_syscall(
                     modified,
                     event,
@@ -680,7 +757,11 @@ class SymbolicTracer:
             symbolic_time += time.time() - symbolic_start
 
             if symbolic_error is not None:
-                self.progress(None, step=bool(in_event))
+                self.progress(
+                    None,
+                    step=bool(in_event),
+                    terminal=terminal_event,
+                )
                 observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
                 transform: SymbolicTraceItem = self._trace_gap(
                     tid,
@@ -740,9 +821,17 @@ class SymbolicTracer:
                                 raise
                             cross_validation_error = error
                     finally:
-                        self.progress(destination, step=True)
+                        self.progress(
+                            destination,
+                            step=True,
+                            terminal=terminal_event,
+                        )
                 else:
-                    self.progress(None, step=bool(in_event))
+                    self.progress(
+                        None,
+                        step=bool(in_event),
+                        terminal=terminal_event,
+                    )
 
                 if candidate is not None and cross_validation_error is None:
                     try:
@@ -799,7 +888,11 @@ class SymbolicTracer:
                         f'Unable to construct symbolic transform: {error}; '
                         'recording an explicit trace gap.'
                     )
-                    self.progress(None, step=bool(in_event))
+                    self.progress(
+                        None,
+                        step=bool(in_event),
+                        terminal=terminal_event,
+                    )
                     observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
                     transform = self._trace_gap(
                         tid,
@@ -811,7 +904,11 @@ class SymbolicTracer:
                         instruction=instruction,
                     )
                 else:
-                    progressed_pc = self.progress(new_pc, step=bool(in_event))
+                    progressed_pc = self.progress(
+                        new_pc,
+                        step=bool(in_event),
+                        terminal=terminal_event,
+                    )
                     destination = 0 if progressed_pc is None else int(progressed_pc)
                     if destination == predicted_destination:
                         transform = candidate
@@ -831,8 +928,10 @@ class SymbolicTracer:
             symbolic_time += time.time() - symbolic_start
 
             if post_event:
-                if post_event.pc == 0:
-                    # Exit sequence
+                if _is_terminal_event(post_event):
+                    debug('Completed exit event')
+                elif post_event.pc == 0:
+                    # Legacy terminal records used a zero-PC post-event.
                     debug('Completed exit event')
                     self.target.run()
 

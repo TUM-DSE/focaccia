@@ -330,6 +330,29 @@ def test_cursor_rejects_missing_post_event_without_index_error():
     assert cursor.state is CursorState.EXHAUSTED
 
 
+def test_cursor_consumes_terminal_syscall_exit_marker_transactionally():
+    pre = syscall(0x1000, 19, "entering", number=231)
+    terminal = Event(None, 1, X86, {}, (), "exit", 20)
+    cursor = DeterministicCursor(
+        (pre, terminal),
+        lambda item, pc: item.pc == pc,
+    )
+
+    assert cursor.match(0x1000) is pre
+    assert cursor.match_terminal(pre) is terminal
+    assert cursor.state is CursorState.EXHAUSTED
+
+    malformed = Event(0x1002, 1, X86, {"rip": 0x1002}, (), "exit", 20)
+    cursor = DeterministicCursor(
+        (pre, malformed),
+        lambda item, pc: item.pc == pc,
+    )
+    assert cursor.match(0x1000) is pre
+    with pytest.raises(EventPairError, match="must not have a program counter"):
+        cursor.match_terminal(pre)
+    assert cursor.event_position == 1
+
+
 def test_mapping_cursor_skips_missing_event_ids_and_stops_at_future_records():
     mappings = (mapping(1, 0x1000), mapping(1, 0x2000), mapping(4, 0x4000))
     cursor = DeterministicCursor(
