@@ -194,6 +194,10 @@ class Arch:
         """Return whether writing ``regname`` clears its base register's high bits."""
         return False
 
+    def register_observation_zero_extends(self, regname: str) -> bool:
+        """Return whether observing ``regname`` determines its base register."""
+        return False
+
     def is_instr_uarch_dep(self, instr: str) -> bool:
         """Return whether an instruction has microarchitecture-dependent results."""
         return False

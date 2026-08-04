@@ -114,6 +114,7 @@ def test_gdb_state_caches_base_registers_and_flag_aliases(monkeypatch):
     assert state.read_register("CF") == 1
     assert state.read_register("ZF") == 1
     assert state.read_register("IOPL") == 3
+    assert state.read_register("RFLAGS") == (1 << 0) | (1 << 6) | (3 << 12)
     assert frame.reads == ["rax", "eflags"]
 
     sys.modules.pop("focaccia.qemu.target", None)

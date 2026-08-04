@@ -159,6 +159,10 @@ class ArchX86(Arch):
             'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
         }
 
+    def register_observation_zero_extends(self, regname: str) -> bool:
+        canonical = self.to_regname(regname)
+        return canonical == 'EFLAGS'
+
     def is_instr_uarch_dep(self, instr: str) -> bool:
         if "XGETBV" in instr.upper():
             return True

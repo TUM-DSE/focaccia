@@ -82,7 +82,16 @@ def test_plugin_flag_reads_are_order_independent(order: tuple[str, ...]):
     observed = {name: state.read_register(name) for name in order}
 
     assert observed == {"CF": 1, "ZF": 1, "IOPL": 3}
+    assert state.read_register("RFLAGS") == eflags
     assert transport.register_reads == ["eflags"]
+
+
+def test_plugin_incomplete_flags_observation_does_not_determine_rflags():
+    transport = FakeTransport()
+    transport.registers["eflags"] = RegisterObservation("flags", 0x243, 16)
+    state = plugin_state(x86.ArchX86(), transport)
+
+    assert state.read_register("FLAGS") == 0x243
     with pytest.raises(RegisterAccessError):
         state.read_register("RFLAGS")
     assert transport.register_reads == ["eflags"]

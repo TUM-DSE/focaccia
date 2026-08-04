@@ -75,7 +75,10 @@ class CachedBackendProgramState(ProgramState):
                 f"Backend value does not fit in {observation.num_bits}-bit "
                 f"register {observed_name}.",
             )
-        self.write_register(observed_name, observation.value)
+        if self.arch.register_observation_zero_extends(observed_name):
+            self.write_register(requested.base_reg, observation.value)
+        else:
+            self.write_register(observed_name, observation.value)
 
     def read_register(self, reg: str) -> int:
         canonical = self.arch.to_regname(reg)

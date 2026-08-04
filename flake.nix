@@ -1015,6 +1015,23 @@
       ];
     };
 
+    fix084X86EflagsObservationCheck = mkStaticUnitCheck {
+      name = "fix-084-x86-eflags-observation";
+      ruffTargets = [
+        "src/focaccia/arch/arch.py"
+        "src/focaccia/arch/x86.py"
+        "src/focaccia/qemu/state.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "-k"
+        "flag_aliases or flag_reads or incomplete_flags_observation"
+      ];
+    };
+
     explicitEmptyEventLogCheck = mkStaticUnitCheck {
       name = "explicit-empty-event-log";
       ruffTargets = [
@@ -1917,6 +1934,7 @@
       scheduler-quarantine = schedulerQuarantineCheck;
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
+      fix-084-x86-eflags-observation = fix084X86EflagsObservationCheck;
       qemu-sparse-memory-cache = qemuSparseMemoryCacheCheck;
       qemu-scripted-state-collection = qemuScriptedStateCollectionCheck;
       fresh-file-hashes = freshFileHashesCheck;
