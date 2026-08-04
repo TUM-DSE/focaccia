@@ -4,7 +4,7 @@ from typing import Any, cast
 import pytest
 
 from focaccia.arch import aarch64, x86
-from focaccia.deterministic import Event
+from focaccia.deterministic import Event, SyscallEvent
 from focaccia.native import lldb_target as lldb_module
 from focaccia.native.lldb_target import (
     ConcreteExecutionError,
@@ -260,6 +260,65 @@ def test_event_matching_skips_pc_by_name_not_by_numeric_value():
         ),
         speculative(target),
     )
+
+
+def test_x86_syscall_entry_matching_ignores_hardware_clobbered_rcx_and_r11():
+    target = ScriptedTarget(pc=0x401793)
+    target.registers.update(
+        {
+            "RAX": 231,
+            "RBX": 7,
+            "RCX": 0,
+            "R11": 0,
+        }
+    )
+    entering = SyscallEvent(
+        0x401793,
+        1,
+        target.arch,
+        {
+            "rip": 0x401793,
+            "rax": 231,
+            "rbx": 7,
+            "rcx": 0xFFFFFFFFFFFFFFFF,
+            "r11": 0x246,
+        },
+        (),
+        target.arch,
+        231,
+        "entering",
+        False,
+    )
+
+    assert match_event(entering, speculative(target))
+
+    mismatched_registers = dict(entering.registers.items())
+    mismatched_registers["RBX"] = 8
+    mismatched_unaffected = SyscallEvent(
+        0x401793,
+        1,
+        target.arch,
+        mismatched_registers,
+        (),
+        target.arch,
+        231,
+        "entering",
+        False,
+    )
+    assert not match_event(mismatched_unaffected, speculative(target))
+
+    exiting = SyscallEvent(
+        0x401793,
+        1,
+        target.arch,
+        dict(entering.registers.items()),
+        (),
+        target.arch,
+        231,
+        "exiting",
+        False,
+    )
+    assert not match_event(exiting, speculative(target))
 
 
 def test_capture_options_keep_debug_and_cross_validation_independent():

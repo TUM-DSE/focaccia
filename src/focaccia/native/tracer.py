@@ -178,6 +178,16 @@ def match_event(event: Event, target: ReadableProgramState) -> bool:
     if pc_accessor is None:
         return False
     synchronized_bases = _EVENT_SYNC_BASE_REGISTERS.get(arch.archname, frozenset())
+    if (
+        isinstance(event, SyscallEvent)
+        and arch.archname == "x86_64"
+        and event.syscall_state in ("entering", "enteringPtrace")
+    ):
+        # RR's entering stop is recorded after SYSCALL has copied the return
+        # PC and flags into RCX and R11. The adapter rewinds RIP and RAX to the
+        # pre-instruction boundary, but those hardware-clobbered values cannot
+        # be compared with the concrete state before SYSCALL executes.
+        synchronized_bases -= {"RCX", "R11"}
 
     for name, expected in event.registers.items():
         canonical = arch.to_regname(name)
