@@ -635,6 +635,19 @@
       ];
     };
 
+    fix080RepeatedPcMaterializationCheck = mkStaticUnitCheck {
+      name = "fix-080-repeated-pc-materialization";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "repeated_pc_materialization"
+      ];
+    };
+
     nativeGapErrorBoundariesCheck = mkStaticUnitCheck {
       name = "native-gap-error-boundaries";
       ruffTargets = [
@@ -1812,6 +1825,7 @@
       fix-077-lldb-remote-state-event = fix077LldbRemoteStateEventCheck;
       fix-078-native-event-phase = fix078NativeEventPhaseCheck;
       fix-079-lldb-remote-x86-flags-width = fix079LldbRemoteX86FlagsWidthCheck;
+      fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;

@@ -125,6 +125,28 @@ def test_linear_speculation_materializes_and_verifies_the_observed_pc():
     assert tracer.speculative_count == 0
 
 
+@pytest.mark.parametrize(
+    "predictions",
+    (
+        (0x1001, 0x1002, 0x1000),
+        (0x2000, 0x3000, 0x2000),
+    ),
+)
+def test_repeated_pc_materialization_steps_each_predicted_boundary(
+    predictions: tuple[int, ...],
+):
+    target = ScriptedTarget(steps=list(predictions))
+    tracer = speculative(target)
+
+    for predicted_pc in predictions:
+        tracer.speculate(predicted_pc)
+
+    assert tracer.progress_execution() == predictions[-1]
+    assert target.step_calls == len(predictions)
+    assert target.run_until_calls == []
+    assert tracer.speculative_count == 0
+
+
 def test_single_step_branch_mismatch_is_reported_and_resets_speculation():
     target = ScriptedTarget(steps=[0x2000])
     tracer = speculative(target)

@@ -293,6 +293,17 @@ class SpeculativeTracer(ReadableProgramState):
                 self.target.step()
             elif len(predictions) == 1:
                 self.target.step()
+            elif expected == self.pc or expected in predictions[:-1]:
+                # An address breakpoint cannot identify the final occurrence of
+                # a repeated PC. In particular, run_until() is a no-op when a
+                # speculative cycle ends at its concrete starting address.
+                for position, predicted_pc in enumerate(predictions, start=1):
+                    self.target.step()
+                    self._verify_observed_pc(
+                        predicted_pc,
+                        predictions[:position],
+                    )
+                return self.pc
             else:
                 self.target.run_until(expected)
             return self._verify_observed_pc(expected, predictions)
