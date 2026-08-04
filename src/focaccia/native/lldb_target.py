@@ -87,6 +87,14 @@ class LLDBConcreteTarget:
         x86.archname: x86.decompose_rflags,
     }
 
+    # LLDB's x86-64 GDB-remote register map exposes EFLAGS as a four-byte
+    # register even when it accepts the conventional ``rflags`` name. The
+    # upper half of RFLAGS is reserved, and EFLAGS contains every modeled x86
+    # flag field, so zero-extension at this boundary is lossless.
+    flag_register_width_aliases = {
+        x86.archname: {4: 'EFLAGS'},
+    }
+
     register_retries = {
         aarch64.archname: {},
         x86.archname: {
@@ -462,7 +470,15 @@ class LLDBConcreteTarget:
         flags_reg = self.flag_register_names[self.archname]
         canonical = self._canonical_register_name(flags_reg)
         reg = self._get_register(flags_reg)
-        flags_val = self._read_scalar_register_value(reg, canonical)
+        read_name = canonical
+        accessor = self.arch.get_reg_accessor(canonical)
+        expected_size = None if accessor is None else (accessor.num_bits + 7) // 8
+        if expected_size is not None and reg.size != expected_size:
+            read_name = self.flag_register_width_aliases.get(self.archname, {}).get(
+                reg.size,
+                canonical,
+            )
+        flags_val = self._read_scalar_register_value(reg, read_name)
         return self.flag_register_decompose[self.archname](flags_val)
 
     def read_pc(self) -> int:

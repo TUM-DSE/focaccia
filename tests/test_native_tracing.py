@@ -494,6 +494,51 @@ def test_lldb_80_bit_register_reads_preserve_all_bytes():
     assert concrete.read_register("ST0") == value
 
 
+def test_lldb_remote_x86_flags_width_uses_the_eflags_alias():
+    class EflagsRegister:
+        size = 4
+
+        def IsValid(self) -> bool:
+            return True
+
+        def GetValueAsUnsigned(self, _error, _fallback: int) -> int:
+            return (1 << 10) | (1 << 21)
+
+    requested: list[str] = []
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = "x86_64"
+
+    def get_register(name: str) -> EflagsRegister:
+        requested.append(name)
+        return EflagsRegister()
+
+    cast(Any, concrete)._get_register = get_register
+
+    assert concrete.read_register("DF") == 1
+    assert concrete.read_flags()["ID"] == 1
+    assert requested == ["df", "rflags", "rflags"]
+
+
+def test_lldb_remote_x86_flags_width_rejects_incomplete_flags_alias():
+    class FlagsRegister:
+        size = 2
+
+        def IsValid(self) -> bool:
+            return True
+
+        def GetValueAsUnsigned(self, _error, _fallback: int) -> int:
+            return 0
+
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = "x86_64"
+    cast(Any, concrete)._get_register = lambda _name: FlagsRegister()
+
+    with pytest.raises(ConcreteRegisterError, match="RFLAGS has size 2, expected 8"):
+        concrete.read_flags()
+
+
 def test_lldb_scalar_register_errors_do_not_fabricate_zero():
     class FailedRegister:
         size = 8
