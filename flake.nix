@@ -2,7 +2,7 @@
   description = "Focaccia: Translation Validator for CPU Emulators";
 
   inputs = {
-    self.submodules = true;
+    self.submodules = false;
 
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -27,18 +27,25 @@
     };
 
     qemu-submodule = {
-      url = "path:qemu/";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=3b2a0fb80eb9b6b5f216fa69069e66210466f5eb&submodules=1";
       flake = true;
+    };
+
+    rr-submodule = {
+      url = "git+https://github.com/rr-debugger/rr.git?rev=f248913aa51ccf61932145a67e08a1e811953a2b";
+      flake = false;
     };
   };
 
   outputs = {
+    self,
     uv2nix,
     nixpkgs,
     flake-utils,
     pyproject-nix,
     pyproject-build-systems,
     qemu-submodule,
+    rr-submodule,
     ...
   }:
   flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
@@ -86,7 +93,7 @@
 
     editableOverlay = workspace.mkEditablePyprojectOverlay {
       root = "$REPO_ROOT";
-      members = [ "focaccia" "miasm" ];
+      members = [ "focaccia" ];
     };
 
 
@@ -160,18 +167,6 @@
     };
 
     pyprojectOverridesEditable = self: super: {
-      miasm = super.miasm.overrideAttrs (old: {
-        nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
-        src = pkgs.lib.fileset.toSource {
-          root = old.src;
-          fileset = pkgs.lib.fileset.unions [
-            (old.src + "/pyproject.toml")
-            (old.src + "/README.md")
-            (old.src + "/src/miasm/__init__.py")
-          ];
-        };
-      });
-
       cpuid = super.cpuid.overrideAttrs (old: {
         nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ self.setuptools ];
       });
@@ -216,10 +211,7 @@
     pythonStaticUnitEnv = pythonSet.mkVirtualEnv "focaccia-static-unit-env" developmentDependencies;
 
     devEnv = pythonDevEnv.overrideAttrs (old: {
-      buildPhase = ''
-        ${checkSubmodulesInitialized}
-        ${old.buildPhase or ""}
-      '';
+      buildPhase = old.buildPhase or "";
       propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [
         pkgs.uv
         pkgs.lldb
@@ -233,7 +225,7 @@
     rrTool = pkgs.rr.overrideAttrs (old: {
       pname = "focaccia-rr";
       version = "5.8.0";
-      src = ./rr;
+      src = rr-submodule;
     });
 
     validateQemuWrapper = pkgs.writeShellScriptBin "validate-qemu" ''
@@ -295,14 +287,6 @@
     uvShellHook = ''
       unset PYTHONPATH
       export REPO_ROOT=$(git rev-parse --show-toplevel)
-    '';
-
-    checkSubmodulesInitialized = ''
-      if ! ${pkgs.git}/bin/git submodule status --recursive >/dev/null 2>&1; then
-        printf 'Error: git submodules not initialized correctly, build cannot proceed\n'
-        printf 'Run git submodule update --init --recursive and then rebuild\n'
-        exit 2
-      fi
     '';
 
     # Helper to create musl dev shells with shared boilerplate
@@ -1032,6 +1016,32 @@
       ];
     };
 
+    fix085FlakeSourceBoundaryCheck =
+      assert qemu-submodule.rev == "3b2a0fb80eb9b6b5f216fa69069e66210466f5eb";
+      assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
+      pkgs.runCommand "fix-085-flake-source-boundary" {
+        nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
+      } ''
+        test ! -e ${self}/miasm/src/miasm
+        test ! -e ${self}/qemu/softmmu
+        test ! -e ${self}/rr/src
+
+        self_kib=$(du -sk ${self} | cut -f1)
+        test "$self_kib" -lt 65536
+
+        grep -F 'miasm = { git = "https://github.com/taugoust/miasm.git", rev = "083c88f096d1b654069eff874356df7b2ecd4606" }' \
+          ${self}/pyproject.toml
+        grep -F 'source = { git = "https://github.com/taugoust/miasm.git?rev=083c88f096d1b654069eff874356df7b2ecd4606#083c88f096d1b654069eff874356df7b2ecd4606" }' \
+          ${self}/uv.lock
+
+        mkdir -p "$out"
+        printf 'self_kib=%s\nqemu_rev=%s\nrr_rev=%s\n' \
+          "$self_kib" \
+          '${qemu-submodule.rev}' \
+          '${rr-submodule.rev}' \
+          > "$out/source-boundary.txt"
+      '';
+
     explicitEmptyEventLogCheck = mkStaticUnitCheck {
       name = "explicit-empty-event-log";
       ruffTargets = [
@@ -1731,19 +1741,16 @@
         mkdir -p "$out"
         rr --version 2>&1 | tee "$out/version.txt"
         grep -Ex 'rr version 5[.]8[.]0[[:space:]]*' "$out/version.txt"
-        grep -F '#define TRACE_VERSION 85' ${./rr}/src/TraceStream.cc \
+        grep -F '#define TRACE_VERSION 85' ${rr-submodule}/src/TraceStream.cc \
           > "$out/trace-version.txt"
-        grep -F '@0xcaa0b1486c12c629;' ${./rr}/src/rr_trace.capnp \
+        grep -F '@0xcaa0b1486c12c629;' ${rr-submodule}/src/rr_trace.capnp \
           > "$out/schema-id.txt"
       '';
 
   in rec {
     packages = rec {
       focaccia = pythonEnv.overrideAttrs (old: {
-        buildPhase = ''
-          ${checkSubmodulesInitialized}
-          ${old.buildPhase or ""}
-        '';
+        buildPhase = old.buildPhase or "";
         propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ pkgs.lldb ];
       });
 
@@ -1935,6 +1942,7 @@
       fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
       fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
       fix-084-x86-eflags-observation = fix084X86EflagsObservationCheck;
+      fix-085-flake-source-boundary = fix085FlakeSourceBoundaryCheck;
       qemu-sparse-memory-cache = qemuSparseMemoryCacheCheck;
       qemu-scripted-state-collection = qemuScriptedStateCollectionCheck;
       fresh-file-hashes = freshFileHashesCheck;

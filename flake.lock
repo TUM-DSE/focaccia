@@ -154,14 +154,21 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "path": "qemu/",
-        "type": "path"
+        "lastModified": 1762354214,
+        "narHash": "sha256-jYsnEN7DypmhlP4aHEtIXv/LGNgMi7CJGQTSV19FKfU=",
+        "ref": "refs/heads/master",
+        "rev": "3b2a0fb80eb9b6b5f216fa69069e66210466f5eb",
+        "revCount": 120188,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
       },
       "original": {
-        "path": "qemu/",
-        "type": "path"
-      },
-      "parent": []
+        "rev": "3b2a0fb80eb9b6b5f216fa69069e66210466f5eb",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
+      }
     },
     "root": {
       "inputs": {
@@ -170,7 +177,25 @@
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
         "qemu-submodule": "qemu-submodule",
+        "rr-submodule": "rr-submodule",
         "uv2nix": "uv2nix"
+      }
+    },
+    "rr-submodule": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1716204584,
+        "narHash": "sha256-FudAAkWIe6gv4NYFoe9E0hlgTM70lymBE5Fw/vbehps=",
+        "ref": "refs/heads/master",
+        "rev": "f248913aa51ccf61932145a67e08a1e811953a2b",
+        "revCount": 6801,
+        "type": "git",
+        "url": "https://github.com/rr-debugger/rr.git"
+      },
+      "original": {
+        "rev": "f248913aa51ccf61932145a67e08a1e811953a2b",
+        "type": "git",
+        "url": "https://github.com/rr-debugger/rr.git"
       }
     },
     "systems": {
