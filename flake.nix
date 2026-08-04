@@ -619,6 +619,19 @@
       ];
     };
 
+    fix086LldbCanonicalRflagsObservationCheck = mkStaticUnitCheck {
+      name = "fix-086-lldb-canonical-rflags-observation";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "lldb_canonical_rflags_read"
+      ];
+    };
+
     fix080RepeatedPcMaterializationCheck = mkStaticUnitCheck {
       name = "fix-080-repeated-pc-materialization";
       ruffTargets = [
@@ -1893,6 +1906,7 @@
       fix-077-lldb-remote-state-event = fix077LldbRemoteStateEventCheck;
       fix-078-native-event-phase = fix078NativeEventPhaseCheck;
       fix-079-lldb-remote-x86-flags-width = fix079LldbRemoteX86FlagsWidthCheck;
+      fix-086-lldb-canonical-rflags-observation = fix086LldbCanonicalRflagsObservationCheck;
       fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
       fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;

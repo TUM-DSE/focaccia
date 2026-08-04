@@ -422,6 +422,33 @@ class LLDBConcreteTarget:
                 f'{expected_size} bytes.'
             )
 
+    def _scalar_observation_name(
+        self,
+        reg: lldb.SBValue,
+        canonical: str,
+    ) -> str:
+        accessor = self.arch.get_reg_accessor(canonical)
+        if accessor is None:
+            return canonical
+        expected_size = (accessor.num_bits + 7) // 8
+        if reg.size == expected_size:
+            return canonical
+        observed = self.flag_register_width_aliases.get(self.archname, {}).get(
+            reg.size
+        )
+        if (
+            canonical == accessor.base_reg
+            and observed is not None
+            and self.arch.register_observation_zero_extends(observed)
+        ):
+            observed_accessor = self.arch.get_reg_accessor(observed)
+            if (
+                observed_accessor is not None
+                and observed_accessor.base_reg == accessor.base_reg
+            ):
+                return observed
+        return canonical
+
     def _read_scalar_register_value(self, reg: lldb.SBValue, regname: str) -> int:
         self._validate_register_size(reg, regname)
         error = lldb.SBError()
@@ -470,14 +497,7 @@ class LLDBConcreteTarget:
         flags_reg = self.flag_register_names[self.archname]
         canonical = self._canonical_register_name(flags_reg)
         reg = self._get_register(flags_reg)
-        read_name = canonical
-        accessor = self.arch.get_reg_accessor(canonical)
-        expected_size = None if accessor is None else (accessor.num_bits + 7) // 8
-        if expected_size is not None and reg.size != expected_size:
-            read_name = self.flag_register_width_aliases.get(self.archname, {}).get(
-                reg.size,
-                canonical,
-            )
+        read_name = self._scalar_observation_name(reg, canonical)
         flags_val = self._read_scalar_register_value(reg, read_name)
         return self.flag_register_decompose[self.archname](flags_val)
 
@@ -509,7 +529,8 @@ class LLDBConcreteTarget:
                 raise ConcreteRegisterError(f'LLDB register {canonical} is invalid.')
             if reg.size > 8:
                 return self._read_wide_register_value(reg, canonical)
-            return self._read_scalar_register_value(reg, canonical)
+            read_name = self._scalar_observation_name(reg, canonical)
+            return self._read_scalar_register_value(reg, read_name)
         except ConcreteRegisterError as err:
             flags_reg = self.arch.to_regname(
                 self.flag_register_names.get(self.archname, '')

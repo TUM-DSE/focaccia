@@ -623,6 +623,45 @@ def test_lldb_remote_x86_flags_width_uses_the_eflags_alias():
     assert requested == ["df", "rflags", "rflags"]
 
 
+def test_lldb_canonical_rflags_read_zero_extends_eflags_observation():
+    value = (1 << 0) | (1 << 6) | (1 << 31)
+
+    class EflagsRegister:
+        size = 4
+
+        def IsValid(self) -> bool:
+            return True
+
+        def GetValueAsUnsigned(self, _error, _fallback: int) -> int:
+            return value
+
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = "x86_64"
+    cast(Any, concrete)._get_register = lambda _name: EflagsRegister()
+
+    assert concrete.read_register("RFLAGS") == value
+
+
+def test_lldb_canonical_rflags_read_rejects_incomplete_flags_observation():
+    class FlagsRegister:
+        size = 2
+
+        def IsValid(self) -> bool:
+            return True
+
+        def GetValueAsUnsigned(self, _error, _fallback: int) -> int:
+            return 0
+
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = "x86_64"
+    cast(Any, concrete)._get_register = lambda _name: FlagsRegister()
+
+    with pytest.raises(ConcreteRegisterError, match="RFLAGS has size 2, expected 8"):
+        concrete.read_register("RFLAGS")
+
+
 def test_lldb_remote_x86_flags_width_rejects_incomplete_flags_alias():
     class FlagsRegister:
         size = 2
