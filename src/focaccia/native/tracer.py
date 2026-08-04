@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Protocol
 
 from miasm.core.utils import Disasm_Exception
+from miasm.expression.expression import Expr, ExprId, ExprInt
+from miasm.jitter.csts import EXCEPT_SYSCALL
 
 from focaccia.arch import Arch
 from focaccia.utils import timebound, TimeoutError
@@ -133,6 +135,29 @@ def _match_deterministic_event(
     is_pre_event = _is_pre_event(event)
     post_event = cursor.match_pair(event) if is_pre_event else None
     return event, post_event, is_pre_event
+
+
+def _architectural_outputs_for_recorded_syscall(
+    outputs: dict[Expr, Expr],
+    event: Event | None,
+    post_event: Event | None,
+    instruction: Instruction,
+) -> dict[Expr, Expr]:
+    if (
+        not isinstance(event, SyscallEvent)
+        or not isinstance(post_event, SyscallEvent)
+        or not str(instruction).upper().startswith("SYSCALL")
+    ):
+        return outputs
+
+    marker = ExprId("exception_flags", 32)
+    if outputs.get(marker) != ExprInt(EXCEPT_SYSCALL, 32):
+        return outputs
+    return {
+        destination: value
+        for destination, value in outputs.items()
+        if destination != marker
+    }
 
 
 def match_event(event: Event, target: ReadableProgramState) -> bool:
@@ -603,6 +628,12 @@ class SymbolicTracer:
                     instruction.instr,
                     conc_state,
                     ctx.lifter,
+                )
+                modified = _architectural_outputs_for_recorded_syscall(
+                    modified,
+                    event,
+                    post_event,
+                    instruction,
                 )
                 if new_pc is None:
                     raise SymbolEvaluationError(

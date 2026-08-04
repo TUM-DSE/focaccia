@@ -2,7 +2,8 @@ from typing import Any, cast
 
 import pytest
 from miasm.core.locationdb import LocationDB
-from miasm.expression.expression import ExprId, ExprInt
+from miasm.expression.expression import Expr, ExprId, ExprInt
+from miasm.jitter.csts import EXCEPT_SYSCALL
 
 from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
@@ -20,6 +21,8 @@ from focaccia.snapshot import ReadableProgramState
 from focaccia.symbolic import (
     DisassemblyContext,
     Instruction,
+    SymbolicCompositionError,
+    SymbolicTransform,
     TraceGap,
     UnsupportedInstructionError,
     run_instruction,
@@ -152,6 +155,77 @@ def test_native_tracer_initial_post_event_is_not_paired_or_event_stepped(pair_ki
     assert paired is post_event
     assert requires_event_step
     assert cursor.state is CursorState.EXHAUSTED
+
+
+def test_recorded_syscall_control_output_is_not_architectural_state():
+    arch = x86.ArchX86()
+    pre_event = SyscallEvent(
+        0x1000,
+        1,
+        arch,
+        {"rip": 0x1000, "rax": 158},
+        (),
+        arch,
+        158,
+        "entering",
+        False,
+        event_count=15,
+    )
+    post_event = SyscallEvent(
+        0x1002,
+        1,
+        arch,
+        {"rip": 0x1002, "rax": 0},
+        (),
+        arch,
+        158,
+        "exiting",
+        False,
+        event_count=16,
+    )
+
+    class SyscallInstruction:
+        def __str__(self) -> str:
+            return "SYSCALL"
+
+    instruction = cast(Instruction, SyscallInstruction())
+    marker = ExprId("exception_flags", 32)
+    outputs: dict[Expr, Expr] = {
+        marker: ExprInt(EXCEPT_SYSCALL, 32),
+        ExprId("RIP", 64): ExprInt(0x1002, 64),
+    }
+
+    architectural = tracer_module._architectural_outputs_for_recorded_syscall(
+        outputs,
+        pre_event,
+        post_event,
+        instruction,
+    )
+    assert marker not in architectural
+    SymbolicTransform(1, architectural, [instruction], arch, 0x1000, 0x1002)
+
+    unmatched = tracer_module._architectural_outputs_for_recorded_syscall(
+        outputs,
+        None,
+        None,
+        instruction,
+    )
+    assert unmatched is outputs
+    with pytest.raises(SymbolicCompositionError, match="exception_flags"):
+        SymbolicTransform(1, unmatched, [instruction], arch, 0x1000, 0x1002)
+
+    wrong_marker: dict[Expr, Expr] = {
+        marker: ExprInt(EXCEPT_SYSCALL + 1, 32)
+    }
+    assert (
+        tracer_module._architectural_outputs_for_recorded_syscall(
+            wrong_marker,
+            pre_event,
+            post_event,
+            instruction,
+        )
+        is wrong_marker
+    )
 
 
 def test_lldb_target_read_pc_normalizes_x86_alias(monkeypatch):

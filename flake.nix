@@ -648,6 +648,19 @@
       ];
     };
 
+    fix081RecordedSyscallControlOutputCheck = mkStaticUnitCheck {
+      name = "fix-081-recorded-syscall-control-output";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "recorded_syscall_control_output"
+      ];
+    };
+
     nativeGapErrorBoundariesCheck = mkStaticUnitCheck {
       name = "native-gap-error-boundaries";
       ruffTargets = [
@@ -1826,6 +1839,7 @@
       fix-078-native-event-phase = fix078NativeEventPhaseCheck;
       fix-079-lldb-remote-x86-flags-width = fix079LldbRemoteX86FlagsWidthCheck;
       fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
+      fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;
