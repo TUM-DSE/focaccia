@@ -117,6 +117,24 @@ _EVENT_SYNC_BASE_REGISTERS = {
 }
 
 
+def _is_pre_event(event: Event | None) -> bool:
+    if isinstance(event, SyscallEvent):
+        return event.syscall_state in ("entering", "enteringPtrace")
+    if isinstance(event, SignalEvent):
+        return event.signal_variant == "signal"
+    return False
+
+
+def _match_deterministic_event(
+    cursor: DeterministicCursor[ReadableProgramState],
+    target: ReadableProgramState,
+) -> tuple[Event | None, Event | None, bool]:
+    event = cursor.match(target)
+    is_pre_event = _is_pre_event(event)
+    post_event = cursor.match_pair(event) if is_pre_event else None
+    return event, post_event, is_pre_event
+
+
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     """Match one deterministic event using a named, architecture-specific subset."""
     if event.arch != target.arch:
@@ -556,15 +574,11 @@ class SymbolicTracer:
                         f"({pending_event.event_type}) has no program counter and "
                         "cannot be synchronized by the native tracer."
                     )
-            event = event_matcher.match(self.target)
-            post_event = (
-                event_matcher.match_pair(event)
-                if isinstance(event, (SyscallEvent, SignalEvent))
-                else None
+            event, post_event, is_pre_event = _match_deterministic_event(
+                event_matcher,
+                self.target,
             )
-            in_event = event is not None or self.target.arch.is_instr_syscall(
-                str(instruction)
-            )
+            in_event = is_pre_event or self.target.arch.is_instr_syscall(str(instruction))
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)

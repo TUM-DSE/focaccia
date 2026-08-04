@@ -6,10 +6,17 @@ from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
-from focaccia.deterministic import CursorState
+from focaccia.deterministic import (
+    CursorState,
+    DeterministicCursor,
+    SignalDescriptor,
+    SignalEvent,
+    SyscallEvent,
+)
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import DisassemblyError, SpeculativeTracer, SymbolicTracer
+from focaccia.snapshot import ReadableProgramState
 from focaccia.symbolic import (
     DisassemblyContext,
     Instruction,
@@ -45,6 +52,106 @@ def _environment() -> TraceEnvironment:
 
 def test_missing_deterministic_log_provides_empty_events():
     assert tracer_module._events_for_environment(_environment()) == ()
+
+
+@pytest.mark.parametrize("pair_kind", ("syscall", "signal"))
+def test_native_tracer_initial_post_event_is_not_paired_or_event_stepped(pair_kind):
+    arch = x86.ArchX86()
+    initial_post = SyscallEvent(
+        0x1000,
+        1,
+        arch,
+        {"rip": 0x1000, "rax": 59},
+        (),
+        arch,
+        59,
+        "exiting",
+        False,
+        event_count=14,
+    )
+    if pair_kind == "syscall":
+        pre_event = SyscallEvent(
+            0x2000,
+            1,
+            arch,
+            {"rip": 0x2000, "rax": 1},
+            (),
+            arch,
+            1,
+            "entering",
+            False,
+            event_count=15,
+        )
+        post_event = SyscallEvent(
+            0x2002,
+            1,
+            arch,
+            {"rip": 0x2002, "rax": 1},
+            (),
+            arch,
+            1,
+            "exiting",
+            False,
+            event_count=16,
+        )
+    else:
+        descriptor = SignalDescriptor(
+            arch,
+            (2).to_bytes(4, "little", signed=True),
+            True,
+            "ignored",
+        )
+        pre_event = SignalEvent(
+            0x2000,
+            1,
+            arch,
+            {"rip": 0x2000},
+            (),
+            signal_number=descriptor,
+            event_count=15,
+        )
+        post_event = SignalEvent(
+            0x2002,
+            1,
+            arch,
+            {"rip": 0x2002},
+            (),
+            signal_delivery=descriptor,
+            event_count=16,
+        )
+
+    class EventState(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+            self.pc = 0x1000
+
+        def read_pc(self) -> int:
+            return self.pc
+
+    state = EventState()
+    cursor: DeterministicCursor[ReadableProgramState] = DeterministicCursor(
+        (initial_post, pre_event, post_event),
+        lambda item, current: item.pc == current.read_pc(),
+    )
+
+    event, paired, requires_event_step = tracer_module._match_deterministic_event(
+        cursor,
+        state,
+    )
+    assert event is initial_post
+    assert paired is None
+    assert not requires_event_step
+    assert cursor.peek() is pre_event
+
+    state.pc = 0x2000
+    event, paired, requires_event_step = tracer_module._match_deterministic_event(
+        cursor,
+        state,
+    )
+    assert event is pre_event
+    assert paired is post_event
+    assert requires_event_step
+    assert cursor.state is CursorState.EXHAUSTED
 
 
 def test_lldb_target_read_pc_normalizes_x86_alias(monkeypatch):

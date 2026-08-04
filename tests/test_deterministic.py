@@ -191,6 +191,24 @@ def test_cursor_has_explicit_synchronization_pair_and_exhaustion_states():
     assert cursor.match(0x30) is None
 
 
+def test_cursor_initial_post_event_establishes_and_advances_synchronization():
+    initial_post = syscall(0x1000, 14, "exiting", number=59)
+    next_pre = syscall(0x2000, 15, "entering", number=1)
+    next_post = syscall(0x2002, 16, "exiting", number=1)
+    cursor = DeterministicCursor(
+        (initial_post, next_pre, next_post),
+        lambda item, pc: item.pc == pc,
+    )
+
+    assert cursor.match(0x1000) is initial_post
+    assert cursor.state is CursorState.SYNCHRONIZED
+    assert cursor.event_position == 1
+    assert cursor.peek() is next_pre
+    assert cursor.match(0x2000) is next_pre
+    assert cursor.match_pair(next_pre) is next_post
+    assert cursor.state is CursorState.EXHAUSTED
+
+
 def test_cursor_unsynchronized_search_is_bounded_and_retryable():
     events = (event(1, 1), event(2, 2))
     calls: list[tuple[int, int]] = []
