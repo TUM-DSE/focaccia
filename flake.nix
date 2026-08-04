@@ -594,6 +594,19 @@
       ];
     };
 
+    fix077LldbRemoteStateEventCheck = mkStaticUnitCheck {
+      name = "fix-077-lldb-remote-state-event";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "lldb_remote_initialization_consumes_delayed_stopped_event"
+      ];
+    };
+
     nativeGapErrorBoundariesCheck = mkStaticUnitCheck {
       name = "native-gap-error-boundaries";
       ruffTargets = [
@@ -1768,6 +1781,7 @@
       fix-030-native-event-matching = fix030NativeEventMatchingCheck;
       fix-031-speculative-synchronization = fix031SpeculativeSynchronizationCheck;
       native-target-error-handling = nativeTargetErrorHandlingCheck;
+      fix-077-lldb-remote-state-event = fix077LldbRemoteStateEventCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;

@@ -122,9 +122,12 @@ class LLDBConcreteTarget:
         if not _is_valid(self.interpreter):
             raise ConcreteExecutionError('LLDB command interpreter is invalid.')
 
-        # Set up objects for process execution
+        # LLDB 19 can return from synchronous ConnectRemote before its initial
+        # stopped-state event has been consumed by the public listener. Drain
+        # that bounded event transition instead of treating the stale
+        # eStateUnloaded value as a failed connection.
         self.listener = self.debugger.GetListener()
-        self._check_process_state('initialize the target')
+        self._wait_for_process_state('initialize the target')
         if self.is_exited():
             raise ConcreteExecutionError('LLDB process exited before target initialization.')
 
@@ -160,18 +163,87 @@ class LLDBConcreteTarget:
         """Return whether the concrete process has exited."""
         return self.process.GetState() == lldb.eStateExited
 
-    def _check_process_state(self, operation: str) -> None:
-        state = self.process.GetState()
-        allowed_states = {
+    @staticmethod
+    def _allowed_process_states() -> set[int]:
+        return {
             getattr(lldb, name)
             for name in ('eStateStopped', 'eStateExited')
             if hasattr(lldb, name)
         }
-        if state not in allowed_states:
-            raise ConcreteExecutionError(
-                f'LLDB process entered unexpected state {state!r} while '
-                f'attempting to {operation}.'
+
+    @staticmethod
+    def _transient_process_states() -> set[int]:
+        return {
+            getattr(lldb, name)
+            for name in (
+                'eStateUnloaded',
+                'eStateConnected',
+                'eStateAttaching',
+                'eStateLaunching',
+                'eStateRunning',
+                'eStateStepping',
+                'eStateSuspended',
             )
+            if hasattr(lldb, name)
+        }
+
+    @staticmethod
+    def _process_state_description(state: int) -> str:
+        for name in (
+            'eStateInvalid',
+            'eStateUnloaded',
+            'eStateConnected',
+            'eStateAttaching',
+            'eStateLaunching',
+            'eStateStopped',
+            'eStateRunning',
+            'eStateStepping',
+            'eStateCrashed',
+            'eStateDetached',
+            'eStateExited',
+            'eStateSuspended',
+        ):
+            if hasattr(lldb, name) and state == getattr(lldb, name):
+                return f'{name} ({state!r})'
+        return repr(state)
+
+    def _check_process_state(self, operation: str) -> None:
+        state = self.process.GetState()
+        if state not in self._allowed_process_states():
+            raise ConcreteExecutionError(
+                'LLDB process entered unexpected state '
+                f'{self._process_state_description(state)} while attempting to '
+                f'{operation}.'
+            )
+
+    def _wait_for_process_state(
+        self,
+        operation: str,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        """Consume LLDB state events until the process is stopped or exited."""
+        if timeout_seconds <= 0:
+            raise ValueError('An LLDB process-state timeout must be positive.')
+        state = self.process.GetState()
+        if state in self._allowed_process_states():
+            return
+        if state not in self._transient_process_states():
+            self._check_process_state(operation)
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            event = lldb.SBEvent()
+            self.listener.WaitForEvent(1, event)
+            state = self.process.GetState()
+            if state in self._allowed_process_states():
+                return
+            if state not in self._transient_process_states():
+                self._check_process_state(operation)
+
+        raise ConcreteExecutionError(
+            'Timed out waiting for LLDB process state while attempting to '
+            f'{operation}; last state was {self._process_state_description(state)}.'
+        )
 
     def run(self):
         """Continue execution of the concrete process."""

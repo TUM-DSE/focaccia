@@ -334,6 +334,64 @@ def test_lldb_target_rejects_invalid_debugger_and_process_objects():
         base_target_type(cast(Any, Valid()), cast(Any, Valid()), cast(Any, Invalid()))
 
 
+def test_lldb_remote_initialization_consumes_delayed_stopped_event():
+    class Valid:
+        def IsValid(self) -> bool:
+            return True
+
+    class FakeProcess(Valid):
+        state = lldb_module.lldb.eStateUnloaded
+
+        def GetState(self) -> int:
+            return self.state
+
+    process = FakeProcess()
+
+    class FakeListener(Valid):
+        waits: list[int] = []
+
+        def WaitForEvent(self, timeout: int, _event) -> bool:
+            self.waits.append(timeout)
+            process.state = lldb_module.lldb.eStateStopped
+            return True
+
+    listener = FakeListener()
+
+    class FakeDebugger(Valid):
+        def GetCommandInterpreter(self):
+            return Valid()
+
+        def GetListener(self):
+            return listener
+
+    class FakePlatform(Valid):
+        def GetTriple(self) -> str:
+            return "x86_64-unknown-linux"
+
+    class FakeTarget(Valid):
+        executable = Valid()
+
+        def GetExecutable(self):
+            return self.executable
+
+        def FindModule(self, executable):
+            assert executable is self.executable
+            return Valid()
+
+        def GetPlatform(self):
+            return FakePlatform()
+
+    base_target_type = LLDBConcreteTarget
+    concrete = base_target_type(
+        cast(Any, FakeDebugger()),
+        cast(Any, FakeTarget()),
+        cast(Any, process),
+    )
+
+    assert concrete.process.GetState() == lldb_module.lldb.eStateStopped
+    assert listener.waits == [1]
+
+
 def test_run_until_removes_temporary_breakpoint_on_success(monkeypatch):
     stopped = 77
     monkeypatch.setattr(lldb_module.lldb, "eStateStopped", stopped)
