@@ -12,6 +12,7 @@ from focaccia.deterministic import (
     DeterministicLog,
     Event,
     EventSynchronizationError,
+    ExtraRegisterState,
     KnownMemoryRange,
     MemoryWrite,
     SyscallEvent,
@@ -429,8 +430,11 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
 def test_gdb_signal_replay_rejects_unwritable_complete_fp_state(monkeypatch):
     target = load_target_module(monkeypatch)
 
-    with pytest.raises(UnsupportedReplayEffect, match="x87 tag state"):
-        target.GDBServerConnector.reset_signal_handler_fp_state(cast(Any, object()))
+    with pytest.raises(UnsupportedReplayEffect, match="atomically establish"):
+        target.GDBServerConnector.write_signal_handler_extra_registers(
+            cast(Any, object()),
+            ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(512)),
+        )
 
     sys.modules.pop("focaccia.qemu.target", None)
 

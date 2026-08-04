@@ -225,8 +225,68 @@ def test_unknown_task_and_event_variants_fail_explicitly(tmp_path):
         arch="x8664",
         event=unknown_event_union,
         registers=SimpleNamespace(raw=registers),
+        extraRegisters=SimpleNamespace(raw=b""),
         memWrites=(),
     )
     cursor = adapter._RawDataCursor(b"", tmp_path / "data")
     with pytest.raises(DeterministicLogFormatError, match="unknown variant"):
         adapter._event_from_frame(unknown_frame, 1, cursor)
+
+
+def test_rr_frames_preserve_and_decode_versioned_extra_register_payloads(tmp_path):
+    cases = (
+        (
+            "x8664",
+            adapter._X86_64_REGISTERS.pack(*([0] * 27)),
+            bytearray(576),
+            "x86-xsave-v1",
+            "mxcsr",
+            0x1F80,
+        ),
+        (
+            "aarch64",
+            adapter._AARCH64_REGISTERS.pack(*([0] * 36)),
+            bytearray(528),
+            "aarch64-nt-fpr-v1",
+            "fpsr",
+            0x1234,
+        ),
+    )
+    for arch, registers, raw, expected_format, register, expected in cases:
+        if arch == "x8664":
+            raw[24:28] = expected.to_bytes(4, "little")
+        else:
+            raw[512:516] = expected.to_bytes(4, "little")
+        frame = adapter.RR_SCHEMA.Frame.new_message()
+        frame.tid = 1
+        frame.arch = arch
+        frame.registers.raw = registers
+        frame.extraRegisters.raw = bytes(raw)
+        frame.event.instructionTrap = None
+
+        event = adapter._event_from_frame(
+            frame,
+            1,
+            adapter._RawDataCursor(b"", tmp_path / "data"),
+        )
+
+        assert event.extra_registers is not None
+        assert event.extra_registers.format == expected_format
+        assert event.extra_registers.raw == bytes(raw)
+        assert event.extra_registers.read_register(register) == expected
+
+
+def test_rr_frame_rejects_truncated_extra_register_payload(tmp_path):
+    frame = adapter.RR_SCHEMA.Frame.new_message()
+    frame.tid = 1
+    frame.arch = "aarch64"
+    frame.registers.raw = adapter._AARCH64_REGISTERS.pack(*([0] * 36))
+    frame.extraRegisters.raw = bytes(527)
+    frame.event.instructionTrap = None
+
+    with pytest.raises(DeterministicLogFormatError, match="expected 528"):
+        adapter._event_from_frame(
+            frame,
+            1,
+            adapter._RawDataCursor(b"", tmp_path / "data"),
+        )

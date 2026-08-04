@@ -2,25 +2,31 @@
 
 This module deliberately exposes a bounded single-thread baseline. Recorded
 file, descriptor, socket, and output effects never execute on the live host;
-process-local mappings execute in QEMU and are reconciled. Signal delivery and
-other ABI surfaces without fixture-backed semantics remain explicit rejects.
+process-local mappings execute in QEMU and are reconciled. Base AArch64
+FPSIMD signal frames are validated; SVE/SME extension records remain explicit
+unsupported boundaries.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from focaccia.arch.aarch64 import ArchAArch64
+from focaccia.deterministic import SignalEvent
 from focaccia.qemu.syscall import (
     DirectMemoryOutputs,
     DirectOutput,
     ExecutionGuard,
     FixedExtent,
     IovecResultOutputs,
+    MaterializedMemoryWrite,
     NoMemoryOutputs,
     PointedU32Extent,
     ReconcileMode,
     RegisterExtent,
+    ReplayEventError,
     ReplayStrategy,
     ResultExtent,
     SyscallPolicy,
@@ -133,6 +139,250 @@ def _sockaddr(register: str, length_pointer_register: str) -> DirectOutput:
     return DirectOutput(register, PointedU32Extent(length_pointer_register, maximum=128))
 
 
+# Linux AArch64 rt-signal ABI offsets. These follow Linux UAPI and the pinned
+# QEMU ``linux-user/aarch64/signal.c`` layout.
+AARCH64_SIGINFO_SIZE = 128
+AARCH64_UCONTEXT_OFFSET = 128
+AARCH64_UCONTEXT_STACK_OFFSET = 16
+AARCH64_UCONTEXT_SIGMASK_OFFSET = 40
+AARCH64_UCONTEXT_MCONTEXT_OFFSET = 176
+AARCH64_SIGCONTEXT_FAULT_OFFSET = 0
+AARCH64_SIGCONTEXT_REGISTERS_OFFSET = 8
+AARCH64_SIGCONTEXT_SP_OFFSET = 256
+AARCH64_SIGCONTEXT_PC_OFFSET = 264
+AARCH64_SIGCONTEXT_PSTATE_OFFSET = 272
+AARCH64_SIGCONTEXT_RESERVED_OFFSET = 288
+AARCH64_RESERVED_SIZE = 4096
+AARCH64_RT_SIGFRAME_SIZE = 4688
+AARCH64_FRAME_RECORD_SIZE = 16
+AARCH64_FPSIMD_MAGIC = 0x46508001
+AARCH64_FPSIMD_CONTEXT_SIZE = 528
+AARCH64_KERNEL_SIGSET_SIZE = 8
+MAX_AARCH64_SIGNAL_FRAME_SIZE = 1 << 20
+
+
+class _RecordedMemoryImage:
+    def __init__(self, writes: Sequence[MaterializedMemoryWrite]):
+        nonempty = sorted(
+            (write for write in writes if write.data),
+            key=lambda write: write.recorded_address,
+        )
+        previous_end: int | None = None
+        for write in nonempty:
+            if previous_end is not None and write.recorded_address < previous_end:
+                raise ReplayEventError("Recorded signal-frame writes overlap.")
+            previous_end = write.recorded_address + len(write.data)
+        self.writes = tuple(nonempty)
+
+    def read(self, address: int, size: int) -> bytes:
+        result = bytearray()
+        cursor = address
+        remaining = size
+        for write in self.writes:
+            start = write.recorded_address
+            end = start + len(write.data)
+            if end <= cursor:
+                continue
+            if start > cursor:
+                break
+            take = min(remaining, end - cursor)
+            result.extend(write.data[cursor - start : cursor - start + take])
+            cursor += take
+            remaining -= take
+            if remaining == 0:
+                return bytes(result)
+        raise ReplayEventError(
+            f"Recorded AArch64 signal frame does not contain "
+            f"[{address:#x}, {address + size:#x})."
+        )
+
+    @property
+    def start(self) -> int | None:
+        return self.writes[0].recorded_address if self.writes else None
+
+    @property
+    def end(self) -> int | None:
+        if not self.writes:
+            return None
+        last = self.writes[-1]
+        return last.recorded_address + len(last.data)
+
+
+@dataclass(frozen=True, slots=True)
+class AArch64KernelSigaction:
+    """Linux AArch64 kernel ``struct sigaction``."""
+
+    handler: int
+    flags: int
+    restorer: int
+    mask: int
+
+    SIZE = 32
+    SA_SIGINFO = 0x00000004
+    SA_RESTORER = 0x04000000
+    SA_ONSTACK = 0x08000000
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> AArch64KernelSigaction:
+        if len(data) != cls.SIZE:
+            raise ReplayEventError(
+                f"AArch64 kernel sigaction has {len(data)} bytes, expected {cls.SIZE}."
+            )
+        return cls(
+            *(int.from_bytes(data[offset : offset + 8], "little") for offset in range(0, 32, 8))
+        )
+
+    def to_bytes(self) -> bytes:
+        return b"".join(
+            value.to_bytes(8, "little")
+            for value in (self.handler, self.flags, self.restorer, self.mask)
+        )
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("handler", self.handler),
+            ("flags", self.flags),
+            ("restorer", self.restorer),
+            ("mask", self.mask),
+        ):
+            if value < 0 or value >= 1 << 64:
+                raise ValueError(f"Signal-action field {name} is not a uint64.")
+        if self.flags & self.SA_RESTORER and self.restorer == 0:
+            raise ReplayEventError("SA_RESTORER is set with a null AArch64 restorer.")
+
+
+@dataclass(frozen=True, slots=True)
+class AArch64RecordedSignalFrame:
+    """Validated base AArch64 rt-signal frame with FPSIMD context."""
+
+    frame_address: int
+    ucontext_address: int
+    siginfo_address: int
+    restorer_address: int
+    signal_number: int
+    signal_mask: int
+    altstack: bytes
+    saved_registers: Mapping[str, int]
+    writes: tuple[MaterializedMemoryWrite, ...]
+
+    @classmethod
+    def from_events(
+        cls,
+        pre_event: SignalEvent,
+        post_event: SignalEvent,
+        writes: Sequence[MaterializedMemoryWrite],
+    ) -> AArch64RecordedSignalFrame:
+        if pre_event.arch.archname != "aarch64" or post_event.arch.archname != "aarch64":
+            raise ReplayEventError("AArch64 signal replay received another architecture.")
+        if post_event.signal_variant != "signalHandler":
+            raise ReplayEventError("An AArch64 signal frame requires signalHandler.")
+        if post_event.descriptor.disposition != "userHandler":
+            raise ReplayEventError("A signalHandler event does not have userHandler disposition.")
+        if len(pre_event.descriptor.siginfo) != AARCH64_SIGINFO_SIZE:
+            raise ReplayEventError(
+                f"RR AArch64 siginfo has {len(pre_event.descriptor.siginfo)} bytes, "
+                f"expected {AARCH64_SIGINFO_SIZE}."
+            )
+        try:
+            frame_address = post_event.registers["sp"]
+            siginfo_address = post_event.registers["x1"]
+            ucontext_address = post_event.registers["x2"]
+            restorer_address = post_event.registers["x30"]
+        except KeyError as error:
+            raise ReplayEventError("AArch64 handler event lacks ABI registers.") from error
+        if frame_address & 0xF:
+            raise ReplayEventError("AArch64 signal SP is not 16-byte aligned.")
+        if siginfo_address != frame_address:
+            raise ReplayEventError("AArch64 siginfo pointer does not equal the frame address.")
+        if ucontext_address != frame_address + AARCH64_UCONTEXT_OFFSET:
+            raise ReplayEventError("AArch64 ucontext pointer has the wrong frame offset.")
+
+        image = _RecordedMemoryImage(writes)
+        if image.start != frame_address:
+            raise ReplayEventError("Recorded AArch64 signal writes do not start at SP.")
+        image_end = image.end
+        if image_end is None or image_end - frame_address > MAX_AARCH64_SIGNAL_FRAME_SIZE:
+            raise ReplayEventError("Recorded AArch64 signal frame is empty or oversized.")
+        recorded_siginfo = image.read(frame_address, AARCH64_SIGINFO_SIZE)
+        if recorded_siginfo != pre_event.descriptor.siginfo:
+            raise ReplayEventError("AArch64 frame siginfo differs from the RR event.")
+        signal_number = int.from_bytes(recorded_siginfo[:4], "little", signed=True)
+        if post_event.registers["x0"] != signal_number:
+            raise ReplayEventError("AArch64 handler receives the wrong signal number.")
+
+        mcontext = ucontext_address + AARCH64_UCONTEXT_MCONTEXT_OFFSET
+        saved: dict[str, int] = {}
+        for index in range(31):
+            name = f"x{index}"
+            value = int.from_bytes(
+                image.read(mcontext + AARCH64_SIGCONTEXT_REGISTERS_OFFSET + index * 8, 8),
+                "little",
+            )
+            if value != pre_event.registers[name]:
+                raise ReplayEventError(f"AArch64 signal context disagrees for {name}.")
+            saved[name] = value
+        for name, offset in (
+            ("sp", AARCH64_SIGCONTEXT_SP_OFFSET),
+            ("pc", AARCH64_SIGCONTEXT_PC_OFFSET),
+            ("cpsr", AARCH64_SIGCONTEXT_PSTATE_OFFSET),
+        ):
+            value = int.from_bytes(image.read(mcontext + offset, 8), "little")
+            if value != pre_event.registers[name]:
+                raise ReplayEventError(f"AArch64 signal context disagrees for {name}.")
+            saved[name] = value
+
+        pre_extra = pre_event.extra_registers
+        if pre_extra is None or pre_extra.format != "aarch64-nt-fpr-v1":
+            raise ReplayEventError("AArch64 signal entry lacks recorded NT_FPR state.")
+        fpsimd = mcontext + AARCH64_SIGCONTEXT_RESERVED_OFFSET
+        magic = int.from_bytes(image.read(fpsimd, 4), "little")
+        size = int.from_bytes(image.read(fpsimd + 4, 4), "little")
+        if magic != AARCH64_FPSIMD_MAGIC or size != AARCH64_FPSIMD_CONTEXT_SIZE:
+            raise ReplayEventError("AArch64 signal frame has an invalid FPSIMD record.")
+        if int.from_bytes(image.read(fpsimd + 8, 4), "little") != pre_extra.read_register("fpsr"):
+            raise ReplayEventError("AArch64 signal frame FPSR differs from RR extra state.")
+        if int.from_bytes(image.read(fpsimd + 12, 4), "little") != pre_extra.read_register("fpcr"):
+            raise ReplayEventError("AArch64 signal frame FPCR differs from RR extra state.")
+        for index in range(32):
+            value = int.from_bytes(image.read(fpsimd + 16 + index * 16, 16), "little")
+            if value != pre_extra.read_register(f"v{index}"):
+                raise ReplayEventError(f"AArch64 signal frame differs for v{index}.")
+        next_magic = int.from_bytes(
+            image.read(fpsimd + AARCH64_FPSIMD_CONTEXT_SIZE, 4), "little"
+        )
+        next_size = int.from_bytes(
+            image.read(fpsimd + AARCH64_FPSIMD_CONTEXT_SIZE + 4, 4), "little"
+        )
+        if next_magic != 0 or next_size != 0:
+            raise ReplayEventError(
+                "AArch64 SVE/SME signal extension records are not supported."
+            )
+
+        frame_record = frame_address + AARCH64_RT_SIGFRAME_SIZE
+        if int.from_bytes(image.read(frame_record, 8), "little") != pre_event.registers["x29"]:
+            raise ReplayEventError("AArch64 unwind frame has the wrong frame pointer.")
+        if int.from_bytes(image.read(frame_record + 8, 8), "little") != pre_event.registers["x30"]:
+            raise ReplayEventError("AArch64 unwind frame has the wrong link register.")
+        if post_event.registers["x29"] != frame_record:
+            raise ReplayEventError("AArch64 handler frame pointer has the wrong value.")
+
+        signal_mask = int.from_bytes(
+            image.read(ucontext_address + AARCH64_UCONTEXT_SIGMASK_OFFSET, 8), "little"
+        )
+        altstack = image.read(ucontext_address + AARCH64_UCONTEXT_STACK_OFFSET, 24)
+        return cls(
+            frame_address,
+            ucontext_address,
+            siginfo_address,
+            restorer_address,
+            signal_number,
+            signal_mask,
+            altstack,
+            MappingProxyType(saved),
+            tuple(writes),
+        )
+
+
 # Numbers and structure sizes follow Linux's AArch64 asm-generic syscall ABI.
 # This is intentionally not an assertion of complete Linux syscall support.
 _POLICIES: dict[int, SyscallPolicy] = {
@@ -212,14 +462,33 @@ _POLICIES: dict[int, SyscallPolicy] = {
     101: _direct(101, "nanosleep", _fixed("x1", 16)),
     113: _direct(113, "clock_gettime", _fixed("x1", 16)),
     124: SyscallPolicy(124, "sched_yield", ReplayStrategy.SAFE_PASSTHROUGH, _NO_OUTPUTS),
-    132: _reject(132, "sigaltstack", "AArch64 signal-stack replay is not fixture-backed"),
+    132: _direct(
+        132,
+        "sigaltstack",
+        _fixed("x1", 24),
+        state_action=SyscallStateAction.SIGNAL_ALTSTACK,
+    ),
     133: _reject(133, "rt_sigsuspend", "interrupted system-call restart is not modeled"),
-    134: _reject(134, "rt_sigaction", "AArch64 signal-action replay is not fixture-backed"),
-    135: _reject(135, "rt_sigprocmask", "AArch64 signal-mask replay is not fixture-backed"),
-    136: _reject(136, "rt_sigpending", "AArch64 signal replay is not fixture-backed"),
-    137: _reject(137, "rt_sigtimedwait", "AArch64 signal replay is not fixture-backed"),
-    138: _reject(138, "rt_sigqueueinfo", "AArch64 signal replay is not fixture-backed"),
-    139: _reject(139, "rt_sigreturn", "AArch64 signal return is not fixture-backed"),
+    134: _direct(
+        134,
+        "rt_sigaction",
+        _fixed("x2", 32),
+        state_action=SyscallStateAction.SIGNAL_ACTION,
+    ),
+    135: _direct(
+        135,
+        "rt_sigprocmask",
+        _register("x2", "x3"),
+        state_action=SyscallStateAction.SIGNAL_MASK,
+    ),
+    136: _direct(136, "rt_sigpending", _register("x0", "x1")),
+    137: _direct(137, "rt_sigtimedwait", _fixed("x1", 128)),
+    138: _recorded(138, "rt_sigqueueinfo"),
+    139: _execute(
+        139,
+        "rt_sigreturn",
+        state_action=SyscallStateAction.RETURN_FROM_SIGNAL,
+    ),
     160: _direct(160, "uname", _fixed("x0", 390)),
     172: _recorded(172, "getpid"),
     173: _recorded(173, "getppid"),

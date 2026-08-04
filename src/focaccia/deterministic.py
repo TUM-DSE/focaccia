@@ -147,6 +147,106 @@ class MemoryWrite:
         return b"".join(item.data for item in self.known_ranges)
 
 
+ExtraRegisterFormat = Literal["x86-xsave-v1", "aarch64-nt-fpr-v1"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExtraRegisterState:
+    """Versioned raw RR extra-register payload with validated base layouts."""
+
+    arch: Arch
+    format: ExtraRegisterFormat
+    raw: bytes
+
+    X86_FXSAVE_SIZE = 512
+    X86_XSAVE_HEADER_SIZE = 64
+    AARCH64_NT_FPR_SIZE = 528
+    MAX_SIZE = 1 << 20
+
+    def __post_init__(self) -> None:
+        raw = bytes(self.raw)
+        object.__setattr__(self, "raw", raw)
+        if not raw:
+            raise ValueError("An extra-register payload cannot be empty.")
+        if len(raw) > self.MAX_SIZE:
+            raise ValueError("An extra-register payload exceeds the size limit.")
+        if self.format == "x86-xsave-v1":
+            if self.arch.archname != "x86_64" or self.arch.endianness != "little":
+                raise ValueError("x86 XSAVE state requires little-endian x86-64.")
+            if len(raw) < self.X86_FXSAVE_SIZE:
+                raise ValueError(
+                    f"x86 XSAVE state has {len(raw)} bytes, expected at least "
+                    f"{self.X86_FXSAVE_SIZE}."
+                )
+            if self.X86_FXSAVE_SIZE < len(raw) < (
+                self.X86_FXSAVE_SIZE + self.X86_XSAVE_HEADER_SIZE
+            ):
+                raise ValueError("x86 XSAVE state has a truncated XSAVE header.")
+        elif self.format == "aarch64-nt-fpr-v1":
+            if self.arch.archname != "aarch64" or self.arch.endianness != "little":
+                raise ValueError("AArch64 NT_FPR state requires little-endian AArch64.")
+            if len(raw) != self.AARCH64_NT_FPR_SIZE:
+                raise ValueError(
+                    f"AArch64 NT_FPR state has {len(raw)} bytes, expected "
+                    f"{self.AARCH64_NT_FPR_SIZE}."
+                )
+        else:
+            raise ValueError(f"Unknown extra-register format {self.format!r}.")
+
+    @classmethod
+    def from_rr(cls, arch: Arch, raw: bytes) -> ExtraRegisterState | None:
+        payload = bytes(raw)
+        if not payload:
+            return None
+        if arch.archname == "x86_64" and arch.endianness == "little":
+            return cls(arch, "x86-xsave-v1", payload)
+        if arch.archname == "aarch64" and arch.endianness == "little":
+            return cls(arch, "aarch64-nt-fpr-v1", payload)
+        raise UnsupportedDeterministicArchitectureError(
+            f"RR extra-register decoding is unsupported for {arch.serialized_name}."
+        )
+
+    def read_register(self, name: str) -> int:
+        """Decode the base FP/vector registers shared with RR v85."""
+        normalized = name.lower()
+        if self.format == "aarch64-nt-fpr-v1":
+            if normalized.startswith("v") and normalized[1:].isdigit():
+                index = int(normalized[1:])
+                if 0 <= index < 32:
+                    offset = index * 16
+                    return int.from_bytes(self.raw[offset : offset + 16], "little")
+            if normalized == "fpsr":
+                return int.from_bytes(self.raw[512:516], "little")
+            if normalized == "fpcr":
+                return int.from_bytes(self.raw[516:520], "little")
+            raise KeyError(name)
+
+        # The first 512 bytes use the architectural FXSAVE64 layout.
+        if normalized.startswith("xmm") and normalized[3:].isdigit():
+            index = int(normalized[3:])
+            if 0 <= index < 16:
+                offset = 160 + index * 16
+                return int.from_bytes(self.raw[offset : offset + 16], "little")
+        scalar_fields = {
+            "fcw": (0, 2),
+            "fsw": (2, 2),
+            "ftw": (4, 1),
+            "fop": (6, 2),
+            "fip": (8, 8),
+            "fdp": (16, 8),
+            "mxcsr": (24, 4),
+            "mxcsr_mask": (28, 4),
+        }
+        if normalized in scalar_fields:
+            offset, size = scalar_fields[normalized]
+            return int.from_bytes(self.raw[offset : offset + size], "little")
+        if normalized == "xstate_bv":
+            if len(self.raw) < 576:
+                return 0
+            return int.from_bytes(self.raw[512:520], "little")
+        raise KeyError(name)
+
+
 class RegisterValues(Mapping[str, int]):
     """Immutable architecture-normalized register values.
 
@@ -211,6 +311,7 @@ class Event:
     mem_writes: tuple[MemoryWrite, ...] | Sequence[MemoryWrite]
     event_type: str
     event_count: int = 0
+    extra_registers: ExtraRegisterState | None = None
 
     def __post_init__(self) -> None:
         if self.pc is not None and self.pc < 0:
@@ -221,6 +322,8 @@ class Event:
             raise ValueError("An event count cannot be negative.")
         object.__setattr__(self, "registers", RegisterValues(self.arch, self.registers))
         object.__setattr__(self, "mem_writes", tuple(self.mem_writes))
+        if self.extra_registers is not None and self.extra_registers.arch != self.arch:
+            raise ValueError("Extra registers use a different architecture.")
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -237,6 +340,7 @@ class SyscallBufferFlushEvent(Event):
         mprotect_records: bytes,
         *,
         event_count: int = 0,
+        extra_registers: ExtraRegisterState | None = None,
     ):
         Event.__init__(
             self,
@@ -247,6 +351,7 @@ class SyscallBufferFlushEvent(Event):
             memory_writes,
             "syscallBufFlush",
             event_count,
+            extra_registers,
         )
         object.__setattr__(self, "mprotect_records", bytes(mprotect_records))
 
@@ -312,6 +417,7 @@ class SyscallEvent(Event):
         syscall_extras: SyscallExtra | None = None,
         *,
         event_count: int = 0,
+        extra_registers: ExtraRegisterState | None = None,
     ):
         if syscall_state not in ("enteringPtrace", "entering", "exiting"):
             raise ValueError(f"Unsupported system-call state: {syscall_state}.")
@@ -324,6 +430,7 @@ class SyscallEvent(Event):
             memory_writes,
             "syscall",
             event_count,
+            extra_registers,
         )
         object.__setattr__(self, "syscall_arch", syscall_arch)
         object.__setattr__(self, "syscall_number", syscall_number)
@@ -375,6 +482,7 @@ class SignalEvent(Event):
         signal_handler: SignalDescriptor | None = None,
         *,
         event_count: int = 0,
+        extra_registers: ExtraRegisterState | None = None,
     ):
         variants = (signal_number, signal_delivery, signal_handler)
         if sum(item is not None for item in variants) != 1:
@@ -388,6 +496,7 @@ class SignalEvent(Event):
             memory_writes,
             "signal",
             event_count,
+            extra_registers,
         )
         object.__setattr__(self, "signal_number", signal_number)
         object.__setattr__(self, "signal_delivery", signal_delivery)

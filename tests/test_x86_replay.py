@@ -8,6 +8,7 @@ import pytest
 from focaccia.arch import x86
 from focaccia.deterministic import (
     Event,
+    ExtraRegisterState,
     KnownMemoryRange,
     MemoryWrite,
     OpenedFileDescriptor,
@@ -76,8 +77,11 @@ class FakeReplayTarget:
         self.mutations.append(("memory", address, bytes(data)))
         self.state.write_memory(address, data)
 
-    def reset_signal_handler_fp_state(self) -> None:
-        pass
+    def write_signal_handler_extra_registers(
+        self,
+        extra_registers: ExtraRegisterState,
+    ) -> None:
+        del extra_registers
 
     def execute_replay_instruction(self) -> ReadableProgramState | None:
         self.steps += 1

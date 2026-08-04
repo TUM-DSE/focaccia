@@ -11,6 +11,16 @@ flake, which integrates with our Python uv environment via uv2nix.
 We do not support any other build system officially but Focaccia has been known to work on various
 other systems also, as long as its Python dependencies are provided.
 
+For development, the checked-in `.envrc` enters the flake's default development
+shell through nix-direnv. From a checkout with direnv and nix-direnv installed,
+authorize it once:
+
+```bash
+direnv allow
+```
+
+Using `nix develop` directly remains equivalent.
+
 ## How To Use
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.
@@ -88,19 +98,25 @@ effect is classified as recorded replay, execute-and-reconcile, narrowly safe
 passthrough, or rejection; an unclassified call is never executed on the live
 host. Both engines cover bounded direct and `iovec` outputs, virtual
 descriptors, common file/socket effects, anonymous mapping reconciliation, and
-terminal calls. The x86-64 engine additionally validates Linux signal frames
-and has a fixture model of `rt_sigreturn`. AArch64 signal delivery/return,
-variant-dependent `ioctl`, nested `recvmsg`/descriptor passing, file-backed
-mappings, task creation, interrupted-syscall restart, and unknown RR events are
-rejected. Live x86-64 GDB signal-handler delivery also rejects before mutation
-because QEMU's remote stub cannot reset all x87 FP/XSTATE required by the Linux
-handler-entry ABI.
+terminal calls. Both engines validate Linux signal frames, replay recorded
+handler-entry FP/vector state through a typed backend boundary, and have fixture
+models of `rt_sigreturn`; AArch64 coverage is limited to the base FPSIMD context
+and rejects SVE/SME extension records. Variant-dependent `ioctl`, nested
+`recvmsg`/descriptor passing, file-backed mappings, task creation,
+interrupted-syscall restart, and unknown RR events are rejected. Live GDB
+signal-handler delivery on both ISAs also rejects before mutation because the
+current QEMU remote backend cannot atomically establish the complete recorded
+extra-register state.
 
-The flake exposes the pinned `rr` app on both x86-64 and AArch64. Native
-AArch64 recording requires an RR-supported microarchitecture such as Arm
-Neoverse. The `qemu-x86_64` app and the bounded smoke harness use a static,
-non-PIE, single-thread x86-64 `openat`/`read`/`write`/`close` fixture. Inspect
-that harness's exact plan without launching a target:
+The flake exposes RR 5.8.0 on both x86-64 and AArch64. This version is
+intentional: RR 5.9's standalone `replay -s` path forces GDB protocol behavior
+even when an external LLDB client connects, while Focaccia's native tracer is
+an LLDB client. RR 5.8 retains trace schema/version 85 and does not contain that
+standalone-server regression. Native AArch64 recording requires an RR-supported
+microarchitecture such as Arm Neoverse. The `qemu-x86_64` app and the bounded
+smoke harness use a static, non-PIE, single-thread x86-64
+`openat`/`read`/`write`/`close` fixture. Inspect that harness's exact plan without
+launching a target:
 
 ```bash
 nix run .#rr-qemu-smoke -- \
@@ -122,7 +138,7 @@ smoke run remain pending on the designated native x86-64 runner. Native
 AArch64 RR record/replay is exposed for oracle capture, and its QEMU-side
 syscall replay baseline is covered by synthetic RR/fake-target checks. No live
 AArch64 RR-to-QEMU run has passed, so this is not an end-to-end AArch64 support
-claim. AArch64 signal delivery/return, live signal-handler delivery, concurrent
+claim. Live signal-handler delivery, AArch64 SVE/SME signal contexts, concurrent
 replay, and general application replay remain unsupported.
 
 ### Box64

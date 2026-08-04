@@ -17,6 +17,7 @@ from focaccia.arch import Arch
 from focaccia.deterministic import (
     DeterministicLogError,
     Event,
+    ExtraRegisterState,
     SignalEvent,
     SyscallEvent,
 )
@@ -59,6 +60,8 @@ from focaccia.qemu.aarch64 import (
     SYSCALL_NUMBER_REGISTER as AARCH64_SYSCALL_NUMBER_REGISTER,
     SYSCALL_RECORDED_RESULT_REGISTERS as AARCH64_RECORDED_RESULT_REGISTERS,
     THREAD_CREATING_SYSCALLS as AARCH64_THREAD_CREATING_SYSCALLS,
+    AArch64KernelSigaction,
+    AArch64RecordedSignalFrame,
 )
 from focaccia.qemu.x86 import (
     SYSCALL_ARGUMENT_REGISTERS as X86_64_SYSCALL_ARGUMENT_REGISTERS,
@@ -71,6 +74,7 @@ from focaccia.snapshot import MemoryAccessError, ReadableProgramState, RegisterA
 
 
 _THREAD_CREATING_SYSCALLS = frozenset((56, 57, 58, 435))
+_AARCH64_GPRS = tuple(f"x{index}" for index in range(31)) + ("sp", "pc", "cpsr")
 _X86_GPRS = (
     "r15",
     "r14",
@@ -113,7 +117,10 @@ class ReplayTarget(Protocol):
 
     def write_target_memory(self, address: int, data: bytes) -> None: ...
 
-    def reset_signal_handler_fp_state(self) -> None: ...
+    def write_signal_handler_extra_registers(
+        self,
+        extra_registers: ExtraRegisterState,
+    ) -> None: ...
 
     def execute_replay_instruction(self) -> ReadableProgramState | None: ...
 
@@ -131,10 +138,14 @@ class VirtualDescriptor:
     source_event: int
 
 
+SignalAction = X86KernelSigaction | AArch64KernelSigaction
+RecordedSignalFrame = X86RecordedSignalFrame | AArch64RecordedSignalFrame
+
+
 @dataclass(frozen=True, slots=True)
 class DeliveredSignal:
-    frame: X86RecordedSignalFrame
-    action: X86KernelSigaction
+    frame: RecordedSignalFrame
+    action: SignalAction
     handler_pc: int
 
 
@@ -143,7 +154,7 @@ class ReplayStateSnapshot:
     descriptors: Mapping[int, VirtualDescriptor]
     descriptor_offsets: Mapping[int, int]
     socket_addresses: Mapping[int, tuple[bytes, bytes]]
-    signal_actions: Mapping[int, X86KernelSigaction]
+    signal_actions: Mapping[int, SignalAction]
     signal_mask: int
     signal_depth: int
     terminated: bool
@@ -158,7 +169,7 @@ class X86ReplayState:
         }
         self.descriptor_offsets: dict[int, int] = {}
         self.socket_addresses: dict[int, tuple[bytes, bytes]] = {}
-        self.signal_actions: dict[int, X86KernelSigaction] = {}
+        self.signal_actions: dict[int, SignalAction] = {}
         self.signal_mask = 0
         self.signal_frames: list[DeliveredSignal] = []
         self.altstack: bytes | None = None
@@ -334,14 +345,7 @@ class X86ReplayEngine:
 
         self._validate_pair(pre_event, post_event, policy)
         if policy.state_action is SyscallStateAction.RETURN_FROM_SIGNAL:
-            if not self.state.signal_frames:
-                raise ReplayEventError("rt_sigreturn has no delivered signal frame.")
-            expected_rsp = self.state.signal_frames[-1].frame.frame_address + 8
-            actual_rsp = target_state.read_register("rsp")
-            if actual_rsp != expected_rsp:
-                raise ReplayEventError(
-                    f"rt_sigreturn RSP is {actual_rsp:#x}, expected {expected_rsp:#x}."
-                )
+            self._validate_signal_return_entry(target_state)
         writes = self._materialize_writes(post_event)
         result = _signed_u64(self._event_register(post_event, self.result_register))
         context = SyscallReplayContext(pre_event, post_event, target_state, result)
@@ -525,9 +529,13 @@ class X86ReplayEngine:
                 f"{self.state.signal_mask:#x}."
             )
 
-        # Linux resets live FP/vector state on handler entry. A backend that
-        # cannot perform that reset must reject before the frame or GPRs change.
-        target.reset_signal_handler_fp_state()
+        # Linux resets live FP/vector state on handler entry. RR records that
+        # exact post-delivery state; a backend lacking an atomic write
+        # capability must reject before the frame or GPRs change.
+        handler_extra = post_event.extra_registers
+        if handler_extra is None or handler_extra.format != "x86-xsave-v1":
+            raise ReplayEventError("x86 signal-handler event lacks recorded XSAVE state.")
+        target.write_signal_handler_extra_registers(handler_extra)
 
         # All frame bytes, including siginfo, mask, reserved words, and the
         # complete recorded FXSAVE/XSTATE area, are known before the first write.
@@ -947,7 +955,10 @@ class X86ReplayEngine:
                 self.state.socket_addresses[effect.fd] = (effect.local, effect.remote)
             elif isinstance(effect, SignalActionReplayEffect):
                 if effect.action is not None:
-                    if not isinstance(effect.action, X86KernelSigaction):
+                    if not isinstance(
+                        effect.action,
+                        (X86KernelSigaction, AArch64KernelSigaction),
+                    ):
                         raise RuntimeError("Signal action effect has the wrong ABI type.")
                     self.state.signal_actions[effect.signal_number] = effect.action
             elif isinstance(effect, SignalMaskReplayEffect):
@@ -1149,6 +1160,16 @@ class X86ReplayEngine:
             f"Recorded outputs do not contain [{address:#x}, {address + size:#x})."
         )
 
+    def _validate_signal_return_entry(self, state: ReadableProgramState) -> None:
+        if not self.state.signal_frames:
+            raise ReplayEventError("rt_sigreturn has no delivered signal frame.")
+        expected_rsp = self.state.signal_frames[-1].frame.frame_address + 8
+        actual_rsp = state.read_register("rsp")
+        if actual_rsp != expected_rsp:
+            raise ReplayEventError(
+                f"rt_sigreturn RSP is {actual_rsp:#x}, expected {expected_rsp:#x}."
+            )
+
     def _finish_signal_return(
         self,
         state: ReadableProgramState,
@@ -1218,21 +1239,226 @@ class AArch64ReplayEngine(X86ReplayEngine):
         pre_event: SignalEvent,
         post_event: SignalEvent,
     ) -> ReadableProgramState | None:
-        """Reject AArch64 signal delivery before observing or changing QEMU."""
-        del target, post_event
-        signal_number = pre_event.descriptor.signal_number
-        message = (
-            f"AArch64 signal {signal_number} delivery is not fixture-backed; "
-            "deterministic replay refuses target mutation."
+        effect_name = f"signal:{pre_event.descriptor.signal_number}"
+        disposition = post_event.descriptor.disposition
+        strategy = (
+            ReplayStrategy.SAFE_PASSTHROUGH
+            if disposition == "ignored"
+            else ReplayStrategy.REJECT if disposition == "fatal" else ReplayStrategy.RECORDED
         )
+        try:
+            return self._replay_aarch64_signal(target, pre_event, post_event)
+        except UnsupportedReplayEffect as error:
+            self.coverage.record(
+                event_count=pre_event.event_count,
+                effect=effect_name,
+                strategy=ReplayStrategy.REJECT,
+                outcome=CoverageOutcome.REJECTED,
+                detail=str(error),
+            )
+            raise
+        except (
+            ReplayError,
+            DeterministicLogError,
+            RegisterAccessError,
+            MemoryAccessError,
+        ) as error:
+            self.coverage.record(
+                event_count=pre_event.event_count,
+                effect=effect_name,
+                strategy=strategy,
+                outcome=CoverageOutcome.FAILED,
+                detail=str(error),
+            )
+            raise
+
+    def _replay_aarch64_signal(
+        self,
+        target: ReplayTarget,
+        pre_event: SignalEvent,
+        post_event: SignalEvent,
+    ) -> ReadableProgramState | None:
+        self._validate_target_arch(target)
+        if pre_event.arch != self.arch or post_event.arch != self.arch:
+            raise ReplayEventError("AArch64 signal events use a different architecture.")
+        if pre_event.tid != post_event.tid or pre_event.descriptor != post_event.descriptor:
+            raise ReplayEventError("AArch64 signal pair changes thread or descriptor.")
+        if pre_event.signal_variant != "signal" or pre_event.mem_writes:
+            raise ReplayEventError("Malformed AArch64 signal pre-event.")
+        if pre_event.pc is None or post_event.pc is None:
+            raise ReplayEventError("AArch64 signal replay requires both PCs.")
+        target_state = target.current_state()
+        if target_state.read_pc() != pre_event.pc:
+            raise ReplayEventError("AArch64 signal event does not match the target PC.")
+
+        signal_number = pre_event.descriptor.signal_number
+        effect_name = f"signal:{signal_number}"
+        if post_event.descriptor.disposition == "ignored":
+            if post_event.signal_variant != "signalDelivery" or post_event.mem_writes:
+                raise ReplayEventError("Ignored AArch64 signal has frame effects.")
+            self._reconcile_event_registers(target_state, post_event, _AARCH64_GPRS)
+            self.coverage.record(
+                event_count=pre_event.event_count,
+                effect=effect_name,
+                strategy=ReplayStrategy.SAFE_PASSTHROUGH,
+                outcome=CoverageOutcome.HANDLED,
+                detail="ignored signal",
+            )
+            return None
+        if post_event.descriptor.disposition == "fatal":
+            raise UnsupportedReplayEffect(
+                f"Fatal AArch64 signal {signal_number} delivery is unsupported.",
+                event_count=pre_event.event_count,
+            )
+
+        action = self.state.signal_actions.get(signal_number)
+        if not isinstance(action, AArch64KernelSigaction) or action.handler in (0, 1):
+            raise UnsupportedReplayEffect(
+                f"AArch64 signal {signal_number} has no replayed user action.",
+                event_count=pre_event.event_count,
+            )
+        writes = self._materialize_writes(post_event)
+        frame = AArch64RecordedSignalFrame.from_events(pre_event, post_event, writes)
+        if target_state.read_register("sp") != self._event_register(pre_event, "sp"):
+            raise ReplayReconciliationError(
+                "AArch64 signal replay requires matching RR and target stacks."
+            )
+        self._reconcile_event_registers(target_state, pre_event, frame.saved_registers)
+        if post_event.pc != action.handler:
+            raise ReplayEventError("AArch64 handler PC differs from rt_sigaction.")
+        if action.flags & AArch64KernelSigaction.SA_RESTORER:
+            if frame.restorer_address != action.restorer:
+                raise ReplayEventError("AArch64 handler LR differs from the signal restorer.")
+        if frame.signal_mask != self.state.signal_mask:
+            raise ReplayEventError("AArch64 signal frame saves the wrong signal mask.")
+
+        handler_extra = post_event.extra_registers
+        if handler_extra is None or handler_extra.format != "aarch64-nt-fpr-v1":
+            raise ReplayEventError("AArch64 handler event lacks recorded NT_FPR state.")
+        target.write_signal_handler_extra_registers(handler_extra)
+        for write in writes:
+            target.write_target_memory(write.recorded_address, write.data)
+        target.skip(post_event.pc)
+        for register in ("x0", "x1", "x2", "x29", "x30", "sp", "cpsr"):
+            target.write_target_register(register, self._event_register(post_event, register))
+
+        self.state.signal_frames.append(DeliveredSignal(frame, action, post_event.pc))
+        signal_bit = 1 << (signal_number - 1)
+        self.state.signal_mask |= action.mask & _BLOCKABLE_SIGNAL_MASK
+        if action.flags & _SA_NODEFER == 0:
+            self.state.signal_mask |= signal_bit
+        if action.flags & _SA_RESETHAND:
+            self.state.signal_actions[signal_number] = AArch64KernelSigaction(0, 0, 0, 0)
         self.coverage.record(
             event_count=pre_event.event_count,
-            effect=f"signal:{signal_number}",
-            strategy=ReplayStrategy.REJECT,
-            outcome=CoverageOutcome.REJECTED,
-            detail=message,
+            effect=effect_name,
+            strategy=ReplayStrategy.RECORDED,
+            outcome=CoverageOutcome.HANDLED,
         )
-        raise UnsupportedReplayEffect(message, event_count=pre_event.event_count)
+        return target.current_state()
+
+    def _plan_signal_action(
+        self,
+        context: SyscallReplayContext,
+        memory_effects: Sequence[MemoryReplayEffect],
+    ) -> SignalActionReplayEffect | None:
+        if context.result != 0:
+            return None
+        size = context.target_state.read_register("x3")
+        if size != 8 or self._event_register(context.pre_event, "x3") != 8:
+            raise UnsupportedReplayEffect("AArch64 rt_sigaction requires an 8-byte sigset.")
+        signal_number = context.target_state.read_register("x0")
+        if signal_number != self._event_register(context.pre_event, "x0"):
+            raise ReplayEventError("AArch64 rt_sigaction signal number differs from RR.")
+        previous = self.state.signal_actions.get(
+            signal_number,
+            AArch64KernelSigaction(0, 0, 0, 0),
+        )
+        old_pointer = context.target_state.read_register("x2")
+        if old_pointer:
+            actual_old = self._memory_effect_bytes(
+                memory_effects,
+                old_pointer,
+                AArch64KernelSigaction.SIZE,
+            )
+            if actual_old != previous.to_bytes():
+                raise ReplayEventError("AArch64 rt_sigaction old action disagrees.")
+        action_pointer = context.target_state.read_register("x1")
+        action = None
+        if action_pointer:
+            action = AArch64KernelSigaction.from_bytes(
+                context.target_state.read_memory(action_pointer, AArch64KernelSigaction.SIZE)
+            )
+        return SignalActionReplayEffect(signal_number, action)
+
+    def _plan_signal_mask(
+        self,
+        context: SyscallReplayContext,
+        memory_effects: Sequence[MemoryReplayEffect],
+    ) -> SignalMaskReplayEffect | None:
+        if context.result != 0:
+            return None
+        size = context.target_state.read_register("x3")
+        if size != 8 or self._event_register(context.pre_event, "x3") != 8:
+            raise UnsupportedReplayEffect("AArch64 rt_sigprocmask requires an 8-byte sigset.")
+        old_pointer = context.target_state.read_register("x2")
+        if old_pointer:
+            recorded_old = self._memory_effect_bytes(memory_effects, old_pointer, 8)
+            if int.from_bytes(recorded_old, "little") != self.state.signal_mask:
+                raise ReplayEventError("AArch64 rt_sigprocmask old mask disagrees.")
+        how = _signed_u64(context.target_state.read_register("x0"))
+        if how != _signed_u64(self._event_register(context.pre_event, "x0")):
+            raise ReplayEventError("AArch64 rt_sigprocmask operation differs from RR.")
+        set_pointer = context.target_state.read_register("x1")
+        if set_pointer == 0:
+            next_mask = self.state.signal_mask
+        else:
+            requested = (
+                int.from_bytes(context.target_state.read_memory(set_pointer, 8), "little")
+                & _BLOCKABLE_SIGNAL_MASK
+            )
+            if how == _SIG_BLOCK:
+                next_mask = self.state.signal_mask | requested
+            elif how == _SIG_UNBLOCK:
+                next_mask = self.state.signal_mask & ~requested & ((1 << 64) - 1)
+            elif how == _SIG_SETMASK:
+                next_mask = requested
+            else:
+                raise ReplayEventError(f"Unknown AArch64 rt_sigprocmask operation {how}.")
+        return SignalMaskReplayEffect(self.state.signal_mask, next_mask)
+
+    @staticmethod
+    def _plan_signal_altstack(
+        context: SyscallReplayContext,
+    ) -> SignalAltstackReplayEffect | None:
+        if context.result != 0:
+            return None
+        pointer = context.target_state.read_register("x0")
+        data = context.target_state.read_memory(pointer, 24) if pointer else None
+        return SignalAltstackReplayEffect(data)
+
+    def _validate_signal_return_entry(self, state: ReadableProgramState) -> None:
+        if not self.state.signal_frames:
+            raise ReplayEventError("AArch64 rt_sigreturn has no delivered frame.")
+        expected_sp = self.state.signal_frames[-1].frame.frame_address
+        actual_sp = state.read_register("sp")
+        if actual_sp != expected_sp:
+            raise ReplayEventError(
+                f"AArch64 rt_sigreturn SP is {actual_sp:#x}, expected {expected_sp:#x}."
+            )
+
+    def _finish_signal_return(
+        self,
+        state: ReadableProgramState,
+        post_event: SyscallEvent,
+    ) -> None:
+        if not self.state.signal_frames:
+            raise ReplayEventError("AArch64 rt_sigreturn has no delivered frame.")
+        delivered = self.state.signal_frames[-1]
+        self._reconcile_event_registers(state, post_event, _AARCH64_GPRS)
+        self.state.signal_frames.pop()
+        self.state.signal_mask = delivered.frame.signal_mask
+        self.state.altstack = delivered.frame.altstack
 
 
 def make_replay_engine(arch: Arch) -> X86ReplayEngine | AArch64ReplayEngine:

@@ -232,7 +232,7 @@
 
     rrTool = pkgs.rr.overrideAttrs (old: {
       pname = "focaccia-rr";
-      version = "git";
+      version = "5.8.0";
       src = ./rr;
     });
 
@@ -1570,6 +1570,25 @@
       pytestTargets = [ "tests/test_environment_symbols.py" ];
     };
 
+    fix071SignalExtraRegistersCheck = mkStaticUnitCheck {
+      name = "fix-071-signal-extra-registers";
+      ruffTargets = [
+        "src/focaccia/deterministic.py"
+        "src/focaccia/rr/adapter.py"
+        "src/focaccia/qemu/aarch64.py"
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_aarch64_signal_replay.py"
+        "tests/test_rr_adapter.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_signal_replay.py"
+        "tests/test_rr_adapter.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+    };
+
     fix027Aarch64DeterministicReplayCheck = mkStaticUnitCheck {
       name = "fix-027-aarch64-deterministic-replay";
       ruffTargets = [
@@ -1589,6 +1608,19 @@
       rr --version | tee "$out/version.txt"
       grep -F 'rr version' "$out/version.txt"
     '';
+
+    fix076RrStandaloneLldbCompatibilityCheck =
+      pkgs.runCommand "fix-076-rr-standalone-lldb-compatibility" {
+        nativeBuildInputs = [ rrTool pkgs.gnugrep ];
+      } ''
+        mkdir -p "$out"
+        rr --version 2>&1 | tee "$out/version.txt"
+        grep -Ex 'rr version 5[.]8[.]0[[:space:]]*' "$out/version.txt"
+        grep -F '#define TRACE_VERSION 85' ${./rr}/src/TraceStream.cc \
+          > "$out/trace-version.txt"
+        grep -F '@0xcaa0b1486c12c629;' ${./rr}/src/rr_trace.capnp \
+          > "$out/schema-id.txt"
+      '';
 
   in rec {
     packages = rec {
@@ -1801,6 +1833,9 @@
       fix-062-target-environment-symbols = fix062TargetEnvironmentSymbolsCheck;
       fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
       fix-027-aarch64-deterministic-replay = fix027Aarch64DeterministicReplayCheck;
+      fix-071-signal-extra-registers = fix071SignalExtraRegistersCheck;
+      fix-076-rr-standalone-lldb-compatibility =
+        fix076RrStandaloneLldbCompatibilityCheck;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-qemu-file-read-fixture = x86FileReadFixture;
     } // pkgs.lib.optionalAttrs (system == "aarch64-linux") {

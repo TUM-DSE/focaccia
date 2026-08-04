@@ -8,6 +8,7 @@ import pytest
 
 from focaccia.arch import x86
 from focaccia.deterministic import (
+    ExtraRegisterState,
     KnownMemoryRange,
     MemoryWrite,
     SignalDescriptor,
@@ -75,6 +76,7 @@ class FakeSignalTarget:
         self.mutations: list[tuple[str, int, bytes | int]] = []
         self.steps = 0
         self.fp_resets = 0
+        self.extra_writes: list[ExtraRegisterState] = []
         self.exited = False
 
     def current_state(self) -> ReadableProgramState:
@@ -92,7 +94,12 @@ class FakeSignalTarget:
         self.mutations.append(("memory", address, bytes(data)))
         self.state.write_memory(address, data)
 
-    def reset_signal_handler_fp_state(self) -> None:
+    def write_signal_handler_extra_registers(
+        self,
+        extra_registers: ExtraRegisterState,
+    ) -> None:
+        assert extra_registers.format == "x86-xsave-v1"
+        self.extra_writes.append(extra_registers)
         self.fp_resets += 1
 
     def execute_replay_instruction(self) -> ReadableProgramState | None:
@@ -196,10 +203,18 @@ def full_write(address: int, data: bytes) -> MemoryWrite:
     )
 
 
+def handler_xsave() -> ExtraRegisterState:
+    raw = bytearray(512)
+    raw[24:28] = (0x1F80).to_bytes(4, "little")
+    raw[160:176] = bytes(range(16))
+    return ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(raw))
+
+
 def make_signal_pair(
     *,
     frame: bytes | None = None,
     signal_number: int = SIGNAL,
+    include_handler_extra: bool = True,
 ) -> tuple[SignalEvent, SignalEvent, dict[str, int]]:
     arch = x86.ArchX86()
     saved = saved_registers()
@@ -213,6 +228,7 @@ def make_signal_pair(
         (),
         signal_number=descriptor,
         event_count=20,
+        extra_registers=handler_xsave(),
     )
     post_registers = {
         **saved,
@@ -231,6 +247,7 @@ def make_signal_pair(
         (full_write(FRAME_ADDRESS, frame or build_frame(saved, signal_number=signal_number)),),
         signal_handler=descriptor,
         event_count=21,
+        extra_registers=handler_xsave() if include_handler_extra else None,
     )
     return pre, post, saved
 
@@ -419,6 +436,7 @@ def test_signal_delivery_replays_exact_frame_and_abi_registers_without_hardcodin
     assert state is not None
     assert target.steps == 0
     assert target.fp_resets == 1
+    assert target.extra_writes == [post.extra_registers]
     assert state.read_pc() == HANDLER_PC
     assert state.read_register("rdi") == SIGNAL
     assert state.read_register("rsi") == SIGINFO_ADDRESS
@@ -431,6 +449,19 @@ def test_signal_delivery_replays_exact_frame_and_abi_registers_without_hardcodin
     assert snapshot.signal_mask & (1 << (SIGNAL - 1))
     assert snapshot.signal_mask & (1 << 11)
     assert engine.coverage_report().records[-1].outcome is CoverageOutcome.HANDLED
+
+
+def test_x86_signal_requires_recorded_handler_xsave_before_frame_write():
+    pre, post, saved = make_signal_pair(include_handler_extra=False)
+    target = FakeSignalTarget(saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+
+    with pytest.raises(ReplayEventError, match="lacks recorded XSAVE"):
+        engine.replay_signal(target, pre, post)
+
+    assert target.extra_writes == []
+    assert target.mutations == []
 
 
 def test_malformed_fpstate_pointer_is_rejected_before_frame_write():

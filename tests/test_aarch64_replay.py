@@ -8,6 +8,7 @@ import pytest
 from focaccia.arch import aarch64
 from focaccia.deterministic import (
     DeterministicLog,
+    ExtraRegisterState,
     KnownMemoryRange,
     MemoryWrite,
     OpenedFileDescriptor,
@@ -68,8 +69,12 @@ class FakeReplayTarget:
         self.mutations.append(("memory", address, bytes(data)))
         self.state.write_memory(address, data)
 
-    def reset_signal_handler_fp_state(self) -> None:
-        raise AssertionError("AArch64 signal replay must reject before target access.")
+    def write_signal_handler_extra_registers(
+        self,
+        extra_registers: ExtraRegisterState,
+    ) -> None:
+        del extra_registers
+        raise AssertionError("This syscall-only fake must not receive signal state.")
 
     def execute_replay_instruction(self) -> ReadableProgramState | None:
         self.steps += 1
@@ -290,11 +295,10 @@ def test_aarch64_terminal_exit_executes_without_a_post_event():
     assert engine.coverage_report().records[-1].detail == "terminal effect"
 
 
-def test_aarch64_signal_syscalls_and_delivery_fail_closed_before_target_access():
+def test_aarch64_signal_delivery_without_replayed_action_fails_before_mutation():
     syscall_pre, _syscall_post = make_syscall_pair(134)
     engine = AArch64ReplayEngine(ARCH)
-    with pytest.raises(UnsupportedReplayEffect, match="rt_sigaction.*rejected"):
-        engine.prepare_syscall(syscall_pre)
+    assert engine.prepare_syscall(syscall_pre).state_action.value == "signal-action"
 
     siginfo = (10).to_bytes(4, "little", signed=True) + bytes(124)
     descriptor = SignalDescriptor(ARCH, siginfo, True, "userHandler")
@@ -318,7 +322,7 @@ def test_aarch64_signal_syscalls_and_delivery_fail_closed_before_target_access()
     )
     target = FakeReplayTarget({"pc": 0x4000})
 
-    with pytest.raises(UnsupportedReplayEffect, match="not fixture-backed"):
+    with pytest.raises(UnsupportedReplayEffect, match="no replayed user action"):
         engine.replay_signal(target, signal_pre, signal_post)
 
     assert target.mutations == []
@@ -331,7 +335,7 @@ def test_aarch64_signal_syscalls_and_delivery_fail_closed_before_target_access()
 def test_aarch64_policy_table_is_typed_and_uses_only_architecture_registers():
     assert AARCH64_SYSCALL_POLICIES[63].outputs.register_names() == frozenset({"x1", "x2"})
     assert AARCH64_SYSCALL_POLICIES[64].strategy is ReplayStrategy.RECORDED
-    assert AARCH64_SYSCALL_POLICIES[134].strategy is ReplayStrategy.REJECT
+    assert AARCH64_SYSCALL_POLICIES[134].strategy is ReplayStrategy.RECORDED
     assert all(
         ARCH.to_regname(register) is not None
         for policy in AARCH64_SYSCALL_POLICIES.values()

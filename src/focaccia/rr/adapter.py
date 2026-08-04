@@ -18,6 +18,7 @@ from focaccia.deterministic import (
     DeterministicLogFormatError,
     Event,
     ExecTask,
+    ExtraRegisterState,
     ExitTask,
     KnownMemoryRange,
     MemoryAdviceRange,
@@ -484,6 +485,16 @@ def _event_from_frame(
     arch = _arch_from_rr(frame.arch, context=f"event {event_count}")
     event_type = _union_variant(frame.event, context=f"event {event_count}")
 
+    try:
+        extra_registers = ExtraRegisterState.from_rr(
+            arch,
+            bytes(frame.extraRegisters.raw),
+        )
+    except ValueError as error:
+        raise DeterministicLogFormatError(
+            f"Invalid extra-register payload at event {event_count}: {error}"
+        ) from error
+
     raw_registers = bytes(frame.registers.raw)
     register_event_types = {
         "instructionTrap",
@@ -567,6 +578,7 @@ def _event_from_frame(
             bool(raw_syscall.failedDuringPreparation),
             _decode_syscall_extra(raw_syscall.extra),
             event_count=event_count,
+            extra_registers=extra_registers,
         )
 
     if event_type == "syscallbufFlush":
@@ -578,6 +590,7 @@ def _event_from_frame(
             memory_writes,
             bytes(frame.event.syscallbufFlush.mprotectRecords),
             event_count=event_count,
+            extra_registers=extra_registers,
         )
 
     if event_type in ("signal", "signalDelivery", "signalHandler"):
@@ -596,6 +609,7 @@ def _event_from_frame(
             registers,
             memory_writes,
             event_count=event_count,
+            extra_registers=extra_registers,
             **variants,
         )
 
@@ -623,6 +637,7 @@ def _event_from_frame(
         memory_writes,
         event_type,
         event_count,
+        extra_registers,
     )
 
 

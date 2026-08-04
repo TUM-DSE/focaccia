@@ -5,6 +5,7 @@ from focaccia.deterministic import (
     DeterministicLog,
     Event,
     EventSynchronizationError,
+    ExtraRegisterState,
     SignalEvent,
     DeterministicCursor,
     CursorState,
@@ -190,10 +191,13 @@ class GDBServerConnector:
     def write_target_memory(self, address: int, data: bytes) -> None:
         self._process.write_memory(address, data)
 
-    def reset_signal_handler_fp_state(self) -> None:
+    def write_signal_handler_extra_registers(
+        self,
+        extra_registers: ExtraRegisterState,
+    ) -> None:
         raise UnsupportedReplayEffect(
-            "The QEMU GDB backend cannot reset the complete x86-64 signal-handler "
-            "FP/XSTATE (the remote stub does not expose writable x87 tag state)."
+            f"The QEMU GDB backend cannot atomically establish "
+            f"{extra_registers.format} signal-handler state."
         )
 
     def execute_replay_instruction(self) -> ReadableProgramState | None:
