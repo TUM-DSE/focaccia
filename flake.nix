@@ -658,6 +658,19 @@
       ];
     };
 
+    fix088ObservedDivisionControlCheck = mkStaticUnitCheck {
+      name = "fix-088-observed-division-control";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "observed_division"
+      ];
+    };
+
     fix082X86SyscallEntryMatchingCheck = mkStaticUnitCheck {
       name = "fix-082-x86-syscall-entry-matching";
       ruffTargets = [
@@ -686,6 +699,19 @@
         "tests/test_native_tracing.py"
         "-k"
         "terminal_syscall"
+      ];
+    };
+
+    fix087RrLldbSyscallBoundaryCheck = mkStaticUnitCheck {
+      name = "fix-087-rr-lldb-syscall-boundary";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "recorded_syscall_materialization or recorded_syscall_gap"
       ];
     };
 
@@ -1909,8 +1935,10 @@
       fix-086-lldb-canonical-rflags-observation = fix086LldbCanonicalRflagsObservationCheck;
       fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
       fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
+      fix-088-observed-division-control = fix088ObservedDivisionControlCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
+      fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;

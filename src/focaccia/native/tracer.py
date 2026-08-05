@@ -27,6 +27,7 @@ from focaccia.symbolic import (
     GapReason,
     Instruction,
     SymbolEvaluationError,
+    eval_symbol,
     SymbolicCompositionError,
     SymbolicTraceItem,
     SymbolicTransform,
@@ -194,6 +195,37 @@ def _architectural_outputs_for_recorded_syscall(
     }
 
 
+def _architectural_outputs_for_observed_division(
+    outputs: dict[Expr, Expr],
+    instruction: Instruction,
+    state: ReadableProgramState,
+) -> dict[Expr, Expr]:
+    """Remove Miasm's internal divide-exception control on a successful path."""
+    if str(instruction).split(maxsplit=1)[0].upper() not in {'DIV', 'IDIV'}:
+        return outputs
+
+    marker = ExprId('exception_flags', 32)
+    control = outputs.get(marker)
+    if control is None:
+        return outputs
+
+    # ``exception_flags`` is Miasm-internal control state, not architectural
+    # CPU state. Replace its prior value with the no-pending-exception value
+    # and evaluate the control equation at the concrete pre-instruction state.
+    # A nonzero result retains the marker and therefore fails closed.
+    observed = eval_symbol(
+        control.replace_expr({marker: ExprInt(0, marker.size)}),
+        state,
+    )
+    if observed != 0:
+        return outputs
+    return {
+        destination: value
+        for destination, value in outputs.items()
+        if destination != marker
+    }
+
+
 def match_event(event: Event, target: ReadableProgramState) -> bool:
     """Match one deterministic event using a named, architecture-specific subset."""
     if event.arch != target.arch:
@@ -342,7 +374,7 @@ class SpeculativeTracer(ReadableProgramState):
             raise ValueError('A speculative destination cannot be negative.')
         self._predicted_pcs.append(destination)
 
-    def progress_execution(self) -> int | None:
+    def progress_execution(self, *, use_breakpoint: bool = False) -> int | None:
         if not self._predicted_pcs:
             return None if self.target.is_exited() else self.pc
 
@@ -362,7 +394,15 @@ class SpeculativeTracer(ReadableProgramState):
                     raise SpeculativeDivergenceError(expected, None, predictions)
                 self.target.step()
             elif len(predictions) == 1:
-                self.target.step()
+                if use_breakpoint and expected != self.pc:
+                    # RR's GDB server can implement one debugger instruction
+                    # step across both a recorded syscall and the following
+                    # instruction. A breakpoint at the known post-event
+                    # boundary preserves that instruction as a separate
+                    # transition.
+                    self.target.run_until(expected)
+                else:
+                    self.target.step()
             elif expected == self.pc or expected in predictions[:-1]:
                 # An address breakpoint cannot identify the final occurrence of
                 # a repeated PC. In particular, run_until() is a no-op when a
@@ -581,16 +621,22 @@ class SymbolicTracer:
         new_pc,
         step: bool = False,
         terminal: bool = False,
+        recorded_syscall_destination: int | None = None,
     ) -> int | None:
         if terminal:
             info(f'Running terminal event at {hex(self.target.read_pc())}')
             self.target.run_to_exit()
             return None
 
-        self.target.speculate(new_pc)
+        concrete_destination = (
+            recorded_syscall_destination if new_pc is None else new_pc
+        )
+        self.target.speculate(concrete_destination)
         if step:
             info(f'Stepping through event at {hex(self.target.read_pc())}')
-            self.target.progress_execution()
+            self.target.progress_execution(
+                use_breakpoint=recorded_syscall_destination is not None
+            )
             if self.target.is_exited():
                 return None
         return self.target.read_pc()
@@ -690,8 +736,20 @@ class SymbolicTracer:
                 event_matcher,
                 self.target,
             )
-            in_event = is_pre_event or self.target.arch.is_instr_syscall(str(instruction))
+            instruction_is_syscall = self.target.arch.is_instr_syscall(str(instruction))
+            in_event = is_pre_event or instruction_is_syscall
             terminal_event = _is_terminal_event(post_event)
+            recorded_syscall_destination = (
+                int(post_event.pc)
+                if (
+                    is_pre_event
+                    and isinstance(event, SyscallEvent)
+                    and isinstance(post_event, SyscallEvent)
+                    and post_event.pc is not None
+                    and instruction_is_syscall
+                )
+                else None
+            )
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
@@ -721,6 +779,11 @@ class SymbolicTracer:
                     event,
                     post_event,
                     instruction,
+                )
+                modified = _architectural_outputs_for_observed_division(
+                    modified,
+                    instruction,
+                    self.target,
                 )
                 if new_pc is None:
                     raise SymbolEvaluationError(
@@ -761,6 +824,7 @@ class SymbolicTracer:
                     None,
                     step=bool(in_event),
                     terminal=terminal_event,
+                    recorded_syscall_destination=recorded_syscall_destination,
                 )
                 observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
                 transform: SymbolicTraceItem = self._trace_gap(
@@ -825,12 +889,14 @@ class SymbolicTracer:
                             destination,
                             step=True,
                             terminal=terminal_event,
+                            recorded_syscall_destination=recorded_syscall_destination,
                         )
                 else:
                     self.progress(
                         None,
                         step=bool(in_event),
                         terminal=terminal_event,
+                        recorded_syscall_destination=recorded_syscall_destination,
                     )
 
                 if candidate is not None and cross_validation_error is None:
@@ -892,6 +958,7 @@ class SymbolicTracer:
                         None,
                         step=bool(in_event),
                         terminal=terminal_event,
+                        recorded_syscall_destination=recorded_syscall_destination,
                     )
                     observed_pc = 0 if self.target.is_exited() else self.target.read_pc()
                     transform = self._trace_gap(
@@ -908,6 +975,7 @@ class SymbolicTracer:
                         new_pc,
                         step=bool(in_event),
                         terminal=terminal_event,
+                        recorded_syscall_destination=recorded_syscall_destination,
                     )
                     destination = 0 if progressed_pc is None else int(progressed_pc)
                     if destination == predicted_destination:

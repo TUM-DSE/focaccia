@@ -2,8 +2,8 @@ from typing import Any, cast
 
 import pytest
 from miasm.core.locationdb import LocationDB
-from miasm.expression.expression import Expr, ExprId, ExprInt
-from miasm.jitter.csts import EXCEPT_SYSCALL
+from miasm.expression.expression import Expr, ExprCond, ExprId, ExprInt
+from miasm.jitter.csts import EXCEPT_DIV_BY_ZERO, EXCEPT_SYSCALL
 
 from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
@@ -227,6 +227,51 @@ def test_recorded_syscall_control_output_is_not_architectural_state():
         )
         is wrong_marker
     )
+
+
+@pytest.mark.parametrize(
+    ("divisor", "marker_removed"),
+    ((0x7F0, True), (0, False)),
+)
+def test_observed_division_removes_only_inactive_exception_control(
+    divisor: int,
+    marker_removed: bool,
+):
+    arch = x86.ArchX86()
+    marker = ExprId("exception_flags", 32)
+    divisor_expr = ExprId("R13", 64)
+    outputs: dict[Expr, Expr] = {
+        marker: ExprCond(
+            divisor_expr,
+            marker,
+            ExprInt(EXCEPT_DIV_BY_ZERO, 32),
+        ),
+        ExprId("RAX", 64): ExprCond(
+            divisor_expr,
+            ExprInt(2, 64),
+            ExprId("RAX", 64),
+        ),
+    }
+
+    class DivisionInstruction:
+        def __str__(self) -> str:
+            return "DIV R13"
+
+    class DivisionState(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+        def read_register(self, reg: str) -> int:
+            assert reg == "R13"
+            return divisor
+
+    architectural = tracer_module._architectural_outputs_for_observed_division(
+        outputs,
+        cast(Instruction, DivisionInstruction()),
+        DivisionState(),
+    )
+    assert (marker not in architectural) is marker_removed
+    assert ExprId("RAX", 64) in architectural
 
 
 def test_native_terminal_syscall_consumes_exit_marker_and_targets_exit():

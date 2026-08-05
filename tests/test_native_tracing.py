@@ -15,6 +15,7 @@ from focaccia.native.lldb_target import (
 from focaccia.native.tracer import (
     SpeculativeDivergenceError,
     SpeculativeTracer,
+    SymbolicTracer,
     match_event,
 )
 from focaccia.tools.capture_transforms import create_symbolic_tracer, make_argparser
@@ -183,6 +184,39 @@ def test_multi_instruction_branch_mismatch_is_reported_after_run_until():
     assert raised.value.expected == 0x1002
     assert raised.value.actual == 0x3000
     assert target.run_until_calls == [0x1002]
+
+
+def test_recorded_syscall_materialization_uses_post_event_breakpoint():
+    target = ScriptedTarget(
+        steps=[0x1004],
+        run_results={0x1002: 0x1002},
+    )
+    tracer = speculative(target)
+    tracer.speculate(0x1002)
+
+    assert tracer.progress_execution(use_breakpoint=True) == 0x1002
+    assert target.run_until_calls == [0x1002]
+    assert target.step_calls == 0
+
+
+def test_recorded_syscall_gap_uses_known_post_event_boundary():
+    target = ScriptedTarget(
+        steps=[0x1004],
+        run_results={0x1002: 0x1002},
+    )
+    tracer = object.__new__(SymbolicTracer)
+    tracer.target = speculative(target)
+
+    assert (
+        tracer.progress(
+            None,
+            step=True,
+            recorded_syscall_destination=0x1002,
+        )
+        == 0x1002
+    )
+    assert target.run_until_calls == [0x1002]
+    assert target.step_calls == 0
 
 
 def test_predicted_exit_is_materialized_before_reporting_exit():
