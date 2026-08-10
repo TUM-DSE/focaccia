@@ -7,7 +7,11 @@ from typing import TypeVar, overload
 
 from focaccia import parser, utils
 from focaccia.trace import TraceEnvironment
-from focaccia.native.profiling import TraceProfiler, write_capture_profile
+from focaccia.native.profiling import (
+    CaptureProfile,
+    TraceProfiler,
+    write_capture_profile,
+)
 from focaccia.native.tracer import SymbolicTracer
 from focaccia.deterministic import DeterministicLog
 
@@ -103,6 +107,30 @@ def create_symbolic_tracer(
     )
 
 
+def _capture_and_serialize(
+    args,
+    tracer,
+    profiler: TraceProfiler | None,
+) -> CaptureProfile | None:
+    trace_started = profiler.start("trace") if profiler is not None else None
+    try:
+        trace = tracer.trace(time_limit=args.insn_time_limit)
+    finally:
+        if profiler is not None:
+            profiler.finish("trace", trace_started)
+
+    serialization_started = (
+        profiler.start("serialization") if profiler is not None else None
+    )
+    try:
+        parser.serialize_transformations(trace, args.output, args.out_type)
+    finally:
+        if profiler is not None:
+            profiler.finish("serialization", serialization_started)
+
+    return None if profiler is None else profiler.snapshot()
+
+
 def main():
     args = make_argparser().parse_args()
 
@@ -127,10 +155,8 @@ def main():
     profiler = TraceProfiler() if args.profile_report is not None else None
     tracer = create_symbolic_tracer(args, env, profiler=profiler)
 
-    trace = tracer.trace(time_limit=args.insn_time_limit)
-
-    parser.serialize_transformations(trace, args.output, args.out_type)
+    profile = _capture_and_serialize(args, tracer, profiler)
     if args.profile_report is not None:
-        assert profiler is not None
-        write_capture_profile(args.profile_report, profiler.snapshot())
+        assert profile is not None
+        write_capture_profile(args.profile_report, profile)
 

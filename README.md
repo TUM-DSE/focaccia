@@ -38,8 +38,9 @@ nix run .#validate-qemu -- --symb-trace oracle.trace --remote localhost:12345
 
 Focaccia does not collect or print benchmark timings during normal operation. Evaluation harnesses
 that need native component measurements can explicitly pass `--profile-report profile.json` to
-`capture-transforms`; the resulting plain JSON file contains concrete, symbolic, and validation
-durations.
+`capture-transforms`; the resulting plain JSON file contains concrete, symbolic, validation, total
+trace, and serialization durations. Trace and serialization wall times are reported separately so
+persistence cost is not included in the measured trace runtime.
 
 The above workflow works for reproducing most QEMU bugs but cannot handle the following two cases:
 

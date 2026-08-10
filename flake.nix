@@ -920,6 +920,20 @@
       ];
     };
 
+    fix104PersistenceTimingSeparationCheck = mkStaticUnitCheck {
+      name = "fix-104-persistence-timing-separation";
+      ruffTargets = [
+        "src/focaccia/native/profiling.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_native_profiling.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_profiling.py"
+        "-k"
+        "separates_trace_from_serialization or profile_report"
+      ];
+    };
+
     fix099OptInCaptureProfilingCheck = mkStaticUnitCheck {
       name = "fix-099-opt-in-capture-profiling";
       ruffTargets = [
@@ -2403,6 +2417,7 @@
       fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
       fix-099-opt-in-capture-profiling = fix099OptInCaptureProfilingCheck;
       fix-103-lldb-lock-prefix-disassembly = fix103LldbLockPrefixDisassemblyCheck;
+      fix-104-persistence-timing-separation = fix104PersistenceTimingSeparationCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;

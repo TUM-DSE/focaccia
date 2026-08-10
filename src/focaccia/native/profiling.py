@@ -7,11 +7,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-ProfileComponent = Literal["concrete", "symbolic", "validation"]
+ProfileComponent = Literal[
+    "concrete",
+    "symbolic",
+    "validation",
+    "trace",
+    "serialization",
+]
 _PROFILE_COMPONENTS: tuple[ProfileComponent, ...] = (
     "concrete",
     "symbolic",
     "validation",
+    "trace",
+    "serialization",
 )
 
 
@@ -20,6 +28,8 @@ class CaptureProfile:
     concrete_seconds: float
     symbolic_seconds: float
     validation_seconds: float
+    trace_seconds: float
+    serialization_seconds: float
 
     def document(self) -> dict[str, object]:
         return {
@@ -28,6 +38,8 @@ class CaptureProfile:
                 "concreteSeconds": self.concrete_seconds,
                 "symbolicSeconds": self.symbolic_seconds,
                 "validationSeconds": self.validation_seconds,
+                "traceSeconds": self.trace_seconds,
+                "serializationSeconds": self.serialization_seconds,
             },
         }
 
@@ -72,6 +84,8 @@ class TraceProfiler:
             concrete_seconds=self._seconds["concrete"],
             symbolic_seconds=self._seconds["symbolic"],
             validation_seconds=self._seconds["validation"],
+            trace_seconds=self._seconds["trace"],
+            serialization_seconds=self._seconds["serialization"],
         )
 
 
