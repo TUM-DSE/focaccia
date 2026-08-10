@@ -2,6 +2,7 @@ from typing import Any, cast
 
 import pytest
 from miasm.core.locationdb import LocationDB
+from miasm.core.utils import Disasm_Exception
 from miasm.expression.expression import Expr, ExprCond, ExprId, ExprInt
 from miasm.jitter.csts import EXCEPT_DIV_BY_ZERO, EXCEPT_SYSCALL
 
@@ -497,6 +498,52 @@ def test_disassembly_fallback_uses_instruction_from_string(monkeypatch):
 
     assert tracer_module._disassemble_instruction(context, target, 0x1000) is expected
     assert calls == [("NOP", context.arch, 0x1000, 1)]
+
+
+@pytest.mark.parametrize(
+    ("bytecode", "disassembly"),
+    [
+        (bytes.fromhex("f20fd0ca"), "ADDSUBPS XMM1, XMM2"),
+        (bytes.fromhex("660fc2c0d1"), "CMPPD XMM0, XMM0, 0xD1"),
+    ],
+)
+def test_empty_miasm_disassembly_attempts_lldb_fallback(
+    bytecode: bytes,
+    disassembly: str,
+):
+    class UnsupportedInstructionTarget:
+        arch = x86.ArchX86()
+
+        def __init__(self):
+            self.fallback_calls: list[int] = []
+
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address >= 0x1000
+            offset = address - 0x1000
+            return bytecode[offset:offset + size]
+
+        def get_disassembly(self, pc: int) -> str:
+            self.fallback_calls.append(pc)
+            return disassembly
+
+        def get_instruction_size(self, pc: int) -> int:
+            assert pc == 0x1000
+            return len(bytecode)
+
+    target = UnsupportedInstructionTarget()
+    context = DisassemblyContext(cast(ReadableProgramState, target))
+
+    with pytest.raises(DisassemblyError) as raised:
+        tracer_module._disassemble_instruction(
+            context,
+            cast(LLDBConcreteTarget, target),
+            0x1000,
+        )
+
+    assert target.fallback_calls == [0x1000]
+    assert isinstance(raised.value.primary_error, Disasm_Exception)
+    assert isinstance(raised.value.primary_error.__cause__, IndexError)
+    assert isinstance(raised.value.fallback_error, ValueError)
 
 
 def test_disassembly_fallback_does_not_hide_programming_errors():

@@ -9,6 +9,7 @@ from miasm.ir.ir import Lifter
 from miasm.analysis.machine import Machine
 from miasm.core.locationdb import LocationDB
 from miasm.core.cpu import instruction as miasm_instr
+from miasm.core.utils import Disasm_Exception
 from miasm.ir.symbexec import SymbolicExecutionEngine
 from miasm.expression.expression import (
     Expr,
@@ -887,7 +888,15 @@ class DisassemblyContext:
         self.lifter = self.machine.lifter(self.loc_db)
 
     def disassemble(self, address: int) -> Instruction:
-        miasm_instr = self.mdis.dis_instr(address)
+        try:
+            miasm_instr = self.mdis.dis_instr(address)
+        except IndexError as err:
+            # Miasm's dis_instr indexes block.lines[0] when decoding produced
+            # an empty block. Normalize that dependency failure at its direct
+            # boundary so callers can attempt another disassembler.
+            raise Disasm_Exception(
+                f'Miasm decoded no instruction at {hex(address)}.'
+            ) from err
         return Instruction(miasm_instr, self.machine, self.arch, self.loc_db)
 
 def run_instruction(instr: miasm_instr,
