@@ -36,6 +36,11 @@ nix run .#qemu-x86_64 -- -g 12345 ./bug.out &
 nix run .#validate-qemu -- --symb-trace oracle.trace --remote localhost:12345
 ```
 
+Focaccia does not collect or print benchmark timings during normal operation. Evaluation harnesses
+that need native component measurements can explicitly pass `--profile-report profile.json` to
+`capture-transforms`; the resulting plain JSON file contains concrete, symbolic, and validation
+durations.
+
 The above workflow works for reproducing most QEMU bugs but cannot handle the following two cases:
 
 1. Optimization bugs

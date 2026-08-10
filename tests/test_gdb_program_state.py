@@ -317,8 +317,6 @@ def test_qemu_event_loop_synchronizes_when_first_rr_event_is_reached(monkeypatch
     class FakeIterator:
         _events = DeterministicCursor((event,), target.match_event)
         _replay_tid = None
-        event_start = 0.0
-        event_time = 0.0
         replay = X86ReplayEngine(guest_arch)
         arch = guest_arch
 
@@ -349,8 +347,6 @@ def test_run_until_steps_safely_until_the_first_rr_synchronization(monkeypatch):
     iterator._replay_tid = None
     iterator._replay = X86ReplayEngine(arch)
     iterator._first_next = True
-    iterator.event_start = 0.0
-    iterator.event_time = 0.0
     iterator.arch = arch
     iterator.current_state = lambda: initial
     iterator.is_exited = lambda: False
@@ -408,8 +404,6 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
     iterator._replay_tid = None
     iterator._replay = X86ReplayEngine(arch)
     iterator._first_next = True
-    iterator.event_start = 0.0
-    iterator.event_time = 0.0
     iterator.arch = arch
     stops: list[list[int]] = []
     iterator.current_state = lambda: initial

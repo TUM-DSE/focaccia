@@ -6,6 +6,7 @@ import lldb
 
 from focaccia.snapshot import ProgramState
 from focaccia.arch import supported_architectures
+from focaccia.native.profiling import TraceProfiler
 
 logger = logging.getLogger('focaccia-lldb-target')
 debug = logger.debug
@@ -105,7 +106,8 @@ class LLDBConcreteTarget:
     def __init__(self,
                  debugger: lldb.SBDebugger,
                  target: lldb.SBTarget,
-                 process: lldb.SBProcess):
+                 process: lldb.SBProcess,
+                 profiler: TraceProfiler | None = None):
         """Construct an LLDB concrete target. Stop at entry.
 
         :param debugger: LLDB SBDebugger object representing an initialized debug session.
@@ -122,6 +124,7 @@ class LLDBConcreteTarget:
         self.debugger = debugger
         self.target = target
         self.process = process
+        self.profiler = profiler
 
         self.module = self.target.FindModule(self.target.GetExecutable())
         if not _is_valid(self.module):
@@ -143,7 +146,14 @@ class LLDBConcreteTarget:
         self.archname = self.determine_arch()
         self.arch = supported_architectures[self.archname]
 
-        self.exec_time = 0
+    def _profile_start(self) -> float | None:
+        profiler = getattr(self, 'profiler', None)
+        return None if profiler is None else profiler.start('concrete')
+
+    def _profile_finish(self, started: float | None) -> None:
+        profiler = getattr(self, 'profiler', None)
+        if profiler is not None:
+            profiler.finish('concrete', started)
 
     def determine_arch(self):
         platform = self.target.GetPlatform()
@@ -255,29 +265,33 @@ class LLDBConcreteTarget:
 
     def run(self):
         """Continue execution of the concrete process."""
-        state = self.process.GetState()
-        if state == lldb.eStateExited:
-            raise ConcreteExecutionError(
-                'Tried to resume process execution, but the process has already exited.'
-            )
-        self._check_process_state('continue execution')
-        error = self.process.Continue()
-        if not _error_succeeded(error):
-            raise ConcreteExecutionError(
-                f'Unable to continue LLDB process: {_error_message(error)}.'
-            )
-        self._check_process_state('continue execution')
+        profile_start = self._profile_start()
+        try:
+            state = self.process.GetState()
+            if state == lldb.eStateExited:
+                raise ConcreteExecutionError(
+                    'Tried to resume process execution, but the process has already exited.'
+                )
+            self._check_process_state('continue execution')
+            error = self.process.Continue()
+            if not _error_succeeded(error):
+                raise ConcreteExecutionError(
+                    f'Unable to continue LLDB process: {_error_message(error)}.'
+                )
+            self._check_process_state('continue execution')
+        finally:
+            self._profile_finish(profile_start)
 
     def step(self):
         """Step forward by a single instruction."""
-        start_time = time.time()
-        if self.is_exited():
-            raise ConcreteExecutionError('Cannot step an exited LLDB process.')
-        self._check_process_state('step one instruction')
-        thread: lldb.SBThread = self.process.GetSelectedThread()
-        if not _is_valid(thread):
-            raise ConcreteExecutionError('LLDB has no valid selected thread to step.')
+        profile_start = self._profile_start()
         try:
+            if self.is_exited():
+                raise ConcreteExecutionError('Cannot step an exited LLDB process.')
+            self._check_process_state('step one instruction')
+            thread: lldb.SBThread = self.process.GetSelectedThread()
+            if not _is_valid(thread):
+                raise ConcreteExecutionError('LLDB has no valid selected thread to step.')
             error = lldb.SBError()
             thread.StepInstruction(False, error)
             if not _error_succeeded(error):
@@ -286,7 +300,7 @@ class LLDBConcreteTarget:
                 )
             self._check_process_state('step one instruction')
         finally:
-            self.exec_time += time.time() - start_time
+            self._profile_finish(profile_start)
 
     def _create_address_breakpoint(self, address: int):
         breakpoint = self.target.BreakpointCreateByAddress(address)
@@ -314,7 +328,6 @@ class LLDBConcreteTarget:
 
     def run_until(self, address: int) -> None:
         """Continue until ``address`` or process exit, always removing the breakpoint."""
-        start_time = time.time()
         if self.is_exited():
             raise ConcreteExecutionError(
                 f'Cannot run an exited LLDB process to {hex(address)}.'
@@ -349,7 +362,6 @@ class LLDBConcreteTarget:
                 if primary_error is None:
                     raise
                 primary_error.add_note(str(cleanup_error))
-            self.exec_time += time.time() - start_time
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""
@@ -727,7 +739,8 @@ class LLDBLocalTarget(LLDBConcreteTarget):
     def __init__(self,
                  executable: str,
                  argv: list[str] | None = None,
-                 envp: list[str] | None = None):
+                 envp: list[str] | None = None,
+                 profiler: TraceProfiler | None = None):
         """Construct an LLDB local target. Stop at entry.
 
         :param executable: Name of executable to run under LLDB.
@@ -764,10 +777,15 @@ class LLDBLocalTarget(LLDBConcreteTarget):
                 f'Failed to launch LLDB target: {_error_message(error)}.'
             )
 
-        super().__init__(debugger, target, process)
+        super().__init__(debugger, target, process, profiler)
 
 class LLDBRemoteTarget(LLDBConcreteTarget):
-    def __init__(self, remote: str, executable: str | None = None):
+    def __init__(
+        self,
+        remote: str,
+        executable: str | None = None,
+        profiler: TraceProfiler | None = None,
+    ):
         """Construct an LLDB remote target. Stop at entry.
 
         :param remote: String of the form <remote_name>:<port> (e.g. localhost:12345).
@@ -794,5 +812,5 @@ class LLDBRemoteTarget(LLDBConcreteTarget):
                 f'Failed to connect via LLDB to remote target: {_error_message(error)}.'
             )
 
-        super().__init__(debugger, target, process)
+        super().__init__(debugger, target, process, profiler)
 

@@ -1,5 +1,4 @@
 import gdb
-import time
 import logging
 from focaccia.deterministic import (
     DeterministicLog,
@@ -287,9 +286,7 @@ class GDBServerStateIterator(GDBServerConnector):
         self._deterministic_log = deterministic_log
         self._first_next = True
 
-        self.event_start = time.time()
         events = self._deterministic_log.events()
-        self.event_time = time.time() - self.event_start 
 
         self._replay = make_replay_engine(self.arch) if events else None
 
@@ -400,7 +397,6 @@ class GDBServerStateIterator(GDBServerConnector):
             event.tid,
             context="Deterministic event",
         )
-        self.event_start = time.time()
         if isinstance(event, SyscallEvent):
             policy = self._require_replay_engine().prepare_syscall(event)
             post_event = None
@@ -417,7 +413,6 @@ class GDBServerStateIterator(GDBServerConnector):
                 )
                 post_event = matched
 
-            self.event_time += time.time() - self.event_start
             return self._handle_syscall(event, post_event, policy=policy)
 
         if isinstance(event, SignalEvent):
@@ -429,10 +424,8 @@ class GDBServerStateIterator(GDBServerConnector):
                 post_event.tid,
                 context="Paired signal event",
             )
-            self.event_time += time.time() - self.event_start
             return self._handle_signal(event, post_event)
 
-        self.event_time += time.time() - self.event_start
         return self._require_replay_engine().replay_bookkeeping_event(self, event)
 
     def __iter__(self):

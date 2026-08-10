@@ -111,8 +111,6 @@ def test_gdb_collector_uses_shared_matcher_and_keeps_terminal_state(monkeypatch)
     qemu_tool = importlib.import_module("focaccia.qemu._qemu_tool")
 
     class FakeGDBStates:
-        event_time = 0.0
-
         class Events:
             events = ()
 

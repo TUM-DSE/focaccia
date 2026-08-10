@@ -9,7 +9,6 @@ work to do.
 import argparse
 import logging
 import os
-import time
 
 import focaccia.parser as parser
 from focaccia.compare import compare_symbolic, Error, ErrorTypes
@@ -57,9 +56,6 @@ def collect_conc_trace(
     diagnostics = []
     state_iterator = iter(gdb)
 
-    execution_time = 0.0
-    tracing_time = 0.0
-
     if logger.isEnabledFor(logging.DEBUG):
         debug("Tracing program with the following non-deterministic events:")
         for event in gdb._events.events:
@@ -75,11 +71,9 @@ def collect_conc_trace(
     if start_address is None:
         start_address = pc
 
-    execution_start = time.time()
     if pc != start_address:
         info(f"Executing until starting address {hex(start_address)}")
         current_state = state_iterator.run_until(start_address)
-    execution_time += time.time() - execution_start
 
     info(
         f"Tracing QEMU between {hex(start_address)}:"
@@ -95,7 +89,6 @@ def collect_conc_trace(
 
         boundary = matcher.observe(pc)
         if boundary is not None:
-            tracing_start = time.time()
             previous_state = retained_states[-1] if retained_states else current_state
             collection = collect_minimal_snapshot(
                 previous_state,
@@ -115,20 +108,14 @@ def collect_conc_trace(
             if boundary.incoming is not None:
                 retained_transforms.append(boundary.incoming)
             retained_states.append(collection.state)
-            tracing_time += time.time() - tracing_start
 
         if matcher.done:
             break
-        execution_start = time.time()
         try:
             current_state = next(state_iterator)
         except StopIteration:
             break
-        execution_time += time.time() - execution_start
 
-    execution_time -= gdb.event_time
-    debug(f"Execution time: {execution_time}")
-    debug(f"Tracing time: {tracing_time}")
     result = matcher.make_result(retained_states, retained_transforms)
     return MatchResult(
         result.trace,
@@ -203,7 +190,6 @@ def main() -> None:
             env = make_gdb_trace_environment(executable)
             matched = collect_conc_trace(gdb_server, symb_transforms)
 
-        validation_start = time.time()
         validation_report = compare_symbolic(
             matched.trace,
             diagnostics=matched.diagnostics,
@@ -229,9 +215,7 @@ def main() -> None:
                     "snap": source,
                 }
             )
-        validation_time = time.time() - validation_start
         if not args.quiet:
-            print(f"Validation time: {validation_time}")
             print_result(validation_report, verbosity[args.error_level])
         if args.report:
             write_validation_report(

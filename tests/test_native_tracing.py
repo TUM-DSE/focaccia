@@ -7,6 +7,7 @@ from miasm.expression.expression import ExprId, ExprInt
 from focaccia.arch import aarch64, x86
 from focaccia.deterministic import Event, SyscallEvent
 from focaccia.native import lldb_target as lldb_module
+from focaccia.native.profiling import TraceProfiler
 from focaccia.native.lldb_target import (
     ConcreteExecutionError,
     ConcreteMemoryError,
@@ -259,7 +260,6 @@ def test_native_cross_validation_compares_only_defined_flag_outputs():
     target.registers["RFLAGS"] = 0x287
     tracer = object.__new__(SymbolicTracer)
     tracer.target = speculative(target)
-    tracer.validation_time = 0
 
     class FlagInstruction:
         addr = 0x1000
@@ -341,7 +341,6 @@ def test_xmm_cross_validation_does_not_require_unchanged_zmm_state():
     target.write_register("XMM0", xmm_value)
     tracer = object.__new__(SymbolicTracer)
     tracer.target = speculative(target)
-    tracer.validation_time = 0
     tracer.validate(cast(Any, SimpleNamespace(addr=0x1000)), transform, predicted, {})
     assert target.register_reads == ["XMM0"]
 
@@ -482,11 +481,14 @@ def test_capture_options_keep_debug_and_cross_validation_independent():
 
     debug_args = make_argparser().parse_args(["--debug", "/tmp/oracle"])
     cross_args = make_argparser().parse_args(["--cross-validate", "/tmp/oracle"])
+    profiler = TraceProfiler()
 
     assert create_symbolic_tracer(debug_args, env, factory) is sentinel
     assert calls[-1][1]["cross_validate"] is False
-    assert create_symbolic_tracer(cross_args, env, factory) is sentinel
+    assert calls[-1][1]["profiler"] is None
+    assert create_symbolic_tracer(cross_args, env, factory, profiler) is sentinel
     assert calls[-1][1]["cross_validate"] is True
+    assert calls[-1][1]["profiler"] is profiler
 
 
 class FakeError:
@@ -545,7 +547,6 @@ def bare_lldb_target(process: FakeLLDBProcess, target: FakeLLDBTarget) -> LLDBCo
     result = object.__new__(LLDBConcreteTarget)
     result.process = cast(Any, process)
     result.target = cast(Any, target)
-    result.exec_time = 0.0
     return result
 
 
@@ -621,6 +622,20 @@ def test_lldb_remote_initialization_consumes_delayed_stopped_event():
 
     assert concrete.process.GetState() == lldb_module.lldb.eStateStopped
     assert listener.waits == [1]
+
+
+def test_lldb_execution_is_profiled_only_with_explicit_collector(monkeypatch):
+    stopped = 77
+    monkeypatch.setattr(lldb_module.lldb, "eStateStopped", stopped)
+    monkeypatch.setattr(lldb_module.lldb, "eStateExited", 88)
+    process = FakeLLDBProcess(stopped, FakeError(True))
+    concrete = bare_lldb_target(process, FakeLLDBTarget())
+    readings = iter((4.0, 5.25))
+    concrete.profiler = TraceProfiler(lambda: next(readings))
+
+    concrete.run()
+
+    assert concrete.profiler.snapshot().concrete_seconds == 1.25
 
 
 def test_run_until_removes_temporary_breakpoint_on_success(monkeypatch):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +43,7 @@ from focaccia.deterministic import (
     SyscallEvent,
 )
 
+from .profiling import ProfileComponent, TraceProfiler
 from .lldb_target import (
     ConcreteExecutionError,
     ConcreteMemoryError,
@@ -777,14 +777,27 @@ class SymbolicTracer:
                  env: TraceEnvironment, 
                  remote: str | None = None,
                  force: bool = False,
-                 cross_validate: bool = False):
+                 cross_validate: bool = False,
+                 profiler: TraceProfiler | None = None):
         self.env = env
         self.force = force
         self.remote = remote
         self.cross_validate = cross_validate
+        self.profiler = profiler
         self.target = SpeculativeTracer(self.create_debug_target())
 
-        self.validation_time = 0
+    def _profile_start(self, component: ProfileComponent) -> float | None:
+        profiler = getattr(self, 'profiler', None)
+        return None if profiler is None else profiler.start(component)
+
+    def _profile_finish(
+        self,
+        component: ProfileComponent,
+        started: float | None,
+    ) -> None:
+        profiler = getattr(self, 'profiler', None)
+        if profiler is not None:
+            profiler.finish(component, started)
 
     def create_debug_target(self) -> LLDBConcreteTarget:
         binary = self.env.binary_name
@@ -793,10 +806,15 @@ class SymbolicTracer:
         if self.remote is None:
             debug(f'Launching local debug target {binary} {self.env.argv}')
             debug(f'Environment: {self.env}')
-            return LLDBLocalTarget(binary, list(self.env.argv), list(self.env.envp))
+            return LLDBLocalTarget(
+                binary,
+                list(self.env.argv),
+                list(self.env.envp),
+                self.profiler,
+            )
 
         debug(f'Connecting to remote debug target {self.remote}')
-        target = LLDBRemoteTarget(self.remote, binary)
+        target = LLDBRemoteTarget(self.remote, binary, self.profiler)
 
         module_name = target.determine_name()
         binary = str(Path(self.env.binary_name).resolve())
@@ -821,28 +839,28 @@ class SymbolicTracer:
         if self.target.is_exited():
             return
 
-        start = time.time()
-        debug('Cross-validating symbolic transforms by comparing actual to predicted values')
-        for reg, val in predicted_regs.items():
-            conc_val = self.target.read_register(reg)
-            if conc_val != val:
-                self.validation_time += time.time() - start
-                raise ValidationError(f'Symbolic execution backend generated false equation for'
-                                      f' [{hex(instruction.addr)}]: {instruction}:'
-                                      f' Predicted {reg} = {hex(val)}, but the'
-                                      f' concrete state has value {reg} = {hex(conc_val)}.'
-                                      f'\nFaulty transformation: {transform}')
-        for addr, data in predicted_mems.items():
-            conc_data = self.target.read_memory(addr, len(data))
-            if conc_data != data:
-                self.validation_time += time.time() - start
-                raise ValidationError(f'Symbolic execution backend generated false equation for'
-                                      f' [{hex(instruction.addr)}]: {instruction}: Predicted'
-                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
-                                      f' but the concrete state has value'
-                                      f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
-                                      f'\nFaulty transformation: {transform}')
-        self.validation_time += time.time() - start
+        profile_start = self._profile_start('validation')
+        try:
+            debug('Cross-validating symbolic transforms by comparing actual to predicted values')
+            for reg, val in predicted_regs.items():
+                conc_val = self.target.read_register(reg)
+                if conc_val != val:
+                    raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                          f' [{hex(instruction.addr)}]: {instruction}:'
+                                          f' Predicted {reg} = {hex(val)}, but the'
+                                          f' concrete state has value {reg} = {hex(conc_val)}.'
+                                          f'\nFaulty transformation: {transform}')
+            for addr, data in predicted_mems.items():
+                conc_data = self.target.read_memory(addr, len(data))
+                if conc_data != data:
+                    raise ValidationError(f'Symbolic execution backend generated false equation for'
+                                          f' [{hex(instruction.addr)}]: {instruction}: Predicted'
+                                          f' mem[{hex(addr)}:{hex(addr+len(data))}] = {data},'
+                                          f' but the concrete state has value'
+                                          f' mem[{hex(addr)}:{hex(addr+len(data))}] = {conc_data}.'
+                                          f'\nFaulty transformation: {transform}')
+        finally:
+            self._profile_finish('validation', profile_start)
 
     def progress(
         self,
@@ -899,9 +917,6 @@ class SymbolicTracer:
         :param stop_addr: Address until which to trace.
         """
         # Set up concrete reference state
-        symbolic_time = 0
-
-        exec_start = time.time()
         if self.env.start_address is not None:
             self.target.run_until(self.env.start_address)
 
@@ -927,7 +942,7 @@ class SymbolicTracer:
                 break
 
             # Disassemble instruction at the current PC
-            symbolic_start = time.time()
+            symbolic_start = self._profile_start('symbolic')
             tid = self.target.get_current_tid()
             try:
                 instruction = _disassemble_instruction(ctx, self.target, pc)
@@ -936,6 +951,7 @@ class SymbolicTracer:
                 if not self.force:
                     raise
                 warn(f'[{tid}] {err} Recording an explicit trace gap.')
+                self._profile_finish('symbolic', symbolic_start)
                 self.target.step()
                 next_pc = 0 if self.target.is_exited() else self.target.read_pc()
                 strace.append(
@@ -977,7 +993,7 @@ class SymbolicTracer:
                         instruction,
                         action,
                     )
-                symbolic_time += time.time() - symbolic_start
+                self._profile_finish('symbolic', symbolic_start)
                 self.progress(post_event.pc, step=True)
                 if self.cross_validate:
                     self.validate(
@@ -1072,7 +1088,7 @@ class SymbolicTracer:
                 symbolic_error = error
                 new_pc, modified = None, {}
 
-            symbolic_time += time.time() - symbolic_start
+            self._profile_finish('symbolic', symbolic_start)
 
             if symbolic_error is not None:
                 self.progress(
@@ -1114,7 +1130,7 @@ class SymbolicTracer:
                         self.target,
                     )
 
-                symbolic_start = time.time()
+                symbolic_start = self._profile_start('symbolic')
                 candidate: SymbolicTransform | None = None
                 cross_validation_error: BaseException | None = None
                 failure_reason: GapReason = 'cross-validation-error'
@@ -1132,7 +1148,7 @@ class SymbolicTracer:
                         raise
                     cross_validation_error = error
                     failure_reason = 'unsupported-semantics'
-                symbolic_time += time.time() - symbolic_start
+                self._profile_finish('symbolic', symbolic_start)
 
                 pred_regs: dict[str, int] = {}
                 pred_mems: dict[int, bytes] = {}
@@ -1208,7 +1224,7 @@ class SymbolicTracer:
                         'A symbolic transform requires a destination PC.'
                     )
                 predicted_destination = int(new_pc)
-                symbolic_start = time.time()
+                symbolic_start = self._profile_start('symbolic')
                 try:
                     candidate = SymbolicTransform(
                         tid,
@@ -1260,11 +1276,11 @@ class SymbolicTracer:
                             pc,
                             destination,
                         )
-                symbolic_time += time.time() - symbolic_start
+                self._profile_finish('symbolic', symbolic_start)
 
-            symbolic_start = time.time()
+            symbolic_start = self._profile_start('symbolic')
             strace.append(transform)
-            symbolic_time += time.time() - symbolic_start
+            self._profile_finish('symbolic', symbolic_start)
 
             if post_event:
                 if _is_terminal_event(post_event):
@@ -1276,9 +1292,6 @@ class SymbolicTracer:
 
                 debug(f'Completed handling event: {post_event}')
 
-        info(f'Execution time: {self.target.target.exec_time}')
-        info(f'Symbolic time: {symbolic_time}')
-        info(f'Validation time: {self.validation_time}')
         trace_env = self.env.with_architecture(arch.key)
         return MaterializedTrace(strace, trace_env, [transform.addr for transform in strace])
 

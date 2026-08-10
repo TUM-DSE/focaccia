@@ -7,6 +7,7 @@ from typing import TypeVar, overload
 
 from focaccia import parser, utils
 from focaccia.trace import TraceEnvironment
+from focaccia.native.profiling import TraceProfiler, write_capture_profile
 from focaccia.native.tracer import SymbolicTracer
 from focaccia.deterministic import DeterministicLog
 
@@ -56,13 +57,21 @@ def make_argparser() -> argparse.ArgumentParser:
                       default='json',
                       choices=['json', 'msgpack'],
                       help='Symbolic trace output format')
+    prog.add_argument('--profile-report',
+                      default=None,
+                      help='Write opt-in evaluation timings as JSON')
     return prog
 
 TracerT = TypeVar('TracerT')
 
 
 @overload
-def create_symbolic_tracer(args, env: TraceEnvironment) -> SymbolicTracer: ...
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., SymbolicTracer] = SymbolicTracer,
+    profiler: TraceProfiler | None = None,
+) -> SymbolicTracer: ...
 
 
 @overload
@@ -70,6 +79,7 @@ def create_symbolic_tracer(
     args,
     env: TraceEnvironment,
     tracer_factory: Callable[..., TracerT],
+    profiler: TraceProfiler | None = None,
 ) -> TracerT: ...
 
 
@@ -77,6 +87,7 @@ def create_symbolic_tracer(
     args,
     env: TraceEnvironment,
     tracer_factory: Callable[..., object] = SymbolicTracer,
+    profiler: TraceProfiler | None = None,
 ) -> object:
     """Create a tracer from CLI options.
 
@@ -88,6 +99,7 @@ def create_symbolic_tracer(
         remote=args.remote,
         cross_validate=args.cross_validate,
         force=args.force,
+        profiler=profiler,
     )
 
 
@@ -112,9 +124,13 @@ def main():
                            nondeterminism_log=detlog,
                            start_address=args.start_address,
                            stop_address=args.stop_address)
-    tracer = create_symbolic_tracer(args, env)
+    profiler = TraceProfiler() if args.profile_report is not None else None
+    tracer = create_symbolic_tracer(args, env, profiler=profiler)
 
     trace = tracer.trace(time_limit=args.insn_time_limit)
 
     parser.serialize_transformations(trace, args.output, args.out_type)
+    if args.profile_report is not None:
+        assert profiler is not None
+        write_capture_profile(args.profile_report, profiler.snapshot())
 

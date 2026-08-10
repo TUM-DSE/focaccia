@@ -5,6 +5,8 @@ import json
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from focaccia.arch import x86
 from focaccia.compare import Error, ErrorTypes, ValidationReport
 from focaccia.qemu.report import (
@@ -33,7 +35,13 @@ def load_qemu_tool(monkeypatch):
     return importlib.import_module("focaccia.qemu._qemu_tool")
 
 
-def test_quiet_gdb_validation_still_writes_structured_report(tmp_path, monkeypatch):
+@pytest.mark.parametrize("quiet", [False, True])
+def test_gdb_validation_avoids_timing_output_and_writes_report(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    quiet: bool,
+):
     qemu_tool = load_qemu_tool(monkeypatch)
     oracle = tmp_path / "oracle.json"
     output = tmp_path / "report.json"
@@ -47,18 +55,20 @@ def test_quiet_gdb_validation_still_writes_structured_report(tmp_path, monkeypat
     )
     comparison = ValidationReport()
     writes = []
+    arguments = [
+        "--symb-trace",
+        str(oracle),
+        "--remote",
+        "localhost:1234",
+        "--report",
+        str(output),
+    ]
+    if quiet:
+        arguments.append("--quiet")
     monkeypatch.setattr(
         qemu_tool,
         "decode_gdb_arguments",
-        lambda _environment: [
-            "--symb-trace",
-            str(oracle),
-            "--remote",
-            "localhost:1234",
-            "--quiet",
-            "--report",
-            str(output),
-        ],
+        lambda _environment: arguments,
     )
     monkeypatch.setattr(qemu_tool, "DeterministicLog", lambda _path: object())
     monkeypatch.setattr(qemu_tool.parser, "parse_transformations", lambda _file: trace)
@@ -73,6 +83,7 @@ def test_quiet_gdb_validation_still_writes_structured_report(tmp_path, monkeypat
         ),
     )
     monkeypatch.setattr(qemu_tool, "compare_symbolic", lambda *_args, **_kwargs: comparison)
+    monkeypatch.setattr(qemu_tool, "print_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         qemu_tool,
         "write_validation_report",
@@ -85,6 +96,7 @@ def test_quiet_gdb_validation_still_writes_structured_report(tmp_path, monkeypat
         sys.modules.pop("focaccia.qemu._qemu_tool", None)
         sys.modules.pop("focaccia.qemu.target", None)
 
+    assert "time" not in capsys.readouterr().out.lower()
     assert writes == [(str(output), comparison, None)]
 
 

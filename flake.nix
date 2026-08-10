@@ -658,6 +658,30 @@
       ];
     };
 
+    fix099OptInCaptureProfilingCheck = mkStaticUnitCheck {
+      name = "fix-099-opt-in-capture-profiling";
+      ruffTargets = [
+        "src/focaccia/native/profiling.py"
+        "src/focaccia/native/lldb_target.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/tools/capture_transforms.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_native_api.py"
+        "tests/test_native_profiling.py"
+        "tests/test_native_tracing.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_profiling.py"
+        "tests/test_native_api.py::test_force_mode_records_unknown_symbolic_outputs_as_trace_gap"
+        "tests/test_native_tracing.py::test_lldb_execution_is_profiled_only_with_explicit_collector"
+        "tests/test_qemu_report.py::test_gdb_validation_avoids_timing_output_and_writes_report"
+      ];
+    };
+
     fix098MiasmVmovdquSupportCheck = mkStaticUnitCheck {
       name = "fix-098-miasm-vmovdqu-support";
       ruffTargets = [ "tests/test_native_api.py" ];
@@ -2058,6 +2082,7 @@
       fix-095-native-signal-action = fix095NativeSignalActionCheck;
       fix-097-miasm-sse-support = fix097MiasmSseSupportCheck;
       fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
+      fix-099-opt-in-capture-profiling = fix099OptInCaptureProfilingCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;

@@ -1,3 +1,4 @@
+import logging
 from typing import Any, cast
 
 import pytest
@@ -334,7 +335,6 @@ def test_signal_action_trace_does_not_execute_interrupted_instruction(monkeypatc
     )
     tracer.force = False
     tracer.cross_validate = True
-    tracer.validation_time = 0.0
     tracer.target = cast(SpeculativeTracer, target)
 
     trace = tracer.trace()
@@ -612,17 +612,18 @@ def test_symbolic_tracer_selects_local_target_for_none(monkeypatch):
     calls = []
     expected = object()
 
-    def local_target(binary: str, argv: list[str], envp: list[str]):
-        calls.append((binary, argv, envp))
+    def local_target(binary: str, argv: list[str], envp: list[str], profiler):
+        calls.append((binary, argv, envp, profiler))
         return expected
 
     monkeypatch.setattr(tracer_module, "LLDBLocalTarget", local_target)
     symbolic = object.__new__(SymbolicTracer)
     symbolic.env = env
     symbolic.remote = None
+    symbolic.profiler = None
 
     assert symbolic.create_debug_target() is expected
-    assert calls == [(env.binary_name, list(env.argv), list(env.envp))]
+    assert calls == [(env.binary_name, list(env.argv), list(env.envp), None)]
 
 
 def test_symbolic_tracer_selects_remote_target_for_address(monkeypatch):
@@ -636,17 +637,18 @@ def test_symbolic_tracer_selects_remote_target_for_address(monkeypatch):
 
     expected = FakeRemoteTarget()
 
-    def remote_target(remote: str, binary: str):
-        calls.append((remote, binary))
+    def remote_target(remote: str, binary: str, profiler):
+        calls.append((remote, binary, profiler))
         return expected
 
     monkeypatch.setattr(tracer_module, "LLDBRemoteTarget", remote_target)
     symbolic = object.__new__(SymbolicTracer)
     symbolic.env = env
     symbolic.remote = "127.0.0.1:1234"
+    symbolic.profiler = None
 
     assert symbolic.create_debug_target() is expected
-    assert calls == [("127.0.0.1:1234", env.binary_name)]
+    assert calls == [("127.0.0.1:1234", env.binary_name, None)]
 
 
 def test_capture_transforms_remote_default_is_none():
@@ -1003,7 +1005,10 @@ def test_lsl_environment_specialization_records_successful_limit():
     }
 
 
-def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
+def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(
+    monkeypatch,
+    caplog,
+):
     class FakeInstruction:
         instr = object()
 
@@ -1079,11 +1084,14 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):
     tracer.env = _environment()
     tracer.force = True
     tracer.cross_validate = False
-    tracer.validation_time = 0.0
     tracer.target = cast(SpeculativeTracer, FakeTarget())
 
-    trace = tracer.trace()
+    with caplog.at_level(logging.INFO, logger=tracer_module.logger.name):
+        trace = tracer.trace()
 
+    assert "Execution time:" not in caplog.text
+    assert "Symbolic time:" not in caplog.text
+    assert "Validation time:" not in caplog.text
     assert len(trace) == 1
     gap = trace[0]
     assert isinstance(gap, TraceGap)
@@ -1199,7 +1207,6 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
     tracer.env = _environment()
     tracer.force = True
     tracer.cross_validate = False
-    tracer.validation_time = 0.0
     tracer.target = cast(SpeculativeTracer, FakeTarget())
 
     trace = tracer.trace()
