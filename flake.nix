@@ -644,6 +644,15 @@
       env = uvEnv;
     };
 
+    propertyCoreModelsCheck = mkStaticUnitCheck {
+      name = "property-core-models";
+      ruffTargets = [
+        "src/focaccia/snapshot.py"
+        "tests/test_sparse_memory_properties.py"
+      ];
+      pytestTargets = [ "tests/test_sparse_memory_properties.py" ];
+    };
+
     reproducerMemoryLayoutCheck = mkStaticUnitCheck {
       name = "reproducer-memory-layout";
       ruffTargets = [
@@ -2356,6 +2365,7 @@
       core-branch-coverage = coreBranchCoverageCheck;
       coverage-classification-ratchet = coreBranchCoverageCheck;
       mutation-core-smoke = mutationCoreSmokeCheck;
+      property-core-models = propertyCoreModelsCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
       register-api-migration = registerApiMigrationCheck;
