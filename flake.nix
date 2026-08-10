@@ -422,6 +422,7 @@
         import json
         import pathlib
         import sys
+        import tomllib
 
         report_path = pathlib.Path(sys.argv[1])
         summary_path = pathlib.Path(sys.argv[2])
@@ -429,29 +430,99 @@
         if document.get("meta", {}).get("branch_coverage") is not True:
             raise SystemExit("coverage report does not contain branch coverage")
 
-        files = document.get("files", {})
-        required = (
-            "src/focaccia/snapshot.py",
-            "src/focaccia/trace.py",
-            "src/focaccia/compare.py",
-            "src/focaccia/match.py",
+        files = {
+            pathlib.PurePath(name).as_posix(): data
+            for name, data in document.get("files", {}).items()
+        }
+        policy_document = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+        policy = policy_document["tool"]["focaccia"]["coverage"]
+        core_modules = set(policy["core_modules"])
+        integration_prefixes = tuple(policy["integration_prefixes"])
+        experimental_prefixes = tuple(policy["experimental_prefixes"])
+        ratchets = policy["ratchets"]
+
+        if set(ratchets) != core_modules:
+            missing_ratchets = sorted(core_modules - set(ratchets))
+            extra_ratchets = sorted(set(ratchets) - core_modules)
+            raise SystemExit(
+                "coverage ratchets must exactly match core modules: "
+                f"missing={missing_ratchets}, extra={extra_ratchets}"
+            )
+
+        package_files = {
+            name for name in files if name.startswith("src/focaccia/")
+        }
+        categories: dict[str, str] = {}
+        for name in sorted(package_files):
+            matches = []
+            if name in core_modules:
+                matches.append("core")
+            if name.startswith(integration_prefixes):
+                matches.append("integration")
+            if name.startswith(experimental_prefixes):
+                matches.append("experimental")
+            if len(matches) != 1:
+                raise SystemExit(
+                    f"coverage file {name} must have exactly one classification; "
+                    f"found {matches}"
+                )
+            categories[name] = matches[0]
+
+        missing_core = sorted(core_modules - package_files)
+        if missing_core:
+            raise SystemExit(f"coverage report is missing core modules: {missing_core}")
+
+        failures = []
+        ratchet_lines = [
+            "Core coverage ratchets (integration and experimental code are report-only)",
+        ]
+        for name in sorted(core_modules):
+            measured = files[name]["summary"]
+            minimum = ratchets[name]
+            statement_coverage = measured["percent_statements_covered"]
+            branch_coverage = measured["percent_branches_covered"]
+            ratchet_lines.append(
+                f"{name}: statements {statement_coverage:.2f}% >= "
+                f"{minimum['statements']:.2f}%; branches {branch_coverage:.2f}% >= "
+                f"{minimum['branches']:.2f}%"
+            )
+            if statement_coverage + 1e-9 < minimum["statements"]:
+                failures.append(
+                    f"{name} statement coverage {statement_coverage:.2f}% is below "
+                    f"{minimum['statements']:.2f}%"
+                )
+            if branch_coverage + 1e-9 < minimum["branches"]:
+                failures.append(
+                    f"{name} branch coverage {branch_coverage:.2f}% is below "
+                    f"{minimum['branches']:.2f}%"
+                )
+
+        category_counts = {
+            category: sum(value == category for value in categories.values())
+            for category in ("core", "integration", "experimental")
+        }
+        output_dir = report_path.parent
+        (output_dir / "core-ratchets.txt").write_text(
+            "\n".join(ratchet_lines) + "\n"
         )
-        missing = [suffix for suffix in required if not any(
-            pathlib.PurePath(name).as_posix().endswith(suffix) for name in files
-        )]
-        if missing:
-            raise SystemExit(f"coverage report is missing core modules: {missing}")
+        (output_dir / "classification.json").write_text(
+            json.dumps(categories, indent=2, sort_keys=True) + "\n"
+        )
 
         totals = document.get("totals", {})
         if totals.get("num_statements", 0) <= 0 or totals.get("covered_lines", 0) <= 0:
             raise SystemExit("coverage report does not contain executed statements")
 
         summary_path.write_text(
-            "Branch-coverage baseline (no threshold enforced)\n"
+            "Whole-package informational coverage (no global threshold)\n"
             f"statements: {totals['covered_lines']}/{totals['num_statements']}\n"
             f"branches: {totals['covered_branches']}/{totals['num_branches']}\n"
             f"coverage: {totals['percent_covered']:.2f}%\n"
+            f"classified files: {category_counts}\n"
+            f"core ratchets passed: {len(core_modules)}\n"
         )
+        if failures:
+            raise SystemExit("coverage ratchet failures:\n" + "\n".join(failures))
         PY
       '';
 
@@ -2168,6 +2239,7 @@
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
       core-branch-coverage = coreBranchCoverageCheck;
+      coverage-classification-ratchet = coreBranchCoverageCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
       register-api-migration = registerApiMigrationCheck;

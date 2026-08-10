@@ -111,6 +111,94 @@ skip_empty = true
 [tool.coverage.json]
 pretty_print = true
 
+[tool.focaccia.coverage]
+core_modules = [
+    "src/focaccia/__init__.py",
+    "src/focaccia/arch/__init__.py",
+    "src/focaccia/arch/aarch64.py",
+    "src/focaccia/arch/arch.py",
+    "src/focaccia/arch/x86.py",
+    "src/focaccia/compare.py",
+    "src/focaccia/deterministic.py",
+    "src/focaccia/match.py",
+    "src/focaccia/miasm_util.py",
+    "src/focaccia/persistence.py",
+    "src/focaccia/reproducer.py",
+    "src/focaccia/snapshot.py",
+    "src/focaccia/symbolic.py",
+    "src/focaccia/trace.py",
+    "src/focaccia/utils.py",
+]
+integration_prefixes = [
+    "src/focaccia/cli.py",
+    "src/focaccia/native/",
+    "src/focaccia/parser.py",
+    "src/focaccia/qemu/",
+    "src/focaccia/rr/",
+    "src/focaccia/tools/",
+]
+experimental_prefixes = ["src/focaccia/experimental/"]
+
+[tool.focaccia.coverage.ratchets."src/focaccia/__init__.py"]
+statements = 100
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/__init__.py"]
+statements = 100
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/aarch64.py"]
+statements = 96
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/arch.py"]
+statements = 89
+branches = 70
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/x86.py"]
+statements = 92
+branches = 70
+
+[tool.focaccia.coverage.ratchets."src/focaccia/compare.py"]
+statements = 98
+branches = 96
+
+[tool.focaccia.coverage.ratchets."src/focaccia/deterministic.py"]
+statements = 84
+branches = 65
+
+[tool.focaccia.coverage.ratchets."src/focaccia/match.py"]
+statements = 91
+branches = 88
+
+[tool.focaccia.coverage.ratchets."src/focaccia/miasm_util.py"]
+statements = 69
+branches = 55
+
+[tool.focaccia.coverage.ratchets."src/focaccia/persistence.py"]
+statements = 86
+branches = 75
+
+[tool.focaccia.coverage.ratchets."src/focaccia/reproducer.py"]
+statements = 83
+branches = 73
+
+[tool.focaccia.coverage.ratchets."src/focaccia/snapshot.py"]
+statements = 94
+branches = 89
+
+[tool.focaccia.coverage.ratchets."src/focaccia/symbolic.py"]
+statements = 81
+branches = 67
+
+[tool.focaccia.coverage.ratchets."src/focaccia/trace.py"]
+statements = 96
+branches = 84
+
+[tool.focaccia.coverage.ratchets."src/focaccia/utils.py"]
+statements = 58
+branches = 44
+
 [dependency-groups]
 dev = [
     "pytest-cov>=7.1.0",
