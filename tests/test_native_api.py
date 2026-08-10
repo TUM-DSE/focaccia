@@ -18,7 +18,12 @@ from focaccia.deterministic import (
 )
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
-from focaccia.native.tracer import DisassemblyError, SpeculativeTracer, SymbolicTracer
+from focaccia.native.tracer import (
+    DisassemblyError,
+    DisassemblyMismatchError,
+    SpeculativeTracer,
+    SymbolicTracer,
+)
 from focaccia.snapshot import ReadableProgramState
 from focaccia.symbolic import (
     DisassemblyContext,
@@ -543,6 +548,46 @@ def test_empty_miasm_disassembly_attempts_lldb_fallback(
     assert target.fallback_calls == [0x1000]
     assert isinstance(raised.value.primary_error, Disasm_Exception)
     assert isinstance(raised.value.primary_error.__cause__, IndexError)
+    assert isinstance(raised.value.fallback_error, ValueError)
+
+
+def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
+    bytecode = bytes.fromhex("c5fe6f00")
+
+    class VexTarget:
+        arch = x86.ArchX86()
+
+        def __init__(self):
+            self.fallback_calls: list[int] = []
+
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address >= 0x1000
+            offset = address - 0x1000
+            return bytecode[offset:offset + size]
+
+        def get_instruction_size(self, pc: int) -> int:
+            assert pc == 0x1000
+            return len(bytecode)
+
+        def get_disassembly(self, pc: int) -> str:
+            self.fallback_calls.append(pc)
+            return "VMOVDQU YMM0, YMMWORD PTR [RAX]"
+
+    target = VexTarget()
+    context = DisassemblyContext(cast(ReadableProgramState, target))
+
+    with pytest.raises(DisassemblyError) as raised:
+        tracer_module._disassemble_instruction(
+            context,
+            cast(LLDBConcreteTarget, target),
+            0x1000,
+        )
+
+    assert target.fallback_calls == [0x1000]
+    assert isinstance(raised.value.primary_error, DisassemblyMismatchError)
+    assert "REP OUTSD" in str(raised.value.primary_error)
+    assert "3 bytes" in str(raised.value.primary_error)
+    assert "4 bytes (c5fe6f00)" in str(raised.value.primary_error)
     assert isinstance(raised.value.fallback_error, ValueError)
 
 

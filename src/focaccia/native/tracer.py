@@ -64,6 +64,10 @@ logging.getLogger('asmblock').setLevel(logging.CRITICAL)
 class ValidationError(Exception):
     pass
 
+class DisassemblyMismatchError(ValueError):
+    """A decoded instruction disagrees with the concrete instruction bytes."""
+
+
 class DisassemblyError(Exception):
     def __init__(self, pc: int, primary_error: Exception, fallback_error: Exception):
         self.pc = pc
@@ -75,13 +79,45 @@ class DisassemblyError(Exception):
             f'LLDB fallback failed with: {fallback_error}.'
         )
 
+def _validate_primary_disassembly(
+    instruction: Instruction,
+    target: LLDBConcreteTarget,
+    pc: int,
+) -> None:
+    concrete_size = target.get_instruction_size(pc)
+    concrete_bytes = target.read_instructions(pc, concrete_size)
+    if instruction.length != concrete_size:
+        raise DisassemblyMismatchError(
+            f'Miasm decoded {instruction} as {instruction.length} bytes at '
+            f'{hex(pc)}, but LLDB reports {concrete_size} bytes '
+            f'({concrete_bytes.hex()}).'
+        )
+
+    try:
+        decoded_bytes = instruction.to_bytecode()
+    except (Disasm_Exception, ValueError, NotImplementedError) as err:
+        raise DisassemblyMismatchError(
+            f'Miasm decoded {instruction} at {hex(pc)}, but its encoding '
+            f'could not be verified against {concrete_bytes.hex()}: {err}'
+        ) from err
+    if decoded_bytes != concrete_bytes:
+        raise DisassemblyMismatchError(
+            f'Miasm decoded {instruction} at {hex(pc)} as '
+            f'{decoded_bytes.hex()}, but concrete bytes are '
+            f'{concrete_bytes.hex()}.'
+        )
+
+
 def _disassemble_instruction(ctx: DisassemblyContext,
                              target: LLDBConcreteTarget,
                              pc: int) -> Instruction:
     try:
-        return ctx.disassemble(pc)
+        instruction = ctx.disassemble(pc)
+        _validate_primary_disassembly(instruction, target, pc)
+        return instruction
     except (
         Disasm_Exception,
+        ConcreteExecutionError,
         ConcreteMemoryError,
         MemoryAccessError,
         ValueError,

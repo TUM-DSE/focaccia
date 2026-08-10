@@ -658,6 +658,19 @@
       ];
     };
 
+    fix092VexDisassemblyValidationCheck = mkStaticUnitCheck {
+      name = "fix-092-vex-disassembly-validation";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "vex_misdecode"
+      ];
+    };
+
     fix091EmptyMiasmDisassemblyCheck = mkStaticUnitCheck {
       name = "fix-091-empty-miasm-disassembly";
       ruffTargets = [
@@ -1980,6 +1993,7 @@
       fix-089-defined-flag-cross-validation = fix089DefinedFlagCrossValidationCheck;
       fix-090-xmm-cross-validation = fix090XmmCrossValidationCheck;
       fix-091-empty-miasm-disassembly = fix091EmptyMiasmDisassemblyCheck;
+      fix-092-vex-disassembly-validation = fix092VexDisassemblyValidationCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;
