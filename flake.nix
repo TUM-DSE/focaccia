@@ -658,6 +658,19 @@
       ];
     };
 
+    fix093LslEnvironmentSpecializationCheck = mkStaticUnitCheck {
+      name = "fix-093-lsl-environment-specialization";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "lsl_environment_specialization"
+      ];
+    };
+
     fix092VexDisassemblyValidationCheck = mkStaticUnitCheck {
       name = "fix-092-vex-disassembly-validation";
       ruffTargets = [
@@ -1994,6 +2007,7 @@
       fix-090-xmm-cross-validation = fix090XmmCrossValidationCheck;
       fix-091-empty-miasm-disassembly = fix091EmptyMiasmDisassemblyCheck;
       fix-092-vex-disassembly-validation = fix092VexDisassemblyValidationCheck;
+      fix-093-lsl-environment-specialization = fix093LslEnvironmentSpecializationCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;

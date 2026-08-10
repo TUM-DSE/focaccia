@@ -3,7 +3,15 @@ from typing import Any, cast
 import pytest
 from miasm.core.locationdb import LocationDB
 from miasm.core.utils import Disasm_Exception
-from miasm.expression.expression import Expr, ExprCond, ExprId, ExprInt
+from miasm.expression.expression import (
+    Expr,
+    ExprCompose,
+    ExprCond,
+    ExprId,
+    ExprInt,
+    ExprOp,
+    ExprSlice,
+)
 from miasm.jitter.csts import EXCEPT_DIV_BY_ZERO, EXCEPT_SYSCALL
 
 from focaccia import symbolic as symbolic_module
@@ -24,7 +32,7 @@ from focaccia.native.tracer import (
     SpeculativeTracer,
     SymbolicTracer,
 )
-from focaccia.snapshot import ReadableProgramState
+from focaccia.snapshot import ProgramState, ReadableProgramState
 from focaccia.symbolic import (
     DisassemblyContext,
     Instruction,
@@ -644,6 +652,59 @@ def test_disassembly_fallback_preserves_both_errors(monkeypatch):
     assert raised.value.primary_error is primary_error
     assert raised.value.fallback_error is fallback_error
     assert raised.value.__cause__ is fallback_error
+
+
+def _lsl_environment_outputs() -> tuple[Instruction, dict[Expr, Expr]]:
+    instruction = Instruction.from_string(
+        "LSL AX, BX",
+        x86.ArchX86(),
+        offset=0x1000,
+        length=3,
+    )
+    selector = ExprId("RBX", 64)[0:16]
+    limit = ExprOp("load_segment_limit", selector)
+    return instruction, {
+        ExprId("RAX", 64): ExprCompose(limit, ExprSlice(ExprId("RAX", 64), 16, 64)),
+        ExprId("zf", 1): ExprOp("load_segment_limit_ok", selector),
+        ExprId("RIP", 64): ExprInt(0x1003, 64),
+    }
+
+
+def test_lsl_environment_specialization_omits_inaccessible_destination():
+    instruction, outputs = _lsl_environment_outputs()
+    observed = ProgramState(x86.ArchX86())
+    observed.write_register("RAX", 0xA02E698E741F5A6A)
+    observed.write_register("ZF", 0)
+
+    specialized = tracer_module._specialize_observed_lsl_outputs(
+        instruction,
+        outputs,
+        observed,
+    )
+
+    assert specialized == {
+        ExprId("zf", 1): ExprInt(0, 1),
+        ExprId("RIP", 64): ExprInt(0x1003, 64),
+    }
+
+
+def test_lsl_environment_specialization_records_successful_limit():
+    instruction, outputs = _lsl_environment_outputs()
+    observed = ProgramState(x86.ArchX86())
+    observed.write_register("RAX", 0xA02E698E741F1234)
+    observed.write_register("ZF", 1)
+
+    specialized = tracer_module._specialize_observed_lsl_outputs(
+        instruction,
+        outputs,
+        observed,
+    )
+
+    assert specialized == {
+        ExprId("zf", 1): ExprInt(1, 1),
+        ExprId("RIP", 64): ExprInt(0x1003, 64),
+        ExprId("AX", 16): ExprInt(0x1234, 16),
+    }
 
 
 def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(monkeypatch):

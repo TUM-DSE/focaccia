@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from miasm.core.utils import Disasm_Exception
-from miasm.expression.expression import Expr, ExprId, ExprInt
+from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
 from miasm.jitter.csts import EXCEPT_SYSCALL
 
 from focaccia.arch import Arch
@@ -229,6 +229,72 @@ def _architectural_outputs_for_recorded_syscall(
         for destination, value in outputs.items()
         if destination != marker
     }
+
+
+_LSL_ENVIRONMENT_OPERATIONS = frozenset(
+    {'load_segment_limit', 'load_segment_limit_ok'}
+)
+
+
+def _contains_lsl_environment_operation(expression: Expr) -> bool:
+    if isinstance(expression, ExprOp) and expression.op in _LSL_ENVIRONMENT_OPERATIONS:
+        return True
+    children = list(getattr(expression, 'args', ()))
+    children.extend(
+        getattr(expression, attribute)
+        for attribute in ('arg', 'cond', 'src1', 'src2', 'ptr')
+        if hasattr(expression, attribute)
+    )
+    return any(
+        _contains_lsl_environment_operation(child)
+        for child in children
+        if isinstance(child, Expr)
+    )
+
+
+def _requires_observed_lsl_specialization(
+    instruction: Instruction,
+    outputs: dict[Expr, Expr],
+) -> bool:
+    return (
+        str(instruction).split(maxsplit=1)[0].upper() == 'LSL'
+        and any(_contains_lsl_environment_operation(value) for value in outputs.values())
+    )
+
+
+def _specialize_observed_lsl_outputs(
+    instruction: Instruction,
+    outputs: dict[Expr, Expr],
+    target: ReadableProgramState,
+) -> dict[Expr, Expr]:
+    """Record the observed LSL path without querying analyzer-host tables."""
+    if not _requires_observed_lsl_specialization(instruction, outputs):
+        return outputs
+
+    if not instruction.instr.args or not isinstance(instruction.instr.args[0], ExprId):
+        raise SymbolicCompositionError(
+            f'Observed LSL specialization requires a register destination: {instruction}.'
+        )
+    destination = instruction.instr.args[0]
+    destination_reg = target.arch.to_regname(destination.name)
+    if destination_reg is None:
+        raise SymbolicCompositionError(
+            f'Unknown LSL destination register {destination.name!r}.'
+        )
+
+    specialized = {
+        output: value
+        for output, value in outputs.items()
+        if not _contains_lsl_environment_operation(value)
+    }
+    zf = target.read_register('ZF')
+    specialized[ExprId('zf', 1)] = ExprInt(zf, 1)
+    if zf:
+        specialized[destination] = ExprInt(
+            target.read_register(destination_reg),
+            destination.size,
+        )
+    return specialized
 
 
 def _architectural_outputs_for_observed_division(
@@ -880,6 +946,21 @@ class SymbolicTracer:
                 # Verify generated equations against the concrete target before
                 # retaining them. A forced failure is an explicit gap.
                 destination = int(new_pc)
+                progressed = False
+                if _requires_observed_lsl_specialization(instruction, modified):
+                    self.progress(
+                        destination,
+                        step=True,
+                        terminal=terminal_event,
+                        recorded_syscall_destination=recorded_syscall_destination,
+                    )
+                    progressed = True
+                    modified = _specialize_observed_lsl_outputs(
+                        instruction,
+                        modified,
+                        self.target,
+                    )
+
                 symbolic_start = time.time()
                 candidate: SymbolicTransform | None = None
                 cross_validation_error: BaseException | None = None
@@ -921,13 +1002,14 @@ class SymbolicTracer:
                                 raise
                             cross_validation_error = error
                     finally:
-                        self.progress(
-                            destination,
-                            step=True,
-                            terminal=terminal_event,
-                            recorded_syscall_destination=recorded_syscall_destination,
-                        )
-                else:
+                        if not progressed:
+                            self.progress(
+                                destination,
+                                step=True,
+                                terminal=terminal_event,
+                                recorded_syscall_destination=recorded_syscall_destination,
+                            )
+                elif not progressed:
                     self.progress(
                         None,
                         step=bool(in_event),
