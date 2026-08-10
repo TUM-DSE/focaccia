@@ -28,7 +28,7 @@ from focaccia.deterministic import (
 )
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.native import tracer as tracer_module
-from focaccia.native.lldb_target import LLDBConcreteTarget
+from focaccia.native.lldb_target import ConcreteExecutionError, LLDBConcreteTarget
 from focaccia.native.tracer import (
     DisassemblyError,
     SpeculativeTracer,
@@ -402,9 +402,7 @@ def test_recorded_syscall_control_output_is_not_architectural_state():
     with pytest.raises(SymbolicCompositionError, match="exception_flags"):
         SymbolicTransform(1, unmatched, [instruction], arch, 0x1000, 0x1002)
 
-    wrong_marker: dict[Expr, Expr] = {
-        marker: ExprInt(EXCEPT_SYSCALL + 1, 32)
-    }
+    wrong_marker: dict[Expr, Expr] = {marker: ExprInt(EXCEPT_SYSCALL + 1, 32)}
     assert (
         tracer_module._architectural_outputs_for_recorded_syscall(
             wrong_marker,
@@ -492,8 +490,8 @@ def test_native_terminal_syscall_consumes_exit_marker_and_targets_exit():
         (pre_event, terminal),
         lambda item, current: item.pc == current.read_pc(),
     )
-    event, post_event, requires_event_step = (
-        tracer_module._match_deterministic_event(cursor, EventState())
+    event, post_event, requires_event_step = tracer_module._match_deterministic_event(
+        cursor, EventState()
     )
     assert event is pre_event
     assert post_event is terminal
@@ -736,7 +734,7 @@ def test_pinned_miasm_decodes_and_lifts_paper_sse_instructions(
         def read_instructions(self, address: int, size: int) -> bytes:
             assert address >= 0x1000
             offset = address - 0x1000
-            return bytecode[offset:offset + size]
+            return bytecode[offset : offset + size]
 
         def get_disassembly(self, pc: int) -> str:
             assert pc == 0x1000
@@ -756,9 +754,7 @@ def test_pinned_miasm_decodes_and_lifts_paper_sse_instructions(
 
     assert str(instruction).split(maxsplit=1)[0] == expected_mnemonic
     location_db = LocationDB()
-    assignments, extra = instruction.machine.lifter(location_db).get_ir(
-        instruction.instr
-    )
+    assignments, extra = instruction.machine.lifter(location_db).get_ir(instruction.instr)
     assert assignments
     assert extra == []
 
@@ -772,7 +768,7 @@ def test_disassembly_validation_accepts_equivalent_sib_encoding():
         def read_instructions(self, address: int, size: int) -> bytes:
             assert address >= 0x1000
             offset = address - 0x1000
-            return bytecode[offset:offset + size]
+            return bytecode[offset : offset + size]
 
         def get_instruction_size(self, pc: int) -> int:
             assert pc == 0x1000
@@ -802,6 +798,55 @@ def test_disassembly_validation_accepts_equivalent_sib_encoding():
     ]
 
 
+def test_disassembly_validation_coalesces_lldb_lock_prefix():
+    bytecode = bytes.fromhex("f0410fb109")
+
+    class AlternateEncodingInstruction:
+        length = len(bytecode)
+
+        def to_bytecode(self) -> bytes:
+            return bytes.fromhex("f0450fb109")
+
+        def __str__(self) -> str:
+            return "LOCK CMPXCHG DWORD PTR [R9], ECX"
+
+    class PrefixSplittingTarget:
+        arch = x86.ArchX86()
+
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address >= 0x1000
+            offset = address - 0x1000
+            return bytecode[offset : offset + size]
+
+        def get_instruction_size(self, pc: int) -> int:
+            if pc == 0x1000:
+                return 1
+            assert pc == 0x1001
+            return 4
+
+        def get_disassembly(self, pc: int) -> str:
+            assert pc == 0x1001
+            return "CMPXCHG DWORD PTR [R9], ECX"
+
+    tracer_module._validate_primary_disassembly(
+        cast(Instruction, AlternateEncodingInstruction()),
+        cast(LLDBConcreteTarget, PrefixSplittingTarget()),
+        0x1000,
+    )
+
+
+def test_prefixed_disassembly_compares_the_instruction_mnemonic():
+    assert tracer_module._disassembly_mnemonics_compatible(
+        "LOCK CMPXCHG DWORD PTR [R9], ECX",
+        "LOCK CMPXCHG DWORD PTR [R9], ECX",
+    )
+    assert not tracer_module._disassembly_mnemonics_compatible(
+        "LOCK ADD DWORD PTR [R9], ECX",
+        "LOCK CMPXCHG DWORD PTR [R9], ECX",
+    )
+    assert not tracer_module._disassembly_mnemonics_compatible("LOCK", "")
+
+
 def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
     bytecode = bytes.fromhex("c5fe6f00")
 
@@ -814,7 +859,7 @@ def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
         def read_instructions(self, address: int, size: int) -> bytes:
             assert address >= 0x1000
             offset = address - 0x1000
-            return bytecode[offset:offset + size]
+            return bytecode[offset : offset + size]
 
         def get_instruction_size(self, pc: int) -> int:
             assert pc == 0x1000
@@ -866,7 +911,7 @@ def test_rex_mmx_movq_uses_full_mm0_value():
         def read_instructions(self, address: int, size: int) -> bytes:
             assert address >= 0x1000
             offset = address - 0x1000
-            return bytecode[offset:offset + size]
+            return bytecode[offset : offset + size]
 
         def get_instruction_size(self, pc: int) -> int:
             assert pc == 0x1000
@@ -950,6 +995,30 @@ def test_disassembly_fallback_preserves_both_errors(monkeypatch):
     assert raised.value.primary_error is primary_error
     assert raised.value.fallback_error is fallback_error
     assert raised.value.__cause__ is fallback_error
+
+
+def test_empty_lldb_fallback_is_reported_as_disassembly_error():
+    primary_error = ValueError("primary disassembler failed")
+
+    class FakeContext:
+        arch = x86.ArchX86()
+
+        def disassemble(self, _pc: int) -> Instruction:
+            raise primary_error
+
+    class EmptyTarget:
+        def get_disassembly(self, _pc: int) -> str:
+            return " "
+
+    with pytest.raises(tracer_module.DisassemblyError) as raised:
+        tracer_module._disassemble_instruction(
+            cast(DisassemblyContext, FakeContext()),
+            cast(LLDBConcreteTarget, EmptyTarget()),
+            0x1000,
+        )
+
+    assert raised.value.primary_error is primary_error
+    assert isinstance(raised.value.fallback_error, ConcreteExecutionError)
 
 
 def _lsl_environment_outputs() -> tuple[Instruction, dict[Expr, Expr]]:
@@ -1135,9 +1204,7 @@ def test_symbolic_execution_not_implemented_error_is_typed(monkeypatch):
 
 
 def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
-    symbolic_error = UnsupportedInstructionError(
-        "fixture instruction is unsupported"
-    )
+    symbolic_error = UnsupportedInstructionError("fixture instruction is unsupported")
 
     class FakeInstruction:
         instr = object()

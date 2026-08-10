@@ -802,6 +802,19 @@
       ];
     };
 
+    fix103LldbLockPrefixDisassemblyCheck = mkStaticUnitCheck {
+      name = "fix-103-lldb-lock-prefix-disassembly";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "lldb_lock_prefix or prefixed_disassembly or empty_lldb_fallback"
+      ];
+    };
+
     fix092VexDisassemblyValidationCheck = mkStaticUnitCheck {
       name = "fix-092-vex-disassembly-validation";
       ruffTargets = [
@@ -2154,6 +2167,7 @@
       fix-097-miasm-sse-support = fix097MiasmSseSupportCheck;
       fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
       fix-099-opt-in-capture-profiling = fix099OptInCaptureProfilingCheck;
+      fix-103-lldb-lock-prefix-disassembly = fix103LldbLockPrefixDisassemblyCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;
