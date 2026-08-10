@@ -160,8 +160,8 @@ statements = 92
 branches = 70
 
 [tool.focaccia.coverage.ratchets."src/focaccia/compare.py"]
-statements = 98
-branches = 96
+statements = 100
+branches = 100
 
 [tool.focaccia.coverage.ratchets."src/focaccia/deterministic.py"]
 statements = 84
@@ -199,13 +199,23 @@ branches = 84
 statements = 58
 branches = 44
 
+[tool.focaccia.mutation]
+minimum_score = 97
+maximum_no_tests = 0
+maximum_skipped = 0
+
 [tool.mutmut]
 # Copy the package so relative imports remain intact, but keep the pilot to one module.
 source_paths = ["src/focaccia"]
 only_mutate = ["src/focaccia/compare.py"]
 # Ensure tests import mutmut's copied source instead of the Nix-installed package.
 pytest_add_cli_args = ["-m", "not integration", "-o", "pythonpath=src"]
-pytest_add_cli_args_test_selection = ["tests/test_compare.py"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_compare.py",
+    "tests/test_environment_symbols.py",
+    "tests/test_qemu_report.py",
+    "tests/test_trace_gaps.py",
+]
 use_git_change_detection = false
 
 [dependency-groups]

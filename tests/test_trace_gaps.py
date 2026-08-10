@@ -73,7 +73,16 @@ def test_gap_is_retained_and_later_validation_resumes_at_exact_cutpoint():
 
     report = compare_symbolic(matched.trace, diagnostics=matched.diagnostics)
     assert "symbolic-trace-gap" in diagnostic_codes(report)
+    gap_diagnostic = next(
+        diagnostic for diagnostic in report.diagnostics if diagnostic.code == "symbolic-trace-gap"
+    )
+    assert gap_diagnostic.level == "incomplete"
+    assert gap_diagnostic.concrete_index == 0
+    assert gap_diagnostic.transform_index == 0
+    assert "unsupported-semantics" in gap_diagnostic.message
+    assert "unsupported fixture instruction" in gap_diagnostic.message
     assert report[0]["errors"][0].severity == ErrorTypes.INCOMPLETE
+    assert report[0]["errors"][0].error_msg == gap_diagnostic.message
     assert report[1]["errors"] == []
 
 

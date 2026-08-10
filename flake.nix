@@ -554,6 +554,7 @@
         import json
         import pathlib
         import sys
+        import tomllib
 
         stats_path = pathlib.Path(sys.argv[1])
         summary_path = pathlib.Path(sys.argv[2])
@@ -604,15 +605,39 @@
         if assessed <= 0:
             raise SystemExit("mutation smoke did not assess any mutants")
         score = 100 * stats["killed"] / assessed
+        policy_document = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+        policy = policy_document["tool"]["focaccia"]["mutation"]
+        minimum_score = policy["minimum_score"]
+        maximum_no_tests = policy["maximum_no_tests"]
+        maximum_skipped = policy["maximum_skipped"]
+        if not isinstance(minimum_score, (int, float)) or not 0 <= minimum_score <= 100:
+            raise SystemExit("mutation minimum_score must be between 0 and 100")
+        if not isinstance(maximum_no_tests, int) or maximum_no_tests < 0:
+            raise SystemExit("mutation maximum_no_tests must be a non-negative integer")
+        if not isinstance(maximum_skipped, int) or maximum_skipped < 0:
+            raise SystemExit("mutation maximum_skipped must be a non-negative integer")
+
         summary_path.write_text(
-            "compare.py mutation pilot (informational baseline; no score threshold)\n"
+            "compare.py curated mutation ratchet\n"
             f"killed: {stats['killed']}\n"
             f"survived: {stats['survived']}\n"
-            f"no tests: {stats['no_tests']}\n"
-            f"skipped: {stats['skipped']}\n"
-            f"assessed mutation score: {score:.2f}%\n"
+            f"no tests: {stats['no_tests']} <= {maximum_no_tests}\n"
+            f"skipped: {stats['skipped']} <= {maximum_skipped}\n"
+            f"assessed mutation score: {score:.2f}% >= {minimum_score:.2f}%\n"
             f"total generated mutants: {stats['total']}\n"
         )
+        if stats["no_tests"] > maximum_no_tests:
+            raise SystemExit(
+                f"mutation no-test count {stats['no_tests']} exceeds {maximum_no_tests}"
+            )
+        if stats["skipped"] > maximum_skipped:
+            raise SystemExit(
+                f"mutation skipped count {stats['skipped']} exceeds {maximum_skipped}"
+            )
+        if score + 1e-9 < minimum_score:
+            raise SystemExit(
+                f"mutation score {score:.2f}% is below {minimum_score:.2f}%"
+            )
         PY
       '';
 

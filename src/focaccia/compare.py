@@ -175,9 +175,6 @@ def compare_simple(
             )
         )
         return ValidationReport(diagnostics=diagnostics)
-    if not tested:
-        return ValidationReport(diagnostics=diagnostics)
-
     entries: list[ComparisonEntry] = []
     try:
         initial_pc = tested[0].read_pc()
@@ -285,7 +282,7 @@ def _find_register_errors(
     txl_from: ProgramState,
     txl_to: ProgramState,
     transform_truth: SymbolicTransform,
-    is_uarch_dep: bool = False,
+    is_uarch_dep: bool,
 ) -> list[Error]:
     """Compare symbolic register outputs against a concrete destination."""
     try:
