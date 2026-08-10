@@ -658,6 +658,20 @@
       ];
     };
 
+    fix090XmmCrossValidationCheck = mkStaticUnitCheck {
+      name = "fix-090-xmm-cross-validation";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "xmm_cross_validation"
+      ];
+    };
+
     fix089DefinedFlagCrossValidationCheck = mkStaticUnitCheck {
       name = "fix-089-defined-flag-cross-validation";
       ruffTargets = [
@@ -1951,6 +1965,7 @@
       fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
       fix-088-observed-division-control = fix088ObservedDivisionControlCheck;
       fix-089-defined-flag-cross-validation = fix089DefinedFlagCrossValidationCheck;
+      fix-090-xmm-cross-validation = fix090XmmCrossValidationCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;

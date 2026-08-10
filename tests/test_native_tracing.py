@@ -316,6 +316,36 @@ def test_native_cross_validation_retains_implicit_zero_extension():
     }
 
 
+def test_xmm_cross_validation_does_not_require_unchanged_zmm_state():
+    class XmmOnlyTarget(ScriptedTarget):
+        def read_register(self, regname: str) -> int:
+            if regname.upper() == "ZMM0":
+                raise AssertionError("backend does not expose ZMM0")
+            return super().read_register(regname)
+
+    target = XmmOnlyTarget()
+    xmm_value = 0x00112233445566778899AABBCCDDEEFF
+    transform = SymbolicTransform(
+        1,
+        {ExprId("XMM0", 128): ExprInt(xmm_value, 128)},
+        [],
+        target.arch,
+        0x1000,
+        0x1004,
+    )
+
+    predicted = transform.eval_validation_register_transforms(speculative(target))
+    assert predicted == {"XMM0": xmm_value}
+    assert target.register_reads == []
+
+    target.write_register("XMM0", xmm_value)
+    tracer = object.__new__(SymbolicTracer)
+    tracer.target = speculative(target)
+    tracer.validation_time = 0
+    tracer.validate(cast(Any, SimpleNamespace(addr=0x1000)), transform, predicted, {})
+    assert target.register_reads == ["XMM0"]
+
+
 def test_memory_write_invalidates_every_overlapping_cached_range():
     target = ScriptedTarget()
     target.write_memory(0x2000, b"abcdef")
