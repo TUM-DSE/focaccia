@@ -79,11 +79,69 @@ class DisassemblyError(Exception):
             f'LLDB fallback failed with: {fallback_error}.'
         )
 
+_CONDITION_MNEMONIC_ALIASES = {
+    'E': 'Z',
+    'NE': 'NZ',
+    'AE': 'NB',
+    'NC': 'NB',
+    'NAE': 'B',
+    'C': 'B',
+    'NA': 'BE',
+    'NBE': 'A',
+    'PE': 'P',
+    'PO': 'NP',
+    'NL': 'GE',
+    'NGE': 'L',
+    'NG': 'LE',
+    'NLE': 'G',
+}
+
+
+def _normalized_disassembly_mnemonic(text: str) -> str:
+    mnemonic = text.upper().split(maxsplit=1)[0]
+    for prefix in ('CMOV', 'SET', 'J'):
+        if mnemonic.startswith(prefix):
+            condition = mnemonic[len(prefix):]
+            return prefix + _CONDITION_MNEMONIC_ALIASES.get(condition, condition)
+    return mnemonic
+
+
+def _disassembly_mnemonics_compatible(primary: str, concrete: str) -> bool:
+    primary_mnemonic = _normalized_disassembly_mnemonic(primary)
+    concrete_mnemonic = _normalized_disassembly_mnemonic(concrete)
+    if primary_mnemonic == concrete_mnemonic:
+        return True
+    for suffix in ('PS', 'PD', 'SS', 'SD'):
+        predicate_mnemonics = {
+            f'CMP{predicate}{suffix}'
+            for predicate in ('EQ', 'LT', 'LE', 'UNORD', 'NEQ', 'NLT', 'NLE', 'ORD')
+        }
+        if (
+            concrete_mnemonic == f'CMP{suffix}'
+            and primary_mnemonic in predicate_mnemonics
+        ):
+            return True
+    return False
+
+
 def _validate_primary_disassembly(
     instruction: Instruction,
     target: LLDBConcreteTarget,
     pc: int,
 ) -> None:
+    source_bytes = target.read_instructions(pc, instruction.length)
+    encoding_error: Exception | None = None
+    try:
+        decoded_bytes = instruction.to_bytecode()
+    except (Disasm_Exception, ValueError, NotImplementedError) as err:
+        decoded_bytes = None
+        encoding_error = err
+    if decoded_bytes == source_bytes:
+        return
+
+    # Alternate encodings are common (short branches, ignored SIB scale bits,
+    # and redundant REX bits). Consult LLDB only on a byte mismatch so the
+    # normal tracing path does not pay for a second disassembly per instruction.
     concrete_size = target.get_instruction_size(pc)
     concrete_bytes = target.read_instructions(pc, concrete_size)
     if instruction.length != concrete_size:
@@ -92,43 +150,18 @@ def _validate_primary_disassembly(
             f'{hex(pc)}, but LLDB reports {concrete_size} bytes '
             f'({concrete_bytes.hex()}).'
         )
-
-    try:
-        decoded_bytes = instruction.to_bytecode()
-    except (Disasm_Exception, ValueError, NotImplementedError) as err:
-        raise DisassemblyMismatchError(
-            f'Miasm decoded {instruction} at {hex(pc)}, but its encoding '
-            f'could not be verified against {concrete_bytes.hex()}: {err}'
-        ) from err
-    if decoded_bytes != concrete_bytes:
-        raise DisassemblyMismatchError(
-            f'Miasm decoded {instruction} at {hex(pc)} as '
-            f'{decoded_bytes.hex()}, but concrete bytes are '
-            f'{concrete_bytes.hex()}.'
-        )
-
-
-def _normalize_rex_mmx_movq(
-    instruction: Instruction,
-    target: LLDBConcreteTarget,
-    pc: int,
-) -> Instruction:
-    """Correct Miasm's REX.B extension of an MMX source register."""
-    if target.arch.archname != 'x86_64':
-        return instruction
-    bytecode = target.read_instructions(pc, instruction.length)
-    if bytecode != bytes.fromhex('4f0f7ec0'):
-        return instruction
-    if str(instruction).split() != ['MOVD', 'R8,', 'MM8']:
-        raise DisassemblyMismatchError(
-            f'Encoding 4f0f7ec0 at {hex(pc)} requires MOVQ R8, MM0, but '
-            f'Miasm produced {instruction}.'
-        )
-    return Instruction.from_string(
-        'MOVQ R8, MM0',
-        target.arch,
-        offset=pc,
-        length=instruction.length,
+    concrete_text = target.get_disassembly(pc)
+    if _disassembly_mnemonics_compatible(str(instruction), concrete_text):
+        return
+    decoded_description = (
+        decoded_bytes.hex()
+        if decoded_bytes is not None
+        else f'unverifiable ({encoding_error})'
+    )
+    raise DisassemblyMismatchError(
+        f'Miasm decoded {instruction} at {hex(pc)} as '
+        f'{decoded_description}, but concrete bytes are '
+        f'{concrete_bytes.hex()} and LLDB reports {concrete_text!r}.'
     )
 
 
@@ -137,9 +170,6 @@ def _disassemble_instruction(ctx: DisassemblyContext,
                              pc: int) -> Instruction:
     try:
         instruction = ctx.disassemble(pc)
-        normalized = _normalize_rex_mmx_movq(instruction, target, pc)
-        if normalized is not instruction:
-            return normalized
         _validate_primary_disassembly(instruction, target, pc)
         return instruction
     except (

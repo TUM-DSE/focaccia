@@ -2,7 +2,6 @@ from typing import Any, cast
 
 import pytest
 from miasm.core.locationdb import LocationDB
-from miasm.core.utils import Disasm_Exception
 from miasm.expression.expression import (
     Expr,
     ExprCompose,
@@ -29,7 +28,6 @@ from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import (
     DisassemblyError,
-    DisassemblyMismatchError,
     SpeculativeTracer,
     SymbolicTracer,
 )
@@ -514,22 +512,50 @@ def test_disassembly_fallback_uses_instruction_from_string(monkeypatch):
     assert calls == [("NOP", context.arch, 0x1000, 1)]
 
 
-@pytest.mark.parametrize(
-    ("bytecode", "disassembly"),
-    [
-        (bytes.fromhex("f20fd0ca"), "ADDSUBPS XMM1, XMM2"),
-        (bytes.fromhex("660fc2c0d1"), "CMPPD XMM0, XMM0, 0xD1"),
-    ],
-)
-def test_empty_miasm_disassembly_attempts_lldb_fallback(
-    bytecode: bytes,
-    disassembly: str,
-):
-    class UnsupportedInstructionTarget:
+def test_empty_miasm_disassembly_attempts_lldb_fallback():
+    class EmptyDisassembler:
+        def dis_instr(self, _pc: int):
+            raise IndexError("empty Miasm block")
+
+    class FallbackTarget:
         arch = x86.ArchX86()
 
-        def __init__(self):
-            self.fallback_calls: list[int] = []
+        def get_disassembly(self, pc: int) -> str:
+            assert pc == 0x1000
+            return "NOP"
+
+        def get_instruction_size(self, pc: int) -> int:
+            assert pc == 0x1000
+            return 1
+
+    context = object.__new__(DisassemblyContext)
+    context.mdis = cast(Any, EmptyDisassembler())
+    context.arch = x86.ArchX86()
+    target = FallbackTarget()
+
+    instruction = tracer_module._disassemble_instruction(
+        context,
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
+
+    assert str(instruction).strip() == "NOP"
+
+
+@pytest.mark.parametrize(
+    ("bytecode", "disassembly", "expected_mnemonic"),
+    [
+        (bytes.fromhex("f20fd0ca"), "ADDSUBPS XMM1, XMM2", "ADDSUBPS"),
+        (bytes.fromhex("660fc2c0d1"), "CMPPD XMM0, XMM0, 0xD1", "CMPLTPD"),
+    ],
+)
+def test_pinned_miasm_decodes_and_lifts_paper_sse_instructions(
+    bytecode: bytes,
+    disassembly: str,
+    expected_mnemonic: str,
+):
+    class InstructionTarget:
+        arch = x86.ArchX86()
 
         def read_instructions(self, address: int, size: int) -> bytes:
             assert address >= 0x1000
@@ -537,27 +563,67 @@ def test_empty_miasm_disassembly_attempts_lldb_fallback(
             return bytecode[offset:offset + size]
 
         def get_disassembly(self, pc: int) -> str:
-            self.fallback_calls.append(pc)
+            assert pc == 0x1000
             return disassembly
 
         def get_instruction_size(self, pc: int) -> int:
             assert pc == 0x1000
             return len(bytecode)
 
-    target = UnsupportedInstructionTarget()
+    target = InstructionTarget()
+    context = DisassemblyContext(cast(ReadableProgramState, target))
+    instruction = tracer_module._disassemble_instruction(
+        context,
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
+
+    assert str(instruction).split(maxsplit=1)[0] == expected_mnemonic
+    location_db = LocationDB()
+    assignments, extra = instruction.machine.lifter(location_db).get_ir(
+        instruction.instr
+    )
+    assert assignments
+    assert extra == []
+
+
+def test_disassembly_validation_accepts_equivalent_sib_encoding():
+    bytecode = bytes.fromhex("488d542420")
+
+    class SibTarget:
+        arch = x86.ArchX86()
+
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address >= 0x1000
+            offset = address - 0x1000
+            return bytecode[offset:offset + size]
+
+        def get_instruction_size(self, pc: int) -> int:
+            assert pc == 0x1000
+            return len(bytecode)
+
+        def get_disassembly(self, pc: int) -> str:
+            assert pc == 0x1000
+            return "LEA RDX, [RSP + 0x20]"
+
+    target = SibTarget()
     context = DisassemblyContext(cast(ReadableProgramState, target))
 
-    with pytest.raises(DisassemblyError) as raised:
-        tracer_module._disassemble_instruction(
-            context,
-            cast(LLDBConcreteTarget, target),
-            0x1000,
-        )
+    instruction = tracer_module._disassemble_instruction(
+        context,
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
 
-    assert target.fallback_calls == [0x1000]
-    assert isinstance(raised.value.primary_error, Disasm_Exception)
-    assert isinstance(raised.value.primary_error.__cause__, IndexError)
-    assert isinstance(raised.value.fallback_error, ValueError)
+    assert str(instruction).split() == [
+        "LEA",
+        "RDX,",
+        "QWORD",
+        "PTR",
+        "[RSP",
+        "+",
+        "0x20]",
+    ]
 
 
 def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
@@ -584,20 +650,35 @@ def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
 
     target = VexTarget()
     context = DisassemblyContext(cast(ReadableProgramState, target))
-
-    with pytest.raises(DisassemblyError) as raised:
-        tracer_module._disassemble_instruction(
-            context,
-            cast(LLDBConcreteTarget, target),
-            0x1000,
-        )
-
+    primary = tracer_module._disassemble_instruction(
+        context,
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
+    assert str(primary).split(maxsplit=1)[0] == "VMOVDQU"
     assert target.fallback_calls == [0x1000]
-    assert isinstance(raised.value.primary_error, DisassemblyMismatchError)
-    assert "REP OUTSD" in str(raised.value.primary_error)
-    assert "3 bytes" in str(raised.value.primary_error)
-    assert "4 bytes (c5fe6f00)" in str(raised.value.primary_error)
-    assert isinstance(raised.value.fallback_error, ValueError)
+
+    wrong = Instruction.from_string(
+        "REP OUTSD",
+        target.arch,
+        offset=0x1000,
+        length=3,
+    )
+
+    class WrongContext:
+        arch = target.arch
+
+        def disassemble(self, _pc: int) -> Instruction:
+            return wrong
+
+    recovered = tracer_module._disassemble_instruction(
+        cast(DisassemblyContext, WrongContext()),
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
+
+    assert str(recovered).split(maxsplit=1)[0] == "VMOVDQU"
+    assert target.fallback_calls == [0x1000, 0x1000]
 
 
 def test_rex_mmx_movq_uses_full_mm0_value():
@@ -615,8 +696,9 @@ def test_rex_mmx_movq_uses_full_mm0_value():
             assert pc == 0x1000
             return len(bytecode)
 
-        def get_disassembly(self, _pc: int) -> str:
-            raise AssertionError("matching primary bytes must not use fallback")
+        def get_disassembly(self, pc: int) -> str:
+            assert pc == 0x1000
+            return "MOVQ R8, MM0"
 
     target = RexMovqTarget()
     context = DisassemblyContext(cast(ReadableProgramState, target))

@@ -658,6 +658,26 @@
       ];
     };
 
+    fix098MiasmVmovdquSupportCheck = mkStaticUnitCheck {
+      name = "fix-098-miasm-vmovdqu-support";
+      ruffTargets = [ "tests/test_native_api.py" ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "vex_misdecode"
+      ];
+    };
+
+    fix097MiasmSseSupportCheck = mkStaticUnitCheck {
+      name = "fix-097-miasm-sse-support";
+      ruffTargets = [ "tests/test_native_api.py" ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "pinned_miasm_decodes"
+      ];
+    };
+
     fix094RexMmxMovqCheck = mkStaticUnitCheck {
       name = "fix-094-rex-mmx-movq";
       ruffTargets = [
@@ -693,7 +713,7 @@
       pytestTargets = [
         "tests/test_native_api.py"
         "-k"
-        "vex_misdecode"
+        "vex_misdecode or disassembly_validation"
       ];
     };
 
@@ -706,7 +726,7 @@
       pytestTargets = [
         "tests/test_native_api.py"
         "-k"
-        "empty_miasm_disassembly"
+        "empty_miasm_disassembly or pinned_miasm_decodes"
       ];
     };
 
@@ -1148,9 +1168,9 @@
         self_kib=$(du -sk ${self} | cut -f1)
         test "$self_kib" -lt 65536
 
-        grep -F 'miasm = { git = "https://github.com/taugoust/miasm.git", rev = "083c88f096d1b654069eff874356df7b2ecd4606" }' \
+        grep -F 'miasm = { git = "https://github.com/taugoust/miasm.git", rev = "3717f96f2f61739768e5e311ac415e7df95911ff" }' \
           ${self}/pyproject.toml
-        grep -F 'source = { git = "https://github.com/taugoust/miasm.git?rev=083c88f096d1b654069eff874356df7b2ecd4606#083c88f096d1b654069eff874356df7b2ecd4606" }' \
+        grep -F 'source = { git = "https://github.com/taugoust/miasm.git?rev=3717f96f2f61739768e5e311ac415e7df95911ff#3717f96f2f61739768e5e311ac415e7df95911ff" }' \
           ${self}/uv.lock
 
         mkdir -p "$out"
@@ -2022,6 +2042,8 @@
       fix-092-vex-disassembly-validation = fix092VexDisassemblyValidationCheck;
       fix-093-lsl-environment-specialization = fix093LslEnvironmentSpecializationCheck;
       fix-094-rex-mmx-movq = fix094RexMmxMovqCheck;
+      fix-097-miasm-sse-support = fix097MiasmSseSupportCheck;
+      fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
       fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
       fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;
