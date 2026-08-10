@@ -108,11 +108,38 @@ def _validate_primary_disassembly(
         )
 
 
+def _normalize_rex_mmx_movq(
+    instruction: Instruction,
+    target: LLDBConcreteTarget,
+    pc: int,
+) -> Instruction:
+    """Correct Miasm's REX.B extension of an MMX source register."""
+    if target.arch.archname != 'x86_64':
+        return instruction
+    bytecode = target.read_instructions(pc, instruction.length)
+    if bytecode != bytes.fromhex('4f0f7ec0'):
+        return instruction
+    if str(instruction).split() != ['MOVD', 'R8,', 'MM8']:
+        raise DisassemblyMismatchError(
+            f'Encoding 4f0f7ec0 at {hex(pc)} requires MOVQ R8, MM0, but '
+            f'Miasm produced {instruction}.'
+        )
+    return Instruction.from_string(
+        'MOVQ R8, MM0',
+        target.arch,
+        offset=pc,
+        length=instruction.length,
+    )
+
+
 def _disassemble_instruction(ctx: DisassemblyContext,
                              target: LLDBConcreteTarget,
                              pc: int) -> Instruction:
     try:
         instruction = ctx.disassemble(pc)
+        normalized = _normalize_rex_mmx_movq(instruction, target, pc)
+        if normalized is not instruction:
+            return normalized
         _validate_primary_disassembly(instruction, target, pc)
         return instruction
     except (

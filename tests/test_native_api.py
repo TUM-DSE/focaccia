@@ -24,6 +24,7 @@ from focaccia.deterministic import (
     SignalEvent,
     SyscallEvent,
 )
+from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import LLDBConcreteTarget
 from focaccia.native.tracer import (
@@ -597,6 +598,45 @@ def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
     assert "3 bytes" in str(raised.value.primary_error)
     assert "4 bytes (c5fe6f00)" in str(raised.value.primary_error)
     assert isinstance(raised.value.fallback_error, ValueError)
+
+
+def test_rex_mmx_movq_uses_full_mm0_value():
+    bytecode = bytes.fromhex("4f0f7ec0")
+
+    class RexMovqTarget:
+        arch = x86.ArchX86()
+
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address >= 0x1000
+            offset = address - 0x1000
+            return bytecode[offset:offset + size]
+
+        def get_instruction_size(self, pc: int) -> int:
+            assert pc == 0x1000
+            return len(bytecode)
+
+        def get_disassembly(self, _pc: int) -> str:
+            raise AssertionError("matching primary bytes must not use fallback")
+
+    target = RexMovqTarget()
+    context = DisassemblyContext(cast(ReadableProgramState, target))
+    instruction = tracer_module._disassemble_instruction(
+        context,
+        cast(LLDBConcreteTarget, target),
+        0x1000,
+    )
+
+    assert str(instruction).split() == ["MOVQ", "R8,", "MM0"]
+    location_db = LocationDB()
+    state = ProgramState(target.arch)
+    resolver = MiasmSymbolResolver(state, location_db)
+    next_pc, outputs = run_instruction(
+        instruction.instr,
+        resolver,
+        instruction.machine.lifter(location_db),
+    )
+    assert next_pc == ExprInt(0x1004, 64)
+    assert outputs[ExprId("R8", 64)] == ExprId("MM0", 64)
 
 
 def test_disassembly_fallback_does_not_hide_programming_errors():
