@@ -98,3 +98,21 @@ markers = [
 	"integration: requires a debugger, emulator, RR replay, or a running guest program; run only from a dedicated flake check",
 ]
 
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["focaccia"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_empty = true
+
+[tool.coverage.json]
+pretty_print = true
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]
+

@@ -397,6 +397,67 @@
       pytestTargets = [ "tests" ];
     };
 
+    coreBranchCoverageCheck = pkgs.stdenv.mkDerivation {
+      name = "core-branch-coverage";
+      src = staticUnitSource;
+
+      doCheck = true;
+      dontBuild = true;
+      nativeCheckInputs = [ pythonDevEnv ];
+
+      checkPhase = ''
+        set -euo pipefail
+        export REPO_ROOT="$PWD"
+        mkdir -p "$out/html"
+
+        python -m pytest -q -m 'not integration' tests \
+          --cov=focaccia \
+          --cov-branch \
+          --cov-report=term-missing \
+          --cov-report=json:"$out/coverage.json" \
+          --cov-report=xml:"$out/coverage.xml" \
+          --cov-report=html:"$out/html"
+
+        python - "$out/coverage.json" "$out/summary.txt" <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        report_path = pathlib.Path(sys.argv[1])
+        summary_path = pathlib.Path(sys.argv[2])
+        document = json.loads(report_path.read_text())
+        if document.get("meta", {}).get("branch_coverage") is not True:
+            raise SystemExit("coverage report does not contain branch coverage")
+
+        files = document.get("files", {})
+        required = (
+            "src/focaccia/snapshot.py",
+            "src/focaccia/trace.py",
+            "src/focaccia/compare.py",
+            "src/focaccia/match.py",
+        )
+        missing = [suffix for suffix in required if not any(
+            pathlib.PurePath(name).as_posix().endswith(suffix) for name in files
+        )]
+        if missing:
+            raise SystemExit(f"coverage report is missing core modules: {missing}")
+
+        totals = document.get("totals", {})
+        if totals.get("num_statements", 0) <= 0 or totals.get("covered_lines", 0) <= 0:
+            raise SystemExit("coverage report does not contain executed statements")
+
+        summary_path.write_text(
+            "Branch-coverage baseline (no threshold enforced)\n"
+            f"statements: {totals['covered_lines']}/{totals['num_statements']}\n"
+            f"branches: {totals['covered_branches']}/{totals['num_branches']}\n"
+            f"coverage: {totals['percent_covered']:.2f}%\n"
+        )
+        PY
+      '';
+
+      env = uvEnv;
+    };
+
     reproducerMemoryLayoutCheck = mkStaticUnitCheck {
       name = "reproducer-memory-layout";
       ruffTargets = [
@@ -2053,6 +2114,7 @@
     checks = {
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
+      core-branch-coverage = coreBranchCoverageCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
       register-api-migration = registerApiMigrationCheck;
