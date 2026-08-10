@@ -193,6 +193,7 @@ class TransitionMatcher:
         self._current_index = None
 
     def fail_concrete_state(self, index: int, error: Exception) -> None:
+        self._concrete_count = max(self._concrete_count, index + 1)
         self._fatal(
             "concrete-pc-unavailable",
             f"Unable to read concrete state {index} program counter: {error}.",

@@ -1799,6 +1799,37 @@
       ];
     };
 
+    fix104ConcretePcDiagnosticCheck = mkStaticUnitCheck {
+      name = "fix-104-concrete-pc-diagnostic";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "tests/test_match.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "-k"
+        "no_matching_boundary_and_unavailable_pc"
+      ];
+    };
+
+    matchingFailureDiagnosticsCheck = mkStaticUnitCheck {
+      name = "matching-failure-diagnostics";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "tests/test_match.py"
+      ];
+      pytestTargets = [ "tests/test_match.py" ];
+    };
+
+    persistenceAdversarialInputsCheck = mkStaticUnitCheck {
+      name = "persistence-adversarial-inputs";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [ "tests/test_persistence.py" ];
+    };
+
     transitionBoundaryMatchingCheck = mkStaticUnitCheck {
       name = "transition-boundary-matching";
       ruffTargets = [
@@ -2227,6 +2258,9 @@
       legacy-trace-readers = legacyTraceReadersCheck;
       trace-structural-validation = traceStructuralValidationCheck;
       typed-empty-traces = typedEmptyTracesCheck;
+      fix-104-concrete-pc-diagnostic = fix104ConcretePcDiagnosticCheck;
+      matching-failure-diagnostics = matchingFailureDiagnosticsCheck;
+      persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;

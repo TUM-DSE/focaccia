@@ -1,10 +1,10 @@
 from miasm.expression.expression import ExprId, ExprInt
 
-from focaccia.arch import x86
+from focaccia.arch import aarch64, x86
 from focaccia.match import fold_traces, match_traces, match_transitions
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
-from focaccia.trace import MaterializedTrace, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 
 ARCH = x86.ArchX86()
@@ -236,6 +236,181 @@ def test_stop_address_is_retained_as_the_final_destination_boundary():
     ]
     assert [item.range for item in result.trace.transforms] == [(0x1000, 0x1001)]
     assert "symbolic-suffix-outside-stop" in diagnostic_codes(result)
+
+
+def test_symbolic_prefix_before_the_first_concrete_boundary_is_explicitly_skipped():
+    first = transform(0x1000, 0x1001)
+    second = transform(0x1001, 0x1002)
+
+    result = match_transitions(
+        [state(0x1001), state(0x1002)],
+        symbolic_trace(first, second),
+    )
+
+    assert result.trace is not None
+    assert result.trace.transforms == (second,)
+    assert "symbolic-prefix-skipped" in diagnostic_codes(result)
+    assert result.complete
+
+
+def test_no_matching_boundary_and_unavailable_pc_fail_closed():
+    unmatched = match_transitions(
+        [state(0xDEAD), state(0xBEEF)],
+        symbolic_trace(transform(0x1000, 0x1001)),
+    )
+
+    assert unmatched.trace is None
+    assert "concrete-state-skipped" in diagnostic_codes(unmatched)
+    assert "no-matching-boundary" in diagnostic_codes(unmatched)
+    assert not unmatched.complete
+
+    missing_pc = ProgramState(ARCH)
+    unavailable = match_transitions(
+        [missing_pc],
+        symbolic_trace(transform(0x1000, 0x1001)),
+    )
+
+    assert unavailable.trace is None
+    assert diagnostic_codes(unavailable) == {"concrete-pc-unavailable"}
+    assert not unavailable.complete
+
+
+def test_unmatched_stop_addresses_preserve_incomplete_state():
+    source_stop = match_transitions(
+        [state(0xDEAD)],
+        symbolic_trace(transform(0x1000, 0x1001), stop_address=0xDEAD),
+    )
+
+    assert source_stop.trace is None
+    assert "stop-address-unmatched" in diagnostic_codes(source_stop)
+    assert not source_stop.complete
+
+    item = transform(0x1000, 0x1001)
+    destination_stop = match_transitions(
+        [state(0x1000), state(0xDEAD)],
+        symbolic_trace(item, stop_address=0xDEAD),
+    )
+
+    assert destination_stop.trace is not None
+    assert len(destination_stop.trace) == 0
+    assert destination_stop.pending_transform is item
+    assert "stop-address-unmatched" in diagnostic_codes(destination_stop)
+    assert not destination_stop.complete
+
+
+def test_concrete_suffix_after_symbolic_completion_is_reported():
+    item = transform(0x1000, 0x1001)
+    result = match_transitions(
+        [state(0x1000), state(0x1001), state(0x1002), state(0x1003)],
+        symbolic_trace(item),
+    )
+
+    assert result.trace is not None
+    assert result.trace.transforms == (item,)
+    assert "concrete-suffix-skipped" in diagnostic_codes(result)
+    diagnostic = next(
+        item for item in result.diagnostics if item.code == "concrete-suffix-skipped"
+    )
+    assert diagnostic.concrete_index == 2
+
+
+def test_symbolic_address_index_must_match_the_stream_contents():
+    item = transform(0x1000, 0x1001)
+    wrong_address = MaterializedTrace(
+        [item],
+        environment(),
+        [0x2000],
+    )
+
+    result = match_transitions([state(0x2000)], wrong_address)
+
+    assert result.trace is None
+    assert diagnostic_codes(result) == {"symbolic-address-mismatch"}
+
+
+def test_symbolic_stream_length_must_match_its_address_index():
+    truncated = TransformStream(
+        iter(()),
+        environment(),
+        [0x1000],
+    )
+    truncated_result = match_transitions([state(0x1000)], truncated)
+
+    assert truncated_result.trace is None
+    assert diagnostic_codes(truncated_result) == {"symbolic-trace-truncated"}
+
+    first = transform(0x1000, 0x1001)
+    extra = transform(0x1001, 0x1002)
+    oversized = TransformStream(
+        iter((first, extra)),
+        environment(),
+        [0x1000],
+    )
+    oversized_result = match_transitions(
+        [state(0x1000), state(0x1001)],
+        oversized,
+    )
+
+    assert oversized_result.trace is not None
+    assert oversized_result.trace.transforms == (first,)
+    assert "symbolic-address-count-mismatch" in diagnostic_codes(oversized_result)
+    assert not oversized_result.complete
+
+
+def test_symbolic_stream_read_errors_are_structured():
+    def broken_stream():
+        raise RuntimeError("fixture stream failed")
+        yield transform(0x1000, 0x1001)
+
+    stream = TransformStream(
+        broken_stream(),
+        environment(),
+        [0x1000],
+    )
+
+    result = match_transitions([state(0x1000)], stream)
+
+    assert result.trace is None
+    assert diagnostic_codes(result) == {"symbolic-trace-read-error"}
+    assert "fixture stream failed" in result.diagnostics[0].message
+
+
+def test_symbolic_architecture_must_match_environment_and_other_transforms():
+    item = transform(0x1000, 0x1001)
+    conflicting_environment = TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        architecture=aarch64.ArchAArch64("little").key,
+    )
+    environment_mismatch = MaterializedTrace(
+        [item],
+        conflicting_environment,
+        [item.addr],
+    )
+
+    first_result = match_transitions([state(0x1000)], environment_mismatch)
+
+    assert first_result.trace is None
+    assert diagnostic_codes(first_result) == {"symbolic-architecture-mismatch"}
+
+    arm = aarch64.ArchAArch64("little")
+    second = SymbolicTransform(1, {}, [], arm, 0x1001, 0x1002)
+    mixed = MaterializedTrace(
+        [item, second],
+        environment(),
+        [item.addr, second.addr],
+    )
+    mixed_result = match_transitions(
+        [state(0x1000), state(0x1001), state(0x1002)],
+        mixed,
+    )
+
+    assert mixed_result.trace is not None
+    assert mixed_result.trace.transforms == (item,)
+    assert "symbolic-architecture-mismatch" in diagnostic_codes(mixed_result)
+    assert not mixed_result.complete
 
 
 def test_legacy_matcher_wrappers_are_non_mutating_and_share_the_engine():

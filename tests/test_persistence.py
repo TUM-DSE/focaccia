@@ -14,11 +14,13 @@ from focaccia.parser import (
     AmbiguousArchitectureError,
     ArchitectureParseError,
     ExpressionWidthError,
+    FieldTypeError,
     InstructionParseError,
     MissingFieldError,
     ParseError,
     StateParseError,
     TraceCardinalityError,
+    TraceDecodeError,
     TraceKindError,
     TraceLimitError,
     TransformParseError,
@@ -30,10 +32,10 @@ from focaccia.parser import (
     serialize_transformations,
     stream_transformation,
 )
-from focaccia.persistence import MAX_TRACE_ITEMS, MSGPACK_MAGIC
+from focaccia.persistence import MAX_MSGPACK_FRAME_BYTES, MAX_TRACE_ITEMS, MSGPACK_MAGIC
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import InstructionRecord, SymbolicTransform, TraceGap
-from focaccia.trace import MaterializedTrace, TraceEnvironment
+from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 FIXTURES = Path(__file__).parent / "fixtures" / "traces"
 
@@ -573,3 +575,173 @@ def test_top_level_and_item_architectures_must_agree(tmp_path):
 
     with pytest.raises(ArchitectureParseError):
         parse_transformations(io.StringIO(json.dumps(document)))
+
+
+def test_json_reader_distinguishes_decode_and_root_type_errors():
+    with pytest.raises(TraceDecodeError, match="Invalid JSON"):
+        parse_transformations(io.StringIO("{"))
+
+    for document in ([], None, 42, "trace"):
+        with pytest.raises(FieldTypeError, match="trace must be an object"):
+            parse_transformations(io.StringIO(json.dumps(document)))
+
+
+def test_environment_metadata_types_are_validated_before_trace_construction(tmp_path):
+    _, document = write_transform_json(tmp_path)
+    malformed = []
+
+    wrong_binary_name = copy.deepcopy(document)
+    wrong_binary_name["environment"]["binary_name"] = []
+    malformed.append(wrong_binary_name)
+
+    wrong_argv = copy.deepcopy(document)
+    wrong_argv["environment"]["argv"] = "argument"
+    malformed.append(wrong_argv)
+
+    wrong_argv_item = copy.deepcopy(document)
+    wrong_argv_item["environment"]["argv"] = [1]
+    malformed.append(wrong_argv_item)
+
+    boolean_address = copy.deepcopy(document)
+    boolean_address["environment"]["start_address"] = True
+    malformed.append(boolean_address)
+
+    wrong_architecture_shape = copy.deepcopy(document)
+    wrong_architecture_shape["environment"]["architecture"] = "x86_64"
+    malformed.append(wrong_architecture_shape)
+
+    for invalid in malformed:
+        with pytest.raises(FieldTypeError):
+            parse_transformations(io.StringIO(json.dumps(invalid)))
+
+
+def test_state_documents_reject_noncanonical_registers_and_invalid_memory_data():
+    arch = x86.ArchX86()
+    original = ProgramState(arch)
+    original.write_register("RIP", 0x1000)
+    trace = MaterializedTrace([original], environment(arch), [0x1000])
+    output = io.StringIO()
+    serialize_snapshots(trace, output)
+    document = json.loads(output.getvalue())
+
+    mismatched_validity = copy.deepcopy(document)
+    mismatched_validity["items"][0]["register_validity"] = {}
+    with pytest.raises(StateParseError, match="same keys"):
+        parse_snapshots(io.StringIO(json.dumps(mismatched_validity)))
+
+    noncanonical = copy.deepcopy(document)
+    noncanonical["items"][0]["registers"] = {"rip": 0x1000}
+    noncanonical["items"][0]["register_validity"] = {"rip": (1 << 64) - 1}
+    with pytest.raises(StateParseError, match="not canonical"):
+        parse_snapshots(io.StringIO(json.dumps(noncanonical)))
+
+    invalid_base64 = copy.deepcopy(document)
+    invalid_base64["items"][0]["memory"] = [
+        {"range": [0x2000, 0x2001], "data": "!"}
+    ]
+    with pytest.raises(StateParseError, match="Invalid base64"):
+        parse_snapshots(io.StringIO(json.dumps(invalid_base64)))
+
+
+def test_transform_documents_reject_noncanonical_and_malformed_expressions(tmp_path):
+    _, document = write_transform_json(tmp_path)
+
+    noncanonical = copy.deepcopy(document)
+    noncanonical["items"][0]["regs"] = {"rax": "ExprInt(0x2A, 64)"}
+    with pytest.raises(TransformParseError, match="not canonical"):
+        parse_transformations(io.StringIO(json.dumps(noncanonical)))
+
+    malformed_register = copy.deepcopy(document)
+    malformed_register["items"][0]["regs"]["RAX"] = "not an expression"
+    with pytest.raises(TransformParseError, match="Unable to parse expression"):
+        parse_transformations(io.StringIO(json.dumps(malformed_register)))
+
+    short_address = copy.deepcopy(document)
+    short_address["items"][0]["memory_writes"][0]["address"] = "ExprInt(0x2000, 32)"
+    with pytest.raises(ExpressionWidthError, match="Memory address"):
+        parse_transformations(io.StringIO(json.dumps(short_address)))
+
+    non_byte_value = copy.deepcopy(document)
+    non_byte_value["items"][0]["memory_writes"][0]["value"] = "ExprInt(0x1, 1)"
+    with pytest.raises(TransformParseError):
+        parse_transformations(io.StringIO(json.dumps(non_byte_value)))
+
+
+def test_serializers_reject_missing_conflicting_and_mixed_architectures(tmp_path):
+    unknown_environment = TraceEnvironment(None, (), (), binary_hash=None)
+    empty = MaterializedTrace([], unknown_environment, [])
+    with pytest.raises(ArchitectureParseError, match="requires architecture metadata"):
+        serialize_transformations(empty, tmp_path / "empty.json", "json")
+
+    arm = aarch64.ArchAArch64("little")
+    conflicting = MaterializedTrace(
+        [transform()],
+        environment(arm),
+        [0x1000],
+    )
+    with pytest.raises(ArchitectureParseError, match="conflicts"):
+        serialize_transformations(conflicting, tmp_path / "conflict.json", "json")
+
+    arm_transform = SymbolicTransform(7, {}, [], arm, 0x1000, 0x1004)
+    mixed = MaterializedTrace(
+        [transform(), arm_transform],
+        environment(x86.ArchX86()),
+        [0x1000, 0x1000],
+    )
+    with pytest.raises(ArchitectureParseError, match="item 1"):
+        serialize_transformations(mixed, tmp_path / "mixed.json", "json")
+
+    with pytest.raises(ValueError, match="Unsupported trace output type"):
+        serialize_transformations(transform_trace(), tmp_path / "trace.bin", "binary")  # type: ignore[arg-type]
+
+
+def test_transform_stream_serialization_checks_declared_cardinality(tmp_path):
+    item = transform()
+
+    for output_type in ("json", "msgpack"):
+        short = TransformStream(
+            iter((item,)),
+            environment(item.arch),
+            [0x1000, 0x1001],
+        )
+        with pytest.raises(TraceCardinalityError, match="ended after 1 items"):
+            serialize_transformations(
+                short,
+                tmp_path / f"short.{output_type}",
+                output_type,
+            )
+
+        long = TransformStream(
+            iter((item, transform())),
+            environment(item.arch),
+            [0x1000],
+        )
+        with pytest.raises(TraceCardinalityError, match="exceeds its address count"):
+            serialize_transformations(
+                long,
+                tmp_path / f"long.{output_type}",
+                output_type,
+            )
+
+
+def test_versioned_msgpack_rejects_empty_oversized_and_invalid_frames():
+    empty_frame = MSGPACK_MAGIC + (0).to_bytes(8, "big")
+    with pytest.raises(TraceDecodeError, match="empty MessagePack payload"):
+        stream_transformation(io.BytesIO(empty_frame))
+
+    oversized_frame = MSGPACK_MAGIC + (MAX_MSGPACK_FRAME_BYTES + 1).to_bytes(8, "big")
+    with pytest.raises(TraceLimitError, match="frame limit"):
+        stream_transformation(io.BytesIO(oversized_frame))
+
+    invalid_payload = MSGPACK_MAGIC + (1).to_bytes(8, "big") + b"\xc1"
+    with pytest.raises(TraceDecodeError, match="Invalid MessagePack trace header"):
+        stream_transformation(io.BytesIO(invalid_payload))
+
+
+def test_versioned_msgpack_item_frames_require_the_item_field(tmp_path):
+    _, frames = write_transform_msgpack(tmp_path)
+    missing_item = encode_msgpack_frames([frames[0], {"state": frames[1]["item"]}])
+    stream = stream_transformation(io.BytesIO(missing_item))
+
+    with pytest.raises(MissingFieldError, match="stream frame 0.item"):
+        next(stream)
