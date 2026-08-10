@@ -579,7 +579,7 @@ class SymbolicTracer:
 
     def predict_next_state(self, instruction: Instruction, transform: SymbolicTransform):
         debug(f'Evaluating register and memory transforms for {instruction} to cross-validate')
-        predicted_regs = transform.eval_register_transforms(self.target)
+        predicted_regs = transform.eval_validation_register_transforms(self.target)
         predicted_mems = transform.eval_memory_transforms(self.target)
         return predicted_regs, predicted_mems
 

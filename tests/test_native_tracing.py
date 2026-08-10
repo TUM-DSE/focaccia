@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch import aarch64, x86
 from focaccia.deterministic import Event, SyscallEvent
@@ -18,6 +19,7 @@ from focaccia.native.tracer import (
     SymbolicTracer,
     match_event,
 )
+from focaccia.symbolic import SymbolicTransform
 from focaccia.tools.capture_transforms import create_symbolic_tracer, make_argparser
 from focaccia.trace import TraceEnvironment
 
@@ -250,6 +252,68 @@ def test_unknown_destination_step_records_a_concrete_exit():
     assert tracer.is_exited()
     assert tracer.read_pc() == 0
     assert target.step_calls == 1
+
+
+def test_native_cross_validation_compares_only_defined_flag_outputs():
+    target = ScriptedTarget()
+    target.registers["RFLAGS"] = 0x287
+    tracer = object.__new__(SymbolicTracer)
+    tracer.target = speculative(target)
+    tracer.validation_time = 0
+
+    class FlagInstruction:
+        addr = 0x1000
+
+        def __str__(self) -> str:
+            return "BZHI RAX, RDX, RAX"
+
+    instruction = cast(Any, FlagInstruction())
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprId("CF", 1): ExprInt(1, 1),
+            ExprId("ZF", 1): ExprInt(0, 1),
+            ExprId("SF", 1): ExprInt(1, 1),
+            ExprId("OF", 1): ExprInt(0, 1),
+        },
+        [instruction],
+        target.arch,
+        0x1000,
+        0x1005,
+    )
+
+    predicted_registers, predicted_memory = tracer.predict_next_state(
+        instruction,
+        transform,
+    )
+    assert predicted_registers == {"CF": 1, "ZF": 0, "SF": 1, "OF": 0}
+    assert predicted_memory == {}
+
+    # PF changed from one to zero, but BZHI does not define PF.
+    target.registers["RFLAGS"] = 0x283
+    tracer.validate(
+        instruction,
+        transform,
+        predicted_registers,
+        predicted_memory,
+    )
+
+
+def test_native_cross_validation_retains_implicit_zero_extension():
+    target = ScriptedTarget()
+    target.registers["RAX"] = 0xFFFFFFFFFFFFFFFF
+    transform = SymbolicTransform(
+        1,
+        {ExprId("EAX", 32): ExprInt(5, 32)},
+        [],
+        target.arch,
+        0x1000,
+        0x1002,
+    )
+
+    assert transform.eval_validation_register_transforms(speculative(target)) == {
+        "RAX": 5
+    }
 
 
 def test_memory_write_invalidates_every_overlapping_cached_range():

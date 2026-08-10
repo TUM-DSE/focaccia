@@ -395,6 +395,49 @@ class SymbolicTransform:
 
         return list(accessed_mem)
 
+    def validation_register_outputs(self) -> dict[str, Expr]:
+        """Return only register ranges whose values this transform defines.
+
+        Canonical base-register equations remain the composition contract, but
+        native cross-validation must not compare unchanged or undefined bits.
+        A write that architecturally zero-extends is validated through its base
+        register because those upper zero bits are part of the instruction's
+        output.
+        """
+        canonical_outputs = self.canonical_register_outputs()
+        zero_extended_bases: set[str] = set()
+        for regname in self.changed_regs:
+            accessor = self.arch.get_reg_accessor(regname)
+            if accessor is None:
+                raise SymbolicCompositionError(
+                    f'Missing accessor for symbolic destination {regname}.'
+                )
+            if self.arch.register_write_zero_extends(regname):
+                zero_extended_bases.add(accessor.base_reg)
+
+        outputs: dict[str, Expr] = {
+            base_reg: canonical_outputs[base_reg]
+            for base_reg in zero_extended_bases
+        }
+        for regname, expression in self.changed_regs.items():
+            accessor = self.arch.get_reg_accessor(regname)
+            assert accessor is not None
+            if accessor.base_reg not in zero_extended_bases:
+                outputs[regname] = expression
+        return outputs
+
+    def eval_validation_register_transforms(
+        self,
+        conc_state: ReadableProgramState,
+    ) -> dict[str, int]:
+        """Evaluate register slices defined by this transform for validation."""
+        result: dict[str, int] = {}
+        for regname, expression in self.validation_register_outputs().items():
+            if not conc_state.strict and regname.upper() in self.arch.ignored_regs:
+                continue
+            result[regname] = eval_symbol(expression, conc_state)
+        return result
+
     def eval_register_transforms(self, conc_state: ReadableProgramState) \
             -> dict[str, int]:
         """Calculate register transformations when applied to a concrete state.
