@@ -1848,6 +1848,15 @@
       ];
     };
 
+    comparisonErrorClassificationCheck = mkStaticUnitCheck {
+      name = "comparison-error-classification";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "tests/test_compare.py"
+      ];
+      pytestTargets = [ "tests/test_compare.py" ];
+    };
+
     sharedTransitionMatcherCheck = mkStaticUnitCheck {
       name = "shared-transition-matcher";
       ruffTargets = [
@@ -2208,6 +2217,7 @@
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
+      comparison-error-classification = comparisonErrorClassificationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
       fix-046-symbolic-composition = fix046SymbolicCompositionCheck;
       fix-045-fp32-to-fp64 = fix045Fp32ToFp64Check;

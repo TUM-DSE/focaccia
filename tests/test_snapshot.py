@@ -1,7 +1,7 @@
 import pytest
 
 from focaccia.arch import aarch64, x86
-from focaccia.snapshot import ProgramState, RegisterAccessError
+from focaccia.snapshot import MemoryAccessError, ProgramState, RegisterAccessError
 
 @pytest.fixture
 def arch():
@@ -132,4 +132,101 @@ def test_flag_aliases(arch):
     assert state.read_register('OF') == 1
     assert state.read_register('AF') == 1
     assert state.read_register('SF') == 1
+
+
+def test_unknown_register_names_fail_at_every_state_boundary():
+    state = ProgramState(x86.ArchX86())
+
+    with pytest.raises(RegisterAccessError, match="Not a register name"):
+        state.test_register("NOT_A_REGISTER")
+    with pytest.raises(RegisterAccessError, match="Not a register name"):
+        state.read_register("NOT_A_REGISTER")
+    with pytest.raises(RegisterAccessError, match="Not a register name"):
+        state.write_register("NOT_A_REGISTER", 0)
+    with pytest.raises(RegisterAccessError, match="Not a register name"):
+        state.write_register_bits("NOT_A_REGISTER", 0, 0)
+    with pytest.raises(RegisterAccessError, match="Not a register name"):
+        state.write_register_zero_extended("NOT_A_REGISTER", 0)
+
+
+def test_selected_register_bits_accumulate_without_inventing_unknown_bits():
+    state = ProgramState(x86.ArchX86())
+
+    state.write_register_bits("RAX", 0x05, 0x0F)
+    assert state.known_register_bits()["RAX"] == (0x05, 0x0F)
+    assert not state.test_register("AL")
+    assert state.known_register_values() == {}
+    assert state.known_register_values(include_partial=True) == {}
+
+    state.write_register_bits("RAX", 0xA0, 0xF0)
+    assert state.read_register("AL") == 0xA5
+    assert not state.test_register("AX")
+    assert state.known_register_bits()["RAX"] == (0xA5, 0xFF)
+    assert state.known_register_values(include_partial=True)["AL"] == 0xA5
+
+
+def test_register_bit_writes_validate_values_and_masks_before_mutation():
+    state = ProgramState(x86.ArchX86())
+
+    for value in (-1, 1 << 64):
+        with pytest.raises(ValueError, match="Value does not fit"):
+            state.write_register_bits("RAX", value, 1)
+    for valid_mask in (-1, 1 << 64):
+        with pytest.raises(ValueError, match="Validity mask does not fit"):
+            state.write_register_bits("RAX", 0, valid_mask)
+
+    state.write_register_bits("RAX", 0xFFFF, 0)
+    assert state.known_register_bits() == {}
+    assert not state.test_register("RAX")
+
+
+def test_zero_extension_rejects_high_slices_and_masks_to_the_observed_width():
+    state = ProgramState(x86.ArchX86())
+
+    with pytest.raises(ValueError, match="low-bit slice"):
+        state.write_register_zero_extended("AH", 0x12)
+
+    state.write_register_zero_extended("EAX", 0x1_1234_5678)
+    assert state.read_register("RAX") == 0x1234_5678
+    assert state.known_register_bits()["RAX"] == (0x1234_5678, (1 << 64) - 1)
+
+
+def test_constant_register_writes_do_not_create_mutable_state():
+    state = ProgramState(aarch64.ArchAArch64("little"))
+
+    state.write_register("XZR", (1 << 64) - 1)
+    state.write_register_bits("WZR", (1 << 32) - 1, (1 << 32) - 1)
+    state.write_register_zero_extended("WZR", (1 << 32) - 1)
+
+    assert state.test_register("XZR")
+    assert state.read_register("XZR") == 0
+    assert state.read_register("WZR") == 0
+    assert "XZR" not in state.known_register_bits()
+
+
+def test_known_register_views_and_repr_preserve_partial_aliases():
+    state = ProgramState(x86.ArchX86())
+    state.write_register("AH", 0xAB)
+    state.write_register("RBX", 0x42)
+
+    assert state.known_register_values() == {"RBX": 0x42}
+    assert state.known_register_values(include_partial=True) == {
+        "AH": 0xAB,
+        "RBX": 0x42,
+    }
+    rendered = repr(state)
+    assert "Snapshot (x86_64)" in rendered
+    assert "'AH': '0xab'" in rendered
+    assert "'RBX': '0x42'" in rendered
+
+
+def test_program_state_memory_methods_preserve_address_order():
+    state = ProgramState(aarch64.ArchAArch64("big"))
+
+    state.write_memory(0x1000, b"\x01\x02\x03\x04")
+
+    assert state.read_memory(0x1000, 4) == b"\x01\x02\x03\x04"
+    with pytest.raises(MemoryAccessError) as raised:
+        state.read_memory(0x1004, 1)
+    assert raised.value.mem_addr == 0x1004
 

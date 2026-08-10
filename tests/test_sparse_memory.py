@@ -86,3 +86,36 @@ def test_known_ranges_merge_only_contiguous_bytes(mem):
         (mem.page_size + 2, b'D'),
     ]
 
+
+def test_page_size_must_be_positive():
+    with pytest.raises(ValueError, match="positive"):
+        SparseMemory(0)
+    with pytest.raises(ValueError, match="positive"):
+        SparseMemory(-1)
+
+
+def test_drop_all_removes_data_and_validity_across_pages():
+    mem = SparseMemory(page_size=4)
+    mem.write(2, b"abcdef")
+    assert mem.test(2, 6)
+    assert mem.known_ranges() == [(2, b"abcdef")]
+
+    mem.drop_all()
+
+    assert not mem.test(2, 1)
+    assert mem.known_ranges() == []
+    with pytest.raises(MemoryAccessError) as raised:
+        mem.read(2, 1)
+    assert raised.value.mem_addr == 2
+    assert raised.value.mem_size == 1
+
+
+def test_overlapping_writes_preserve_unrelated_known_bytes():
+    mem = SparseMemory(page_size=4)
+    mem.write(1, b"abcdef")
+    mem.write(3, b"XY")
+
+    assert mem.read(1, 6) == b"abXYef"
+    assert mem.known_ranges() == [(1, b"abXYef")]
+    assert not mem.test(0, 8)
+
