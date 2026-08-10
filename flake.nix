@@ -648,9 +648,15 @@
       name = "property-core-models";
       ruffTargets = [
         "src/focaccia/snapshot.py"
+        "tests/test_register_properties.py"
         "tests/test_sparse_memory_properties.py"
+        "tests/test_trace_properties.py"
       ];
-      pytestTargets = [ "tests/test_sparse_memory_properties.py" ];
+      pytestTargets = [
+        "tests/test_register_properties.py"
+        "tests/test_sparse_memory_properties.py"
+        "tests/test_trace_properties.py"
+      ];
     };
 
     reproducerMemoryLayoutCheck = mkStaticUnitCheck {
