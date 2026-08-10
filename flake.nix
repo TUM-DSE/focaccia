@@ -529,6 +529,96 @@
       env = uvEnv;
     };
 
+    mutationCoreSmokeCheck = pkgs.stdenv.mkDerivation {
+      name = "mutation-core-smoke";
+      src = staticUnitSource;
+
+      doCheck = true;
+      dontBuild = true;
+      nativeCheckInputs = [ pythonStaticUnitEnv ];
+
+      checkPhase = ''
+        set -euo pipefail
+        export HOME="$TMPDIR"
+        export REPO_ROOT="$PWD"
+
+        ${pkgs.coreutils}/bin/timeout 180 mutmut run --max-children 4
+        mutmut export-cicd-stats
+        mutmut results > mutation-results.txt
+
+        mkdir -p "$out"
+        cp mutants/mutmut-cicd-stats.json "$out/stats.json"
+        cp mutation-results.txt "$out/results.txt"
+
+        python - "$out/stats.json" "$out/summary.txt" <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        stats_path = pathlib.Path(sys.argv[1])
+        summary_path = pathlib.Path(sys.argv[2])
+        stats = json.loads(stats_path.read_text())
+        required = {
+            "killed",
+            "survived",
+            "total",
+            "no_tests",
+            "skipped",
+            "suspicious",
+            "timeout",
+            "check_was_interrupted_by_user",
+            "segfault",
+        }
+        if set(stats) != required:
+            raise SystemExit(
+                f"unexpected mutmut statistics fields: {sorted(set(stats) ^ required)}"
+            )
+        if any(not isinstance(stats[name], int) or stats[name] < 0 for name in required):
+            raise SystemExit("mutmut statistics must be non-negative integers")
+        if stats["total"] <= 0:
+            raise SystemExit("mutation smoke did not generate any mutants")
+
+        classified = sum(stats[name] for name in required - {"total"})
+        if classified != stats["total"]:
+            raise SystemExit(
+                f"mutation result count mismatch: total={stats['total']}, "
+                f"classified={classified}"
+            )
+
+        infrastructure_failures = {
+            name: stats[name]
+            for name in (
+                "suspicious",
+                "timeout",
+                "check_was_interrupted_by_user",
+                "segfault",
+            )
+            if stats[name]
+        }
+        if infrastructure_failures:
+            raise SystemExit(
+                f"mutation smoke had infrastructure failures: {infrastructure_failures}"
+            )
+
+        assessed = stats["killed"] + stats["survived"]
+        if assessed <= 0:
+            raise SystemExit("mutation smoke did not assess any mutants")
+        score = 100 * stats["killed"] / assessed
+        summary_path.write_text(
+            "compare.py mutation pilot (informational baseline; no score threshold)\n"
+            f"killed: {stats['killed']}\n"
+            f"survived: {stats['survived']}\n"
+            f"no tests: {stats['no_tests']}\n"
+            f"skipped: {stats['skipped']}\n"
+            f"assessed mutation score: {score:.2f}%\n"
+            f"total generated mutants: {stats['total']}\n"
+        )
+        PY
+      '';
+
+      env = uvEnv;
+    };
+
     reproducerMemoryLayoutCheck = mkStaticUnitCheck {
       name = "reproducer-memory-layout";
       ruffTargets = [
@@ -2240,6 +2330,7 @@
       focaccia-tests = staticUnitChecks;
       core-branch-coverage = coreBranchCoverageCheck;
       coverage-classification-ratchet = coreBranchCoverageCheck;
+      mutation-core-smoke = mutationCoreSmokeCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
       register-api-migration = registerApiMigrationCheck;

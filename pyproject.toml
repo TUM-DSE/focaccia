@@ -199,8 +199,18 @@ branches = 84
 statements = 58
 branches = 44
 
+[tool.mutmut]
+# Copy the package so relative imports remain intact, but keep the pilot to one module.
+source_paths = ["src/focaccia"]
+only_mutate = ["src/focaccia/compare.py"]
+# Ensure tests import mutmut's copied source instead of the Nix-installed package.
+pytest_add_cli_args = ["-m", "not integration", "-o", "pythonpath=src"]
+pytest_add_cli_args_test_selection = ["tests/test_compare.py"]
+use_git_change_detection = false
+
 [dependency-groups]
 dev = [
+    "mutmut>=3.7.0",
     "pytest-cov>=7.1.0",
 ]
 

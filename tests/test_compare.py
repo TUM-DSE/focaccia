@@ -86,17 +86,23 @@ def test_compare_symbolic_validates_the_final_transition():
 
 
 def test_single_transition_produces_one_comparison_result():
+    source = state(0x1000, 1)
+    transform = assign_rax(0x1000, 0x1001, 2)
     trace = TransitionTrace(
-        [state(0x1000, 1), state(0x1001, 2)],
-        [assign_rax(0x1000, 0x1001, 2)],
+        [source, state(0x1001, 2)],
+        [transform],
         ENV,
     )
 
     report = compare_symbolic(trace)
 
     assert len(report) == 1
+    assert set(report[0]) == {"pc", "txl", "ref", "errors", "snap"}
     assert report[0]["pc"] == 0x1000
+    assert report[0]["ref"] is transform
+    assert report[0]["snap"] is source
     assert report[0]["errors"] == []
+    assert report[0]["txl"].read_register("RAX") == 1
 
 
 def test_mismatch_in_final_transition_is_not_dropped():
@@ -179,6 +185,31 @@ def test_compare_simple_handles_two_empty_traces():
 
     assert len(report) == 0
     assert "empty-concrete-traces" in diagnostic_codes(report)
+
+
+def test_compare_simple_classifies_each_asymmetric_empty_trace_as_cardinality_error():
+    for tested, reference in (([], [state(0x1000)]), ([state(0x1000)], [])):
+        report = compare_simple(tested, reference)
+
+        assert len(report) == 0
+        assert len(report.diagnostics) == 1
+        assert report.diagnostics[0].level == "error"
+        assert report.diagnostics[0].code == "concrete-trace-cardinality"
+        assert "tested=" in report.diagnostics[0].message
+        assert "reference=" in report.diagnostics[0].message
+
+
+def test_validation_report_with_entry_is_immutable_and_preserves_diagnostics():
+    first = {"pc": 0x1000}
+    second = {"pc": 0x1001}
+    diagnostic = TraceDiagnostic("info", "example", "example diagnostic")
+    report = ValidationReport([first], [diagnostic])
+
+    extended = report.with_entry(second)
+
+    assert tuple(report) == (first,)
+    assert tuple(extended) == (first, second)
+    assert extended.diagnostics == (diagnostic,)
 
 
 def test_result_renderer_does_not_report_shape_failure_as_clean(capsys):
