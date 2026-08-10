@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import time
 import logging
+import time
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from miasm.core.utils import Disasm_Exception
-from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
+from miasm.expression.expression import Expr, ExprId, ExprInt, ExprMem, ExprOp
 from miasm.jitter.csts import EXCEPT_SYSCALL
 
 from focaccia.arch import Arch
@@ -239,6 +239,75 @@ def _match_deterministic_event(
 
 def _is_terminal_event(event: Event | None) -> bool:
     return event is not None and event.event_type == "exit"
+
+
+def _signal_action_transform(
+    pre_event: SignalEvent,
+    post_event: SignalEvent,
+) -> SymbolicTransform:
+    """Materialize a recorded signal delivery as an action transition."""
+    if pre_event.pc is None or post_event.pc is None:
+        raise EventSynchronizationError(
+            'Signal action requires pre- and post-event program counters.'
+        )
+    if pre_event.arch != post_event.arch or pre_event.tid != post_event.tid:
+        raise EventSynchronizationError(
+            'Signal action pre/post events use different targets.'
+        )
+
+    arch = pre_event.arch
+    outputs: dict[Expr, Expr] = {}
+    for regname in post_event.registers:
+        accessor = arch.get_reg_accessor(regname)
+        if accessor is None:
+            raise EventSynchronizationError(
+                f'Signal action contains unknown register {regname!r}.'
+            )
+        outputs[ExprId(regname, accessor.num_bits)] = ExprInt(
+            post_event.registers[regname],
+            accessor.num_bits,
+        )
+
+    if post_event.extra_registers is not None:
+        if arch.archname == 'x86_64':
+            candidates = (f'XMM{index}' for index in range(16))
+        elif arch.archname == 'aarch64':
+            candidates = (
+                *(f'V{index}' for index in range(32)),
+                'FPSR',
+                'FPCR',
+            )
+        else:
+            candidates = ()
+        for regname in candidates:
+            accessor = arch.get_reg_accessor(regname)
+            if accessor is None:
+                continue
+            try:
+                value = post_event.extra_registers.read_register(regname)
+            except KeyError:
+                continue
+            outputs[ExprId(regname, accessor.num_bits)] = ExprInt(
+                value,
+                accessor.num_bits,
+            )
+
+    for write in post_event.mem_writes:
+        data = write.materialize()
+        if not data:
+            continue
+        outputs[ExprMem(ExprInt(write.address, arch.ptr_size), len(data) * 8)] = (
+            ExprInt(int.from_bytes(data, arch.endianness), len(data) * 8)
+        )
+
+    return SymbolicTransform(
+        pre_event.tid,
+        outputs,
+        [],
+        arch,
+        pre_event.pc,
+        post_event.pc,
+    )
 
 
 def _terminal_syscall_transition(
@@ -895,6 +964,33 @@ class SymbolicTracer:
                 event_matcher,
                 self.target,
             )
+            if isinstance(event, SignalEvent):
+                if not isinstance(post_event, SignalEvent):
+                    raise EventSynchronizationError(
+                        'A signal pre-event requires a paired signal event.'
+                    )
+                action = _signal_action_transform(event, post_event)
+                predicted_regs: dict[str, int] = {}
+                predicted_mems: dict[int, bytes] = {}
+                if self.cross_validate:
+                    predicted_regs, predicted_mems = self.predict_next_state(
+                        instruction,
+                        action,
+                    )
+                symbolic_time += time.time() - symbolic_start
+                self.progress(post_event.pc, step=True)
+                if self.cross_validate:
+                    self.validate(
+                        instruction,
+                        action,
+                        predicted_regs,
+                        predicted_mems,
+                    )
+                strace.append(action)
+                if self.target.is_exited():
+                    break
+                continue
+
             instruction_is_syscall = self.target.arch.is_instr_syscall(str(instruction))
             in_event = is_pre_event or instruction_is_syscall
             terminal_event = _is_terminal_event(post_event)

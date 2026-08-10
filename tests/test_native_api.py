@@ -19,6 +19,8 @@ from focaccia.deterministic import (
     CursorState,
     DeterministicCursor,
     Event,
+    KnownMemoryRange,
+    MemoryWrite as EventMemoryWrite,
     SignalDescriptor,
     SignalEvent,
     SyscallEvent,
@@ -169,6 +171,178 @@ def test_native_tracer_initial_post_event_is_not_paired_or_event_stepped(pair_ki
     assert paired is post_event
     assert requires_event_step
     assert cursor.state is CursorState.EXHAUSTED
+
+
+def test_signal_action_transition_uses_handler_context_without_instruction():
+    arch = x86.ArchX86()
+    descriptor = SignalDescriptor(
+        arch,
+        (10).to_bytes(4, "little", signed=True),
+        True,
+        "userHandler",
+    )
+    pre_event = SignalEvent(
+        0x44142A,
+        7,
+        arch,
+        {"rip": 0x44142A, "rax": 0x1234},
+        (),
+        signal_number=descriptor,
+        event_count=20,
+    )
+    frame = EventMemoryWrite(
+        7,
+        0x7FFF0000,
+        4,
+        (KnownMemoryRange(0, b"frame"[:4]),),
+        (),
+    )
+    post_event = SignalEvent(
+        0x402520,
+        7,
+        arch,
+        {"rip": 0x402520, "rax": 0x5678, "rsp": 0x7FFF0000},
+        (frame,),
+        signal_handler=descriptor,
+        event_count=21,
+    )
+
+    action = tracer_module._signal_action_transform(pre_event, post_event)
+
+    assert action.range == (0x44142A, 0x402520)
+    assert action.instructions == []
+    assert action.changed_regs == {
+        "RIP": ExprInt(0x402520, 64),
+        "RAX": ExprInt(0x5678, 64),
+        "RSP": ExprInt(0x7FFF0000, 64),
+    }
+    assert len(action.memory_writes) == 1
+    assert action.memory_writes[0].address == ExprInt(0x7FFF0000, 64)
+    assert action.memory_writes[0].value == ExprInt(
+        int.from_bytes(b"fram", "little"),
+        32,
+    )
+
+
+def test_signal_action_trace_does_not_execute_interrupted_instruction(monkeypatch):
+    arch = x86.ArchX86()
+    descriptor = SignalDescriptor(
+        arch,
+        (10).to_bytes(4, "little", signed=True),
+        True,
+        "userHandler",
+    )
+    pre_event = SignalEvent(
+        0x44142A,
+        7,
+        arch,
+        {"rip": 0x44142A, "rax": 0x1234},
+        (),
+        signal_number=descriptor,
+        event_count=20,
+    )
+    post_event = SignalEvent(
+        0x402520,
+        7,
+        arch,
+        {"rip": 0x402520, "rax": 0x5678},
+        (),
+        signal_handler=descriptor,
+        event_count=21,
+    )
+
+    class SignalLog:
+        base_directory = "/rr/fixture"
+
+        def events(self):
+            return (pre_event, post_event)
+
+    class FakeInstruction:
+        addr = 0x44142A
+        instr = object()
+
+        def __str__(self) -> str:
+            return "MOV RDI, RAX"
+
+    instruction = cast(Instruction, FakeInstruction())
+
+    class FakeContext:
+        arch = x86.ArchX86()
+        loc_db = LocationDB()
+        lifter = object()
+
+    class SignalTarget:
+        arch = x86.ArchX86()
+        exec_time = 0.0
+        strict = True
+
+        def __init__(self):
+            self.target = self
+            self.pc = 0x44142A
+            self.registers = {"RIP": self.pc, "RAX": 0x1234}
+            self.progress_calls = 0
+
+        def is_exited(self) -> bool:
+            return False
+
+        def read_pc(self) -> int:
+            return self.pc
+
+        def get_current_tid(self) -> int:
+            return 7
+
+        def read_register(self, regname: str) -> int:
+            accessor = self.arch.get_reg_accessor(regname)
+            assert accessor is not None
+            value = self.registers.get(accessor.base_reg, 0)
+            return (value & accessor.mask) >> accessor.start
+
+        def read_memory(self, _address: int, size: int) -> bytes:
+            return bytes(size)
+
+        def speculate(self, new_pc: int) -> None:
+            assert new_pc == 0x402520
+
+        def progress_execution(self, *, use_breakpoint: bool = False) -> int:
+            assert not use_breakpoint
+            self.progress_calls += 1
+            self.pc = 0x402520
+            self.registers = {"RIP": self.pc, "RAX": 0x5678}
+            return self.pc
+
+    target = SignalTarget()
+    monkeypatch.setattr(tracer_module, "DisassemblyContext", lambda _target: FakeContext())
+    monkeypatch.setattr(
+        tracer_module,
+        "_disassemble_instruction",
+        lambda _ctx, _target, _pc: instruction,
+    )
+
+    def forbidden_instruction_execution(*_args, **_kwargs):
+        raise AssertionError("the interrupted instruction must not execute")
+
+    monkeypatch.setattr(tracer_module, "timebound", forbidden_instruction_execution)
+    tracer = object.__new__(SymbolicTracer)
+    tracer.env = TraceEnvironment(
+        None,
+        (),
+        (),
+        binary_hash=None,
+        nondeterminism_log=cast(Any, SignalLog()),
+        stop_address=0x402520,
+        architecture=arch.key,
+    )
+    tracer.force = False
+    tracer.cross_validate = True
+    tracer.validation_time = 0.0
+    tracer.target = cast(SpeculativeTracer, target)
+
+    trace = tracer.trace()
+
+    assert target.progress_calls == 1
+    assert len(trace) == 1
+    assert trace[0].range == (0x44142A, 0x402520)
+    assert trace[0].instructions == []
 
 
 def test_recorded_syscall_control_output_is_not_architectural_state():

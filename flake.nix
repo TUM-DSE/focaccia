@@ -678,6 +678,19 @@
       ];
     };
 
+    fix095NativeSignalActionCheck = mkStaticUnitCheck {
+      name = "fix-095-native-signal-action";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "signal_action"
+      ];
+    };
+
     fix094RexMmxMovqCheck = mkStaticUnitCheck {
       name = "fix-094-rex-mmx-movq";
       ruffTargets = [
@@ -2042,6 +2055,7 @@
       fix-092-vex-disassembly-validation = fix092VexDisassemblyValidationCheck;
       fix-093-lsl-environment-specialization = fix093LslEnvironmentSpecializationCheck;
       fix-094-rex-mmx-movq = fix094RexMmxMovqCheck;
+      fix-095-native-signal-action = fix095NativeSignalActionCheck;
       fix-097-miasm-sse-support = fix097MiasmSseSupportCheck;
       fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
       fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
