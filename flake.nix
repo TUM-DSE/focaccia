@@ -788,8 +788,8 @@
       ];
     };
 
-    fix028CrossValidateOptionCheck = mkStaticUnitCheck {
-      name = "fix-028-cross-validate-option";
+    crossValidateOptionCheck = mkStaticUnitCheck {
+      name = "cross-validate-option";
       ruffTargets = [
         "src/focaccia/tools/capture_transforms.py"
         "tests/test_native_tracing.py"
@@ -801,8 +801,8 @@
       ];
     };
 
-    fix030NativeEventMatchingCheck = mkStaticUnitCheck {
-      name = "fix-030-native-event-matching";
+    nativeEventMatchingCheck = mkStaticUnitCheck {
+      name = "native-event-matching";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_tracing.py"
@@ -814,8 +814,8 @@
       ];
     };
 
-    fix031SpeculativeSynchronizationCheck = mkStaticUnitCheck {
-      name = "fix-031-speculative-synchronization";
+    speculativeSynchronizationCheck = mkStaticUnitCheck {
+      name = "speculative-synchronization";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_tracing.py"
@@ -840,8 +840,8 @@
       ];
     };
 
-    fix077LldbRemoteStateEventCheck = mkStaticUnitCheck {
-      name = "fix-077-lldb-remote-state-event";
+    lldbRemoteStateEventCheck = mkStaticUnitCheck {
+      name = "lldb-remote-state-event";
       ruffTargets = [
         "src/focaccia/native/lldb_target.py"
         "tests/test_native_tracing.py"
@@ -853,8 +853,8 @@
       ];
     };
 
-    fix078NativeEventPhaseCheck = mkStaticUnitCheck {
-      name = "fix-078-native-event-phase";
+    nativeEventPhaseCheck = mkStaticUnitCheck {
+      name = "native-event-phase";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_deterministic.py"
@@ -868,8 +868,8 @@
       ];
     };
 
-    fix079LldbRemoteX86FlagsWidthCheck = mkStaticUnitCheck {
-      name = "fix-079-lldb-remote-x86-flags-width";
+    lldbRemoteX86FlagsWidthCheck = mkStaticUnitCheck {
+      name = "lldb-remote-x86-flags-width";
       ruffTargets = [
         "src/focaccia/native/lldb_target.py"
         "tests/test_native_tracing.py"
@@ -881,8 +881,8 @@
       ];
     };
 
-    fix086LldbCanonicalRflagsObservationCheck = mkStaticUnitCheck {
-      name = "fix-086-lldb-canonical-rflags-observation";
+    lldbCanonicalRflagsObservationCheck = mkStaticUnitCheck {
+      name = "lldb-canonical-rflags-observation";
       ruffTargets = [
         "src/focaccia/native/lldb_target.py"
         "tests/test_native_tracing.py"
@@ -894,8 +894,8 @@
       ];
     };
 
-    fix080RepeatedPcMaterializationCheck = mkStaticUnitCheck {
-      name = "fix-080-repeated-pc-materialization";
+    repeatedPcMaterializationCheck = mkStaticUnitCheck {
+      name = "repeated-pc-materialization";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_tracing.py"
@@ -907,8 +907,8 @@
       ];
     };
 
-    fix081RecordedSyscallControlOutputCheck = mkStaticUnitCheck {
-      name = "fix-081-recorded-syscall-control-output";
+    recordedSyscallControlOutputCheck = mkStaticUnitCheck {
+      name = "recorded-syscall-control-output";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -920,8 +920,8 @@
       ];
     };
 
-    fix104PersistenceTimingSeparationCheck = mkStaticUnitCheck {
-      name = "fix-104-persistence-timing-separation";
+    persistenceTimingSeparationCheck = mkStaticUnitCheck {
+      name = "persistence-timing-separation";
       ruffTargets = [
         "src/focaccia/native/profiling.py"
         "src/focaccia/tools/capture_transforms.py"
@@ -934,8 +934,8 @@
       ];
     };
 
-    fix099OptInCaptureProfilingCheck = mkStaticUnitCheck {
-      name = "fix-099-opt-in-capture-profiling";
+    optInCaptureProfilingCheck = mkStaticUnitCheck {
+      name = "opt-in-capture-profiling";
       ruffTargets = [
         "src/focaccia/native/profiling.py"
         "src/focaccia/native/lldb_target.py"
@@ -958,8 +958,8 @@
       ];
     };
 
-    fix098MiasmVmovdquSupportCheck = mkStaticUnitCheck {
-      name = "fix-098-miasm-vmovdqu-support";
+    miasmVmovdquSupportCheck = mkStaticUnitCheck {
+      name = "miasm-vmovdqu-support";
       ruffTargets = [ "tests/test_native_api.py" ];
       pytestTargets = [
         "tests/test_native_api.py"
@@ -968,8 +968,8 @@
       ];
     };
 
-    fix097MiasmSseSupportCheck = mkStaticUnitCheck {
-      name = "fix-097-miasm-sse-support";
+    miasmSseSupportCheck = mkStaticUnitCheck {
+      name = "miasm-sse-support";
       ruffTargets = [ "tests/test_native_api.py" ];
       pytestTargets = [
         "tests/test_native_api.py"
@@ -978,8 +978,8 @@
       ];
     };
 
-    fix095NativeSignalActionCheck = mkStaticUnitCheck {
-      name = "fix-095-native-signal-action";
+    nativeSignalActionCheck = mkStaticUnitCheck {
+      name = "native-signal-action";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -991,8 +991,8 @@
       ];
     };
 
-    fix094RexMmxMovqCheck = mkStaticUnitCheck {
-      name = "fix-094-rex-mmx-movq";
+    rexMmxMovqCheck = mkStaticUnitCheck {
+      name = "rex-mmx-movq";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -1004,8 +1004,8 @@
       ];
     };
 
-    fix093LslEnvironmentSpecializationCheck = mkStaticUnitCheck {
-      name = "fix-093-lsl-environment-specialization";
+    lslEnvironmentSpecializationCheck = mkStaticUnitCheck {
+      name = "lsl-environment-specialization";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -1017,8 +1017,8 @@
       ];
     };
 
-    fix103LldbLockPrefixDisassemblyCheck = mkStaticUnitCheck {
-      name = "fix-103-lldb-lock-prefix-disassembly";
+    lldbLockPrefixDisassemblyCheck = mkStaticUnitCheck {
+      name = "lldb-lock-prefix-disassembly";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -1030,8 +1030,8 @@
       ];
     };
 
-    fix092VexDisassemblyValidationCheck = mkStaticUnitCheck {
-      name = "fix-092-vex-disassembly-validation";
+    vexDisassemblyValidationCheck = mkStaticUnitCheck {
+      name = "vex-disassembly-validation";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -1043,8 +1043,8 @@
       ];
     };
 
-    fix091EmptyMiasmDisassemblyCheck = mkStaticUnitCheck {
-      name = "fix-091-empty-miasm-disassembly";
+    emptyMiasmDisassemblyCheck = mkStaticUnitCheck {
+      name = "empty-miasm-disassembly";
       ruffTargets = [
         "src/focaccia/symbolic.py"
         "tests/test_native_api.py"
@@ -1056,8 +1056,8 @@
       ];
     };
 
-    fix090XmmCrossValidationCheck = mkStaticUnitCheck {
-      name = "fix-090-xmm-cross-validation";
+    xmmCrossValidationCheck = mkStaticUnitCheck {
+      name = "xmm-cross-validation";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "src/focaccia/symbolic.py"
@@ -1070,8 +1070,8 @@
       ];
     };
 
-    fix089DefinedFlagCrossValidationCheck = mkStaticUnitCheck {
-      name = "fix-089-defined-flag-cross-validation";
+    definedFlagCrossValidationCheck = mkStaticUnitCheck {
+      name = "defined-flag-cross-validation";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "src/focaccia/symbolic.py"
@@ -1084,8 +1084,8 @@
       ];
     };
 
-    fix088ObservedDivisionControlCheck = mkStaticUnitCheck {
-      name = "fix-088-observed-division-control";
+    observedDivisionControlCheck = mkStaticUnitCheck {
+      name = "observed-division-control";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_api.py"
@@ -1097,8 +1097,8 @@
       ];
     };
 
-    fix082X86SyscallEntryMatchingCheck = mkStaticUnitCheck {
-      name = "fix-082-x86-syscall-entry-matching";
+    x86SyscallEntryMatchingCheck = mkStaticUnitCheck {
+      name = "x86-syscall-entry-matching";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_tracing.py"
@@ -1110,8 +1110,8 @@
       ];
     };
 
-    fix083NativeTerminalSyscallCheck = mkStaticUnitCheck {
-      name = "fix-083-native-terminal-syscall";
+    nativeTerminalSyscallCheck = mkStaticUnitCheck {
+      name = "native-terminal-syscall";
       ruffTargets = [
         "src/focaccia/deterministic.py"
         "src/focaccia/native/tracer.py"
@@ -1128,8 +1128,8 @@
       ];
     };
 
-    fix087RrLldbSyscallBoundaryCheck = mkStaticUnitCheck {
-      name = "fix-087-rr-lldb-syscall-boundary";
+    rrLldbSyscallBoundaryCheck = mkStaticUnitCheck {
+      name = "rr-lldb-syscall-boundary";
       ruffTargets = [
         "src/focaccia/native/tracer.py"
         "tests/test_native_tracing.py"
@@ -1383,8 +1383,8 @@
       pytestTargets = [ "tests/test_qemu_trace_output.py" ];
     };
 
-    fix021PluginFramedTransportCheck = mkStaticUnitCheck {
-      name = "fix-021-plugin-framed-transport";
+    pluginFramedTransportCheck = mkStaticUnitCheck {
+      name = "plugin-framed-transport";
       ruffTargets = [
         "src/focaccia/qemu/transport.py"
         "tests/test_qemu_transport.py"
@@ -1392,8 +1392,8 @@
       pytestTargets = [ "tests/test_qemu_transport.py" ];
     };
 
-    fix022PluginRegisterCacheCheck = mkStaticUnitCheck {
-      name = "fix-022-plugin-register-cache";
+    pluginRegisterCacheCheck = mkStaticUnitCheck {
+      name = "plugin-register-cache";
       ruffTargets = [
         "src/focaccia/qemu/state.py"
         "src/focaccia/qemu/target.py"
@@ -1409,8 +1409,8 @@
       ];
     };
 
-    fix033PluginConnectionOwnershipCheck = mkStaticUnitCheck {
-      name = "fix-033-plugin-connection-ownership";
+    pluginConnectionOwnershipCheck = mkStaticUnitCheck {
+      name = "plugin-connection-ownership";
       ruffTargets = [
         "src/focaccia/qemu/transport.py"
         "src/focaccia/qemu/validation_server.py"
@@ -1425,8 +1425,8 @@
       ];
     };
 
-    fix054GdbLaunchEncodingCheck = mkStaticUnitCheck {
-      name = "fix-054-gdb-launch-encoding";
+    gdbLaunchEncodingCheck = mkStaticUnitCheck {
+      name = "gdb-launch-encoding";
       ruffTargets = [
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/tools/validate_qemu.py"
@@ -1435,8 +1435,8 @@
       pytestTargets = [ "tests/test_qemu_launcher.py" ];
     };
 
-    fix058SharedSnapshotPlannerCheck = mkStaticUnitCheck {
-      name = "fix-058-shared-snapshot-planner";
+    sharedSnapshotPlannerCheck = mkStaticUnitCheck {
+      name = "shared-snapshot-planner";
       ruffTargets = [
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/snapshot.py"
@@ -1450,8 +1450,8 @@
       ];
     };
 
-    fix070GdbWideRegisterCheck = mkStaticUnitCheck {
-      name = "fix-070-gdb-wide-registers";
+    gdbWideRegisterCheck = mkStaticUnitCheck {
+      name = "gdb-wide-registers";
       ruffTargets = [
         "src/focaccia/qemu/state.py"
         "src/focaccia/qemu/target.py"
@@ -1464,8 +1464,8 @@
       ];
     };
 
-    fix084X86EflagsObservationCheck = mkStaticUnitCheck {
-      name = "fix-084-x86-eflags-observation";
+    x86EflagsObservationCheck = mkStaticUnitCheck {
+      name = "x86-eflags-observation";
       ruffTargets = [
         "src/focaccia/arch/arch.py"
         "src/focaccia/arch/x86.py"
@@ -1481,10 +1481,20 @@
       ];
     };
 
-    fix085FlakeSourceBoundaryCheck =
+    codeNamingPolicyCheck = pkgs.runCommand "code-naming-policy" {
+      nativeBuildInputs = [ pkgs.gnugrep ];
+    } ''
+      numbered_fix_pattern="fi""x([-_]?[0-9]{3}|[0-9]{3}[A-Z])"
+      private_issue_pattern="is""sue[ #:-]*[0-9]{3}|docs/is""sues/[0-9]{3}"
+      ! grep -R -n -E "$numbered_fix_pattern|$private_issue_pattern" \
+        ${self}/flake.nix ${self}/pyproject.toml ${self}/src ${self}/tests
+      touch "$out"
+    '';
+
+    flakeSourceBoundaryCheck =
       assert qemu-submodule.rev == "3b2a0fb80eb9b6b5f216fa69069e66210466f5eb";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
-      pkgs.runCommand "fix-085-flake-source-boundary" {
+      pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
       } ''
         test ! -e ${self}/miasm/src/miasm
@@ -2014,8 +2024,8 @@
       ];
     };
 
-    fix104ConcretePcDiagnosticCheck = mkStaticUnitCheck {
-      name = "fix-104-concrete-pc-diagnostic";
+    concretePcDiagnosticCheck = mkStaticUnitCheck {
+      name = "concrete-pc-diagnostic";
       ruffTargets = [
         "src/focaccia/match.py"
         "tests/test_match.py"
@@ -2132,8 +2142,8 @@
       ];
     };
 
-    fix046SymbolicCompositionCheck = mkStaticUnitCheck {
-      name = "fix-046-symbolic-composition";
+    symbolicCompositionCheck = mkStaticUnitCheck {
+      name = "symbolic-composition";
       ruffTargets = [
         "src/focaccia/arch"
         "src/focaccia/miasm_util.py"
@@ -2143,8 +2153,8 @@
       pytestTargets = [ "tests/test_symbolic_composition.py" ];
     };
 
-    fix045Fp32ToFp64Check = mkStaticUnitCheck {
-      name = "fix-045-fp32-to-fp64";
+    fp32ToFp64Check = mkStaticUnitCheck {
+      name = "fp32-to-fp64";
       ruffTargets = [
         "src/focaccia/miasm_util.py"
         "tests/test_fp_semantics.py"
@@ -2152,8 +2162,8 @@
       pytestTargets = [ "tests/test_fp_semantics.py" ];
     };
 
-    fix029ExplicitTraceGapsCheck = mkStaticUnitCheck {
-      name = "fix-029-explicit-trace-gaps";
+    explicitTraceGapsCheck = mkStaticUnitCheck {
+      name = "explicit-trace-gaps";
       ruffTargets = [
         "src/focaccia/compare.py"
         "src/focaccia/match.py"
@@ -2173,8 +2183,8 @@
       ];
     };
 
-    fix067X86ExtendedRegisterAliasesCheck = mkStaticUnitCheck {
-      name = "fix-067-x86-extended-register-aliases";
+    x86ExtendedRegisterAliasesCheck = mkStaticUnitCheck {
+      name = "x86-extended-register-aliases";
       ruffTargets = [
         "src/focaccia/arch/x86.py"
         "src/focaccia/symbolic.py"
@@ -2187,8 +2197,8 @@
       ];
     };
 
-    fix062TargetEnvironmentSymbolsCheck = mkStaticUnitCheck {
-      name = "fix-062-target-environment-symbols";
+    targetEnvironmentSymbolsCheck = mkStaticUnitCheck {
+      name = "target-environment-symbols";
       ruffTargets = [
         "src/focaccia/arch/aarch64.py"
         "src/focaccia/compare.py"
@@ -2200,8 +2210,8 @@
       pytestTargets = [ "tests/test_environment_symbols.py" ];
     };
 
-    fix071SignalExtraRegistersCheck = mkStaticUnitCheck {
-      name = "fix-071-signal-extra-registers";
+    signalExtraRegistersCheck = mkStaticUnitCheck {
+      name = "signal-extra-registers";
       ruffTargets = [
         "src/focaccia/deterministic.py"
         "src/focaccia/rr/adapter.py"
@@ -2219,8 +2229,8 @@
       ];
     };
 
-    fix027Aarch64DeterministicReplayCheck = mkStaticUnitCheck {
-      name = "fix-027-aarch64-deterministic-replay";
+    aarch64DeterministicReplayCheck = mkStaticUnitCheck {
+      name = "aarch64-deterministic-replay";
       ruffTargets = [
         "src/focaccia/qemu/aarch64.py"
         "src/focaccia/qemu/deterministic.py"
@@ -2231,7 +2241,7 @@
       pytestTargets = [ "tests/test_aarch64_replay.py" ];
     };
 
-    aarch64NativeRrToolCheck = pkgs.runCommand "fix-027-aarch64-native-rr-tool" {
+    aarch64NativeRrToolCheck = pkgs.runCommand "aarch64-native-rr-tool" {
       nativeBuildInputs = [ rrTool pkgs.gnugrep ];
     } ''
       mkdir -p "$out"
@@ -2239,8 +2249,8 @@
       grep -F 'rr version' "$out/version.txt"
     '';
 
-    fix076RrStandaloneLldbCompatibilityCheck =
-      pkgs.runCommand "fix-076-rr-standalone-lldb-compatibility" {
+    rrStandaloneLldbCompatibilityCheck =
+      pkgs.runCommand "rr-standalone-lldb-compatibility" {
         nativeBuildInputs = [ rrTool pkgs.gnugrep ];
       } ''
         mkdir -p "$out"
@@ -2395,32 +2405,32 @@
       disassembly-fallback = disassemblyFallbackCheck;
       remote-target-selection = remoteTargetSelectionCheck;
       oracle-program-routing = oracleProgramRoutingCheck;
-      fix-028-cross-validate-option = fix028CrossValidateOptionCheck;
-      fix-030-native-event-matching = fix030NativeEventMatchingCheck;
-      fix-031-speculative-synchronization = fix031SpeculativeSynchronizationCheck;
+      cross-validate-option = crossValidateOptionCheck;
+      native-event-matching = nativeEventMatchingCheck;
+      speculative-synchronization = speculativeSynchronizationCheck;
       native-target-error-handling = nativeTargetErrorHandlingCheck;
-      fix-077-lldb-remote-state-event = fix077LldbRemoteStateEventCheck;
-      fix-078-native-event-phase = fix078NativeEventPhaseCheck;
-      fix-079-lldb-remote-x86-flags-width = fix079LldbRemoteX86FlagsWidthCheck;
-      fix-086-lldb-canonical-rflags-observation = fix086LldbCanonicalRflagsObservationCheck;
-      fix-080-repeated-pc-materialization = fix080RepeatedPcMaterializationCheck;
-      fix-081-recorded-syscall-control-output = fix081RecordedSyscallControlOutputCheck;
-      fix-088-observed-division-control = fix088ObservedDivisionControlCheck;
-      fix-089-defined-flag-cross-validation = fix089DefinedFlagCrossValidationCheck;
-      fix-090-xmm-cross-validation = fix090XmmCrossValidationCheck;
-      fix-091-empty-miasm-disassembly = fix091EmptyMiasmDisassemblyCheck;
-      fix-092-vex-disassembly-validation = fix092VexDisassemblyValidationCheck;
-      fix-093-lsl-environment-specialization = fix093LslEnvironmentSpecializationCheck;
-      fix-094-rex-mmx-movq = fix094RexMmxMovqCheck;
-      fix-095-native-signal-action = fix095NativeSignalActionCheck;
-      fix-097-miasm-sse-support = fix097MiasmSseSupportCheck;
-      fix-098-miasm-vmovdqu-support = fix098MiasmVmovdquSupportCheck;
-      fix-099-opt-in-capture-profiling = fix099OptInCaptureProfilingCheck;
-      fix-103-lldb-lock-prefix-disassembly = fix103LldbLockPrefixDisassemblyCheck;
-      fix-104-persistence-timing-separation = fix104PersistenceTimingSeparationCheck;
-      fix-082-x86-syscall-entry-matching = fix082X86SyscallEntryMatchingCheck;
-      fix-083-native-terminal-syscall = fix083NativeTerminalSyscallCheck;
-      fix-087-rr-lldb-syscall-boundary = fix087RrLldbSyscallBoundaryCheck;
+      lldb-remote-state-event = lldbRemoteStateEventCheck;
+      native-event-phase = nativeEventPhaseCheck;
+      lldb-remote-x86-flags-width = lldbRemoteX86FlagsWidthCheck;
+      lldb-canonical-rflags-observation = lldbCanonicalRflagsObservationCheck;
+      repeated-pc-materialization = repeatedPcMaterializationCheck;
+      recorded-syscall-control-output = recordedSyscallControlOutputCheck;
+      observed-division-control = observedDivisionControlCheck;
+      defined-flag-cross-validation = definedFlagCrossValidationCheck;
+      xmm-cross-validation = xmmCrossValidationCheck;
+      empty-miasm-disassembly = emptyMiasmDisassemblyCheck;
+      vex-disassembly-validation = vexDisassemblyValidationCheck;
+      lsl-environment-specialization = lslEnvironmentSpecializationCheck;
+      rex-mmx-movq = rexMmxMovqCheck;
+      native-signal-action = nativeSignalActionCheck;
+      miasm-sse-support = miasmSseSupportCheck;
+      miasm-vmovdqu-support = miasmVmovdquSupportCheck;
+      opt-in-capture-profiling = optInCaptureProfilingCheck;
+      lldb-lock-prefix-disassembly = lldbLockPrefixDisassemblyCheck;
+      persistence-timing-separation = persistenceTimingSeparationCheck;
+      x86-syscall-entry-matching = x86SyscallEntryMatchingCheck;
+      native-terminal-syscall = nativeTerminalSyscallCheck;
+      rr-lldb-syscall-boundary = rrLldbSyscallBoundaryCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
       native-scripted-tracing = nativeScriptedTracingCheck;
@@ -2438,11 +2448,11 @@
       unknown-trace-environment = unknownTraceEnvironmentCheck;
       materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
-      fix-021-plugin-framed-transport = fix021PluginFramedTransportCheck;
-      fix-022-plugin-register-cache = fix022PluginRegisterCacheCheck;
-      fix-033-plugin-connection-ownership = fix033PluginConnectionOwnershipCheck;
+      plugin-framed-transport = pluginFramedTransportCheck;
+      plugin-register-cache = pluginRegisterCacheCheck;
+      plugin-connection-ownership = pluginConnectionOwnershipCheck;
       uv-sync-lock-integrity = uvSyncLockIntegrityCheck;
-      fix-054-gdb-launch-encoding = fix054GdbLaunchEncodingCheck;
+      gdb-launch-encoding = gdbLaunchEncodingCheck;
       explicit-empty-event-log = explicitEmptyEventLogCheck;
       deterministic-import-boundary = deterministicImportBoundaryCheck;
       rr-schema-v85-packaging = rrSchemaV85PackagingCheck;
@@ -2463,10 +2473,11 @@
       rr-qemu-run-manifest = rrQemuRunManifestCheck;
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
-      fix-058-shared-snapshot-planner = fix058SharedSnapshotPlannerCheck;
-      fix-070-gdb-wide-registers = fix070GdbWideRegisterCheck;
-      fix-084-x86-eflags-observation = fix084X86EflagsObservationCheck;
-      fix-085-flake-source-boundary = fix085FlakeSourceBoundaryCheck;
+      shared-snapshot-planner = sharedSnapshotPlannerCheck;
+      gdb-wide-registers = gdbWideRegisterCheck;
+      x86-eflags-observation = x86EflagsObservationCheck;
+      code-naming-policy = codeNamingPolicyCheck;
+      flake-source-boundary = flakeSourceBoundaryCheck;
       qemu-sparse-memory-cache = qemuSparseMemoryCacheCheck;
       qemu-scripted-state-collection = qemuScriptedStateCollectionCheck;
       fresh-file-hashes = freshFileHashesCheck;
@@ -2477,7 +2488,7 @@
       legacy-trace-readers = legacyTraceReadersCheck;
       trace-structural-validation = traceStructuralValidationCheck;
       typed-empty-traces = typedEmptyTracesCheck;
-      fix-104-concrete-pc-diagnostic = fix104ConcretePcDiagnosticCheck;
+      concrete-pc-diagnostic = concretePcDiagnosticCheck;
       matching-failure-diagnostics = matchingFailureDiagnosticsCheck;
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
@@ -2486,19 +2497,19 @@
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
       comparison-error-classification = comparisonErrorClassificationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
-      fix-046-symbolic-composition = fix046SymbolicCompositionCheck;
-      fix-045-fp32-to-fp64 = fix045Fp32ToFp64Check;
-      fix-029-explicit-trace-gaps = fix029ExplicitTraceGapsCheck;
-      fix-062-target-environment-symbols = fix062TargetEnvironmentSymbolsCheck;
-      fix-067-x86-extended-register-aliases = fix067X86ExtendedRegisterAliasesCheck;
-      fix-027-aarch64-deterministic-replay = fix027Aarch64DeterministicReplayCheck;
-      fix-071-signal-extra-registers = fix071SignalExtraRegistersCheck;
-      fix-076-rr-standalone-lldb-compatibility =
-        fix076RrStandaloneLldbCompatibilityCheck;
+      symbolic-composition = symbolicCompositionCheck;
+      fp32-to-fp64 = fp32ToFp64Check;
+      explicit-trace-gaps = explicitTraceGapsCheck;
+      target-environment-symbols = targetEnvironmentSymbolsCheck;
+      x86-extended-register-aliases = x86ExtendedRegisterAliasesCheck;
+      aarch64-deterministic-replay = aarch64DeterministicReplayCheck;
+      signal-extra-registers = signalExtraRegistersCheck;
+      rr-standalone-lldb-compatibility =
+        rrStandaloneLldbCompatibilityCheck;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       rr-qemu-file-read-fixture = x86FileReadFixture;
     } // pkgs.lib.optionalAttrs (system == "aarch64-linux") {
-      fix-027-aarch64-native-rr-tool = aarch64NativeRrToolCheck;
+      aarch64-native-rr-tool = aarch64NativeRrToolCheck;
     };
   });
 }
