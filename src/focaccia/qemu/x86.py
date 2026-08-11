@@ -46,6 +46,7 @@ def _recorded(
     name: str,
     *,
     state_action: SyscallStateAction = SyscallStateAction.NONE,
+    allowed_argument_values: tuple[tuple[str, tuple[int, ...]], ...] = (),
     allowed_extras: frozenset[str] = frozenset(("none",)),
 ) -> SyscallPolicy:
     return SyscallPolicy(
@@ -54,6 +55,7 @@ def _recorded(
         ReplayStrategy.RECORDED,
         _NO_OUTPUTS,
         state_action=state_action,
+        allowed_argument_values=allowed_argument_values,
         allowed_extras=allowed_extras,
     )
 
@@ -65,6 +67,8 @@ def _direct(
     require_result_bytes: bool = False,
     result_output_register: str | None = None,
     state_action: SyscallStateAction = SyscallStateAction.NONE,
+    recorded_post_registers: tuple[str, ...] = (),
+    allowed_argument_values: tuple[tuple[str, tuple[int, ...]], ...] = (),
     allowed_extras: frozenset[str] = frozenset(("none",)),
 ) -> SyscallPolicy:
     return SyscallPolicy(
@@ -77,6 +81,8 @@ def _direct(
             result_output_register=result_output_register,
         ),
         state_action=state_action,
+        recorded_post_registers=recorded_post_registers,
+        allowed_argument_values=allowed_argument_values,
         allowed_extras=allowed_extras,
     )
 
@@ -199,10 +205,11 @@ _POLICIES: dict[int, SyscallPolicy] = {
         "rt_sigreturn",
         state_action=SyscallStateAction.RETURN_FROM_SIGNAL,
     ),
-    16: _reject(
+    16: _direct(
         16,
-        "ioctl",
-        "ioctl command payloads are variant-specific and have no generic safe replay policy",
+        "ioctl:TIOCGWINSZ",
+        _fixed("rdx", 8),
+        allowed_argument_values=(("rsi", (0x5413,)),),
     ),
     17: _direct(
         17,
@@ -326,7 +333,11 @@ _POLICIES: dict[int, SyscallPolicy] = {
     61: _reject(61, "wait4", "waiting requires a concurrent task model"),
     62: _recorded(62, "kill"),
     63: _direct(63, "uname", _fixed("rdi", 390)),
-    72: _reject(72, "fcntl", "fcntl commands have command-specific pointer and fd effects"),
+    72: _recorded(
+        72,
+        "fcntl",
+        allowed_argument_values=(("rsi", (1, 2, 3, 6)),),
+    ),
     73: _recorded(73, "flock"),
     74: _recorded(74, "fsync"),
     75: _recorded(75, "fdatasync"),
@@ -402,12 +413,11 @@ _POLICIES: dict[int, SyscallPolicy] = {
     ),
     137: _direct(137, "statfs", _fixed("rsi", 120)),
     138: _direct(138, "fstatfs", _fixed("rsi", 120)),
-    158: _execute(
+    158: _direct(
         158,
         "arch_prctl",
-        outputs=DirectMemoryOutputs((_fixed("rsi", 8),)),
-        execution_arguments=("rdi", "rsi"),
-        exact_post_registers=("fs_base", "gs_base"),
+        _fixed("rsi", 8),
+        recorded_post_registers=("fs_base", "gs_base"),
     ),
     186: _recorded(186, "gettid"),
     200: _recorded(200, "tkill"),

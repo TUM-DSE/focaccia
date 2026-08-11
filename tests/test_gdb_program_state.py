@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from focaccia.arch import x86
+from focaccia.arch import aarch64, x86
 from focaccia.deterministic import (
     CursorState,
     DeterministicCursor,
@@ -71,9 +71,7 @@ class FakeInferior:
     def read_memory(self, address: int, size: int) -> FakeMemory:
         self.reads.append((address, size))
         try:
-            return FakeMemory(
-                bytes(self.memory[address + offset] for offset in range(size))
-            )
+            return FakeMemory(bytes(self.memory[address + offset] for offset in range(size)))
         except KeyError as error:
             raise FakeGDBMemoryError("unavailable") from error
 
@@ -210,9 +208,7 @@ def test_gdb_state_uses_sparse_exact_memory_cache(monkeypatch):
     target = load_target_module(monkeypatch)
     address = 0x10FF
     data = b"ABCD"
-    inferior = FakeInferior(
-        {address + offset: byte for offset, byte in enumerate(data)}
-    )
+    inferior = FakeInferior({address + offset: byte for offset, byte in enumerate(data)})
     state = target.GDBProgramState(inferior, FakeFrame({}), x86.ArchX86())
 
     assert state.read_memory(address, 4) == data
@@ -422,13 +418,48 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
-def test_gdb_signal_replay_rejects_unwritable_complete_fp_state(monkeypatch):
+def test_gdb_signal_replay_writes_and_verifies_legacy_x86_vector_state(monkeypatch):
     target = load_target_module(monkeypatch)
+    fake_gdb = cast(Any, sys.modules["gdb"])
+    commands: list[str] = []
+    fake_gdb.execute = lambda command, **_kwargs: commands.append(command)
 
-    with pytest.raises(UnsupportedReplayEffect, match="atomically establish"):
+    raw = bytearray(512)
+    raw[24:28] = (0x1F80).to_bytes(4, "little")
+    state = ProgramState(x86.ArchX86())
+    for index in range(16):
+        value = index << 64 | index
+        raw[160 + index * 16 : 176 + index * 16] = value.to_bytes(16, "little")
+        state.write_register(f"xmm{index}", value)
+    extra = ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(raw))
+    fake_gdb.parse_and_eval = lambda expression: (
+        extra.read_register("mxcsr")
+        if expression == "$mxcsr"
+        else pytest.fail(f"unexpected expression {expression}")
+    )
+    connector = object.__new__(target.GDBServerConnector)
+    connector.current_state = lambda: state
+
+    connector.write_signal_handler_extra_registers(extra)
+
+    assert commands == [
+        *(
+            f"set $xmm{index}.uint128 = {extra.read_register(f'xmm{index}'):#x}"
+            for index in range(16)
+        ),
+        "set $mxcsr = 0x1f80",
+    ]
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_gdb_signal_replay_still_rejects_unwritable_aarch64_fp_state(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = aarch64.ArchAArch64("little")
+
+    with pytest.raises(UnsupportedReplayEffect, match="cannot establish"):
         target.GDBServerConnector.write_signal_handler_extra_registers(
             cast(Any, object()),
-            ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(512)),
+            ExtraRegisterState(arch, "aarch64-nt-fpr-v1", bytes(528)),
         )
 
     sys.modules.pop("focaccia.qemu.target", None)

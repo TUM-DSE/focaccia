@@ -59,6 +59,7 @@ class FakeReplayTarget:
                 self.state.write_memory(address, bytes((value,)))
         self.execute_callback = execute
         self.steps = 0
+        self.expected_execution_pcs: list[int | None] = []
         self.mutations: list[tuple[str, int, bytes | int]] = []
         self.exited = False
 
@@ -83,8 +84,11 @@ class FakeReplayTarget:
     ) -> None:
         del extra_registers
 
-    def execute_replay_instruction(self) -> ReadableProgramState | None:
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None:
         self.steps += 1
+        self.expected_execution_pcs.append(expected_pc)
         if self.execute_callback is None:
             raise AssertionError("This fake target must not execute a system call.")
         return self.execute_callback(self)
@@ -217,12 +221,50 @@ def test_unknown_syscall_fails_closed_before_target_mutation_or_step():
 
 
 def test_classified_unsafe_ioctl_is_rejected_without_execution():
-    pre, post = make_syscall_pair(16)
+    pre, post = make_syscall_pair(16, arguments={"rsi": 0xDEAD, "rdx": 0x2000})
     target = make_target_for_event(pre)
     engine = X86ReplayEngine(target.arch)
 
-    with pytest.raises(UnsupportedReplayEffect, match="ioctl.*rejected"):
+    with pytest.raises(ReplayEventError, match="requires rsi in.*0x5413"):
         engine.replay_syscall(target, pre, post)
+
+    assert target.steps == 0
+    assert target.mutations == []
+
+
+def test_tiocgwinsz_replays_recorded_output_without_live_ioctl():
+    pre, post = make_syscall_pair(
+        16,
+        arguments={"rsi": 0x5413, "rdx": 0x2000},
+        result=-25,
+        post_writes=(full_write(101, 0x2000, b"winsize!"),),
+    )
+    target = make_target_for_event(pre, overrides={"rdx": 0x3000})
+
+    state = X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+    assert target.steps == 0
+    assert state.read_pc() == post.pc
+    assert state.read_memory(0x3000, 8) == b"winsize!"
+
+
+@pytest.mark.parametrize("command", (1, 2, 3, 6))
+def test_supported_fcntl_commands_replay_without_live_execution(command):
+    pre, post = make_syscall_pair(72, arguments={"rsi": command})
+    target = make_target_for_event(pre)
+
+    state = X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+    assert target.steps == 0
+    assert state.read_pc() == post.pc
+
+
+def test_unknown_fcntl_command_fails_before_target_mutation():
+    pre, post = make_syscall_pair(72, arguments={"rsi": 99})
+    target = make_target_for_event(pre)
+
+    with pytest.raises(ReplayEventError, match="requires rsi in"):
+        X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
 
     assert target.steps == 0
     assert target.mutations == []
@@ -348,8 +390,29 @@ def test_anonymous_mmap_executes_and_reconciles_exact_result():
     state = engine.replay_syscall(target, pre, post)
 
     assert target.steps == 1
+    assert target.expected_execution_pcs == [post.pc]
     assert state.read_register("rax") == 0x70000000
     assert engine.coverage_report().by_strategy[ReplayStrategy.EXECUTE_RECONCILE] == 1
+
+
+def test_arch_prctl_replays_recorded_segment_bases_without_live_execution():
+    pre, post = make_syscall_pair(
+        158,
+        arguments={"rdi": 0x1002, "rsi": 0x60FA18},
+        post_registers={"fs_base": 0x60FA18, "gs_base": 0},
+    )
+    target = make_target_for_event(pre, overrides={"fs_base": 0, "gs_base": 0})
+    engine = X86ReplayEngine(target.arch)
+
+    state = engine.replay_syscall(target, pre, post)
+
+    assert target.steps == 0
+    assert state.read_pc() == 0x1002
+    assert state.read_register("fs_base") == 0x60FA18
+    assert state.read_register("gs_base") == 0
+    report = engine.coverage_report()
+    assert report.by_strategy[ReplayStrategy.RECORDED] == 1
+    assert report.by_outcome[CoverageOutcome.HANDLED] == 1
 
 
 def test_file_backed_mmap_is_rejected_before_execution():

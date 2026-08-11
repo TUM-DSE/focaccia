@@ -15,11 +15,15 @@ from focaccia.deterministic import (
     SignalEvent,
     SyscallEvent,
 )
-from focaccia.qemu.replay import X86ReplayEngine
+from focaccia.qemu.replay import (
+    X86ReplayEngine,
+    validate_x86_partial_signal_extra_transition,
+)
 from focaccia.qemu.syscall import (
     CoverageOutcome,
     MaterializedMemoryWrite,
     ReplayEventError,
+    UnsupportedReplayEffect,
 )
 from focaccia.qemu.x86 import (
     X86_64_FPSTATE_MIN_SIZE,
@@ -102,7 +106,10 @@ class FakeSignalTarget:
         self.extra_writes.append(extra_registers)
         self.fp_resets += 1
 
-    def execute_replay_instruction(self) -> ReadableProgramState | None:
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None:
+        del expected_pc
         self.steps += 1
         if self.execute_callback is None:
             raise AssertionError("Signal fake was not configured to execute.")
@@ -170,8 +177,7 @@ def build_frame(
         registers["ss"].to_bytes(2, "little")
     )
     frame[
-        mcontext
-        + X86_64_SIGCONTEXT_FPSTATE_OFFSET : mcontext
+        mcontext + X86_64_SIGCONTEXT_FPSTATE_OFFSET : mcontext
         + X86_64_SIGCONTEXT_FPSTATE_OFFSET
         + 8
     ] = FPSTATE_ADDRESS.to_bytes(8, "little")
@@ -184,8 +190,7 @@ def build_frame(
     fp_offset = FPSTATE_ADDRESS - FRAME_ADDRESS
     frame[fp_offset : fp_offset + 8] = b"FPSTATE!"
     frame[
-        fp_offset
-        + X86_64_FPSTATE_SW_RESERVED_OFFSET : fp_offset
+        fp_offset + X86_64_FPSTATE_SW_RESERVED_OFFSET : fp_offset
         + X86_64_FPSTATE_SW_RESERVED_OFFSET
         + 4
     ] = (0).to_bytes(4, "little")
@@ -208,6 +213,32 @@ def handler_xsave() -> ExtraRegisterState:
     raw[24:28] = (0x1F80).to_bytes(4, "little")
     raw[160:176] = bytes(range(16))
     return ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(raw))
+
+
+def test_partial_signal_extra_transition_accepts_xmm_and_sse_metadata_changes():
+    before = bytearray(576)
+    before[24:28] = (0x1F80).to_bytes(4, "little")
+    before[28:32] = (0xFFFF).to_bytes(4, "little")
+    before[160:176] = bytes(range(16))
+    before[512:520] = (0x203).to_bytes(8, "little")
+    after = bytearray(before)
+    after[28:32] = bytes(4)
+    after[160:176] = bytes(16)
+    after[512:520] = (0x201).to_bytes(8, "little")
+    previous = ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(before))
+    handler = ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(after))
+
+    assert validate_x86_partial_signal_extra_transition(previous, handler) is handler
+
+
+def test_partial_signal_extra_transition_rejects_changed_x87_state():
+    before = handler_xsave()
+    after = bytearray(before.raw)
+    after[32] = 1
+    handler = ExtraRegisterState(x86.ArchX86(), "x86-xsave-v1", bytes(after))
+
+    with pytest.raises(UnsupportedReplayEffect, match="x87 or extended XSAVE"):
+        validate_x86_partial_signal_extra_transition(before, handler)
 
 
 def make_signal_pair(

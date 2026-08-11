@@ -76,7 +76,10 @@ class FakeReplayTarget:
         del extra_registers
         raise AssertionError("This syscall-only fake must not receive signal state.")
 
-    def execute_replay_instruction(self) -> ReadableProgramState | None:
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None:
+        del expected_pc
         self.steps += 1
         if self.execute_callback is None:
             raise AssertionError("This fake target must not execute a system call.")

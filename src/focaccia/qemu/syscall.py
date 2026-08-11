@@ -630,6 +630,8 @@ class SyscallPolicy:
     execution_guard: ExecutionGuard = ExecutionGuard.NONE
     execution_arguments: tuple[str, ...] = ()
     exact_post_registers: tuple[str, ...] = ()
+    recorded_post_registers: tuple[str, ...] = ()
+    allowed_argument_values: tuple[tuple[str, tuple[int, ...]], ...] = ()
     allowed_extras: frozenset[str] = frozenset(("none",))
     reject_reason: str | None = None
 
@@ -638,6 +640,16 @@ class SyscallPolicy:
             raise ValueError("A system-call number cannot be negative.")
         object.__setattr__(self, "execution_arguments", tuple(self.execution_arguments))
         object.__setattr__(self, "exact_post_registers", tuple(self.exact_post_registers))
+        object.__setattr__(
+            self, "recorded_post_registers", tuple(self.recorded_post_registers)
+        )
+        object.__setattr__(
+            self,
+            "allowed_argument_values",
+            tuple(
+                (name, tuple(values)) for name, values in self.allowed_argument_values
+            ),
+        )
         object.__setattr__(self, "allowed_extras", frozenset(self.allowed_extras))
         valid_extras = {
             "none",
@@ -664,6 +676,24 @@ class SyscallPolicy:
         ):
             raise ValueError("Only executing policies can validate execution arguments.")
         if (
+            self.recorded_post_registers
+            and self.strategy is not ReplayStrategy.RECORDED
+        ):
+            raise ValueError(
+                "Only recorded policies can apply additional post-event registers."
+            )
+        if len({name for name, _ in self.allowed_argument_values}) != len(
+            self.allowed_argument_values
+        ):
+            raise ValueError("Constrained system-call argument registers must be unique.")
+        if any(
+            not values or any(value < 0 for value in values)
+            for _, values in self.allowed_argument_values
+        ):
+            raise ValueError(
+                "Allowed system-call argument values must be nonempty and non-negative."
+            )
+        if (
             self.state_action is SyscallStateAction.TERMINATE
             and self.strategy is not ReplayStrategy.EXECUTE_RECONCILE
         ):
@@ -678,6 +708,8 @@ class SyscallPolicy:
             self.outputs.register_names()
             | frozenset(self.execution_arguments)
             | frozenset(self.exact_post_registers)
+            | frozenset(self.recorded_post_registers)
+            | frozenset(name for name, _ in self.allowed_argument_values)
         )
 
 

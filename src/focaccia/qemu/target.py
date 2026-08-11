@@ -194,13 +194,49 @@ class GDBServerConnector:
         self,
         extra_registers: ExtraRegisterState,
     ) -> None:
-        raise UnsupportedReplayEffect(
-            f"The QEMU GDB backend cannot atomically establish "
-            f"{extra_registers.format} signal-handler state."
-        )
-
-    def execute_replay_instruction(self) -> ReadableProgramState | None:
+        if extra_registers.format != "x86-xsave-v1":
+            raise UnsupportedReplayEffect(
+                f"The QEMU GDB backend cannot establish "
+                f"{extra_registers.format} signal-handler state."
+            )
         try:
+            for index in range(16):
+                value = extra_registers.read_register(f"xmm{index}")
+                gdb.execute(
+                    f"set $xmm{index}.uint128 = {value:#x}",
+                    to_string=True,
+                )
+            mxcsr = extra_registers.read_register("mxcsr")
+            gdb.execute(f"set $mxcsr = {mxcsr:#x}", to_string=True)
+
+            state = self.current_state()
+            for index in range(16):
+                register = f"xmm{index}"
+                expected = extra_registers.read_register(register)
+                observed = state.read_register(register)
+                if observed != expected:
+                    raise RegisterAccessError(
+                        register,
+                        f"QEMU retained {observed:#x}, expected {expected:#x}.",
+                    )
+            observed_mxcsr = int(gdb.parse_and_eval("$mxcsr"))
+            if observed_mxcsr != mxcsr:
+                raise RegisterAccessError(
+                    "mxcsr",
+                    f"QEMU retained {observed_mxcsr:#x}, expected {mxcsr:#x}.",
+                )
+        except (KeyError, ValueError, RegisterAccessError, gdb.error) as error:
+            raise UnsupportedReplayEffect(
+                "The QEMU GDB backend could not write and verify the recorded "
+                f"MXCSR/XMM signal-handler state: {error}."
+            ) from error
+
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None:
+        try:
+            if expected_pc is not None:
+                return self._run_until_any([expected_pc])
             return self._step()
         except StopIteration:
             return None

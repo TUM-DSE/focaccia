@@ -72,7 +72,10 @@ class FakeSignalTarget:
             raise UnsupportedReplayEffect("fixture backend rejects extra state")
         self.extra_writes.append(extra_registers)
 
-    def execute_replay_instruction(self) -> ReadableProgramState | None:
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None:
+        del expected_pc
         if self.execute is None:
             raise AssertionError("Unexpected execution.")
         return self.execute(self)

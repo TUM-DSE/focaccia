@@ -1701,6 +1701,65 @@
       ];
     };
 
+    recordedFcntlReplayCheck = mkStaticUnitCheck {
+      name = "recorded-fcntl-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "supported_fcntl_commands or unknown_fcntl_command"
+      ];
+    };
+
+    recordedTiocgwinszReplayCheck = mkStaticUnitCheck {
+      name = "recorded-tiocgwinsz-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "tiocgwinsz_replays_recorded_output or classified_unsafe_ioctl"
+      ];
+    };
+
+    qemuSyscallPostBoundaryCheck = mkStaticUnitCheck {
+      name = "qemu-syscall-post-boundary";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "anonymous_mmap_executes_and_reconciles_exact_result"
+      ];
+    };
+
+    recordedArchPrctlReplayCheck = mkStaticUnitCheck {
+      name = "recorded-arch-prctl-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "arch_prctl_replays_recorded_segment_bases"
+      ];
+    };
+
     x86ReplayFailClosedCheck = mkStaticUnitCheck {
       name = "x86-replay-fail-closed";
       ruffTargets = [
@@ -1747,6 +1806,22 @@
         "tests/test_x86_signal_replay.py"
         "-k"
         "uapi_offset or recorded_signal_frame or variable_xstate or signal_delivery or malformed_fpstate or frame_context or sigaction"
+      ];
+    };
+
+    partialX86SignalStateReplayCheck = mkStaticUnitCheck {
+      name = "partial-x86-signal-state-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_signal_replay.py"
+        "-k"
+        "gdb_signal_replay or partial_signal_extra_transition"
       ];
     };
 
@@ -2489,9 +2564,14 @@
       deterministic-event-cursor = deterministicEventCursorCheck;
       deterministic-mapping-cursor = deterministicMappingCursorCheck;
       x86-syscall-effect-policies = x86SyscallEffectPoliciesCheck;
+      recorded-fcntl-replay = recordedFcntlReplayCheck;
+      recorded-tiocgwinsz-replay = recordedTiocgwinszReplayCheck;
+      qemu-syscall-post-boundary = qemuSyscallPostBoundaryCheck;
+      recorded-arch-prctl-replay = recordedArchPrctlReplayCheck;
       x86-replay-fail-closed = x86ReplayFailClosedCheck;
       x86-nested-output-replay = x86NestedOutputReplayCheck;
       x86-signal-frame-abi = x86SignalFrameAbiCheck;
+      partial-x86-signal-state-replay = partialX86SignalStateReplayCheck;
       x86-signal-return = x86SignalReturnCheck;
       replay-effect-coverage = replayEffectCoverageCheck;
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;

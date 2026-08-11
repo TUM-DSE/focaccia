@@ -103,6 +103,52 @@ _SIG_SETMASK = 2
 _BLOCKABLE_SIGNAL_MASK = ((1 << 64) - 1) & ~((1 << (9 - 1)) | (1 << (19 - 1)))
 
 
+def validate_x86_partial_signal_extra_transition(
+    previous: ExtraRegisterState | None,
+    handler: ExtraRegisterState | None,
+) -> ExtraRegisterState:
+    """Require all non-GDB-writable x86 signal state to remain unchanged.
+
+    QEMU's historical x86 GDB stubs expose MXCSR and XMM0--XMM15, but not the
+    complete XSAVE state. A signal transition is replayable through that
+    interface only when every other live component is byte-for-byte unchanged.
+    The XSAVE SSE-in-use bit and the non-live MXCSR capability mask may change
+    as consequences or metadata of restoring MXCSR and the XMM values.
+    """
+    if previous is None or previous.format != "x86-xsave-v1":
+        raise ReplayEventError("x86 signal pre-event lacks recorded XSAVE state.")
+    if handler is None or handler.format != "x86-xsave-v1":
+        raise ReplayEventError("x86 signal-handler event lacks recorded XSAVE state.")
+    if previous.arch != handler.arch or len(previous.raw) != len(handler.raw):
+        raise ReplayEventError("x86 signal XSAVE payload layout changes at delivery.")
+
+    before = bytearray(previous.raw)
+    after = bytearray(handler.raw)
+    # MXCSR and the sixteen architectural XMM registers are writable through
+    # every pinned x86-64 QEMU GDB stub used by the evaluator.
+    before[24:28] = after[24:28]
+    before[160:416] = after[160:416]
+    # MXCSR_MASK and the tail of the legacy FXSAVE area are capability or
+    # software-reserved metadata, not live execution state.
+    before[28:32] = after[28:32]
+    before[416:512] = after[416:512]
+    if len(before) >= 576:
+        previous_bv = int.from_bytes(before[512:520], "little")
+        handler_bv = int.from_bytes(after[512:520], "little")
+        if (previous_bv ^ handler_bv) & ~(1 << 1):
+            raise UnsupportedReplayEffect(
+                "x86 signal delivery changes an XSAVE component unavailable through "
+                "the QEMU GDB stub."
+            )
+        before[512:520] = after[512:520]
+    if before != after:
+        raise UnsupportedReplayEffect(
+            "x86 signal delivery changes x87 or extended XSAVE state unavailable "
+            "through the QEMU GDB stub."
+        )
+    return handler
+
+
 class ReplayTarget(Protocol):
     """Mutation/execution boundary needed by a deterministic replay engine."""
 
@@ -122,7 +168,9 @@ class ReplayTarget(Protocol):
         extra_registers: ExtraRegisterState,
     ) -> None: ...
 
-    def execute_replay_instruction(self) -> ReadableProgramState | None: ...
+    def execute_replay_instruction(
+        self, expected_pc: int | None = None
+    ) -> ReadableProgramState | None: ...
 
     def is_exited(self) -> bool: ...
 
@@ -353,7 +401,7 @@ class X86ReplayEngine:
         self._check_execution_guard(policy, context)
 
         if policy.strategy is ReplayStrategy.RECORDED:
-            register_effects = self._recorded_register_effects(post_event)
+            register_effects = self._recorded_register_effects(post_event, policy)
             kernel_effects = self._plan_kernel_effects(
                 policy,
                 context,
@@ -372,7 +420,7 @@ class X86ReplayEngine:
             ReplayStrategy.EXECUTE_RECONCILE,
             ReplayStrategy.SAFE_PASSTHROUGH,
         ):
-            state = target.execute_replay_instruction()
+            state = target.execute_replay_instruction(post_event.pc)
             if state is None or target.is_exited():
                 raise ReplayReconciliationError(
                     f"System call {policy.name} terminated the target unexpectedly."
@@ -529,12 +577,13 @@ class X86ReplayEngine:
                 f"{self.state.signal_mask:#x}."
             )
 
-        # Linux resets live FP/vector state on handler entry. RR records that
-        # exact post-delivery state; a backend lacking an atomic write
-        # capability must reject before the frame or GPRs change.
-        handler_extra = post_event.extra_registers
-        if handler_extra is None or handler_extra.format != "x86-xsave-v1":
-            raise ReplayEventError("x86 signal-handler event lacks recorded XSAVE state.")
+        # Historical QEMU GDB stubs can write the legacy SSE state but not the
+        # complete XSAVE payload. Permit that partial transfer only when every
+        # unavailable component is unchanged across signal delivery.
+        handler_extra = validate_x86_partial_signal_extra_transition(
+            pre_event.extra_registers,
+            post_event.extra_registers,
+        )
         target.write_signal_handler_extra_registers(handler_extra)
 
         # All frame bytes, including siginfo, mask, reserved words, and the
@@ -557,6 +606,10 @@ class X86ReplayEngine:
             effect=effect_name,
             strategy=ReplayStrategy.RECORDED,
             outcome=CoverageOutcome.HANDLED,
+            detail=(
+                "recorded frame and MXCSR/XMM state; unchanged x87 and extended "
+                "XSAVE state preserved"
+            ),
         )
         return target.current_state()
 
@@ -721,10 +774,16 @@ class X86ReplayEngine:
     def _recorded_register_effects(
         self,
         post_event: SyscallEvent,
+        policy: SyscallPolicy,
     ) -> tuple[RegisterReplayEffect, ...]:
+        registers = tuple(
+            dict.fromkeys(
+                (*self.recorded_result_registers, *policy.recorded_post_registers)
+            )
+        )
         return tuple(
             RegisterReplayEffect(register, self._event_register(post_event, register))
-            for register in self.recorded_result_registers
+            for register in registers
         )
 
     @staticmethod
@@ -807,6 +866,15 @@ class X86ReplayEngine:
         policy: SyscallPolicy,
         context: SyscallReplayContext,
     ) -> None:
+        for register, allowed in policy.allowed_argument_values:
+            recorded = self._event_register(context.pre_event, register)
+            target = context.target_state.read_register(register)
+            if recorded not in allowed or target not in allowed or target != recorded:
+                encoded = ", ".join(f"{value:#x}" for value in allowed)
+                raise ReplayEventError(
+                    f"System call {policy.name} requires {register} in ({encoded}); "
+                    f"RR recorded {recorded:#x}, target has {target:#x}."
+                )
         for register in policy.execution_arguments:
             recorded = self._event_register(context.pre_event, register)
             target = context.target_state.read_register(register)
