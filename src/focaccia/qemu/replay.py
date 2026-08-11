@@ -241,7 +241,8 @@ class X86ReplayEngine:
     syscall_number_register = X86_64_SYSCALL_NUMBER_REGISTER
     syscall_argument_registers = X86_64_SYSCALL_ARGUMENT_REGISTERS
     recorded_result_registers = X86_64_RECORDED_RESULT_REGISTERS
-    execution_boundary_registers = ("rcx", "r11")
+    execution_boundary_registers: tuple[str, ...] = ()
+    execution_control_registers = ("rcx", "r11")
     result_register = "rax"
     pc_register = "rip"
     thread_creating_syscalls = _THREAD_CREATING_SYSCALLS
@@ -425,6 +426,7 @@ class X86ReplayEngine:
                 raise ReplayReconciliationError(
                     f"System call {policy.name} terminated the target unexpectedly."
                 )
+            control_effects = self._recorded_execution_control_effects(post_event)
             if policy.reconcile is ReconcileMode.APPLY_RECORDED:
                 self._reconcile_execution_boundary(state, post_event)
                 self._apply_recorded_effects(
@@ -435,6 +437,7 @@ class X86ReplayEngine:
                             self.result_register,
                             self._event_register(post_event, self.result_register),
                         ),
+                        *control_effects,
                     ),
                     memory_effects,
                     set_pc=False,
@@ -447,6 +450,14 @@ class X86ReplayEngine:
                     memory_effects,
                     policy.exact_post_registers,
                 )
+                self._apply_recorded_effects(
+                    target,
+                    post_event,
+                    control_effects,
+                    (),
+                    set_pc=False,
+                )
+                state = target.current_state()
             if policy.state_action is SyscallStateAction.RETURN_FROM_SIGNAL:
                 self._finish_signal_return(state, post_event)
             kernel_effects = self._plan_kernel_effects(
@@ -784,6 +795,15 @@ class X86ReplayEngine:
         return tuple(
             RegisterReplayEffect(register, self._event_register(post_event, register))
             for register in registers
+        )
+
+    def _recorded_execution_control_effects(
+        self,
+        post_event: SyscallEvent,
+    ) -> tuple[RegisterReplayEffect, ...]:
+        return tuple(
+            RegisterReplayEffect(register, self._event_register(post_event, register))
+            for register in self.execution_control_registers
         )
 
     @staticmethod
@@ -1286,6 +1306,7 @@ class AArch64ReplayEngine(X86ReplayEngine):
     syscall_argument_registers = AARCH64_SYSCALL_ARGUMENT_REGISTERS
     recorded_result_registers = AARCH64_RECORDED_RESULT_REGISTERS
     execution_boundary_registers = AARCH64_EXECUTION_BOUNDARY_REGISTERS
+    execution_control_registers: tuple[str, ...] = ()
     result_register = AARCH64_RESULT_REGISTER
     pc_register = AARCH64_PC_REGISTER
     thread_creating_syscalls = AARCH64_THREAD_CREATING_SYSCALLS

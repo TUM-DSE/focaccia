@@ -1745,6 +1745,19 @@
       ];
     };
 
+    recordedSyscallClobberReplayCheck = mkStaticUnitCheck {
+      name = "recorded-syscall-clobber-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "executed_syscall_applies_recorded_rcx_and_r11_control_effects"
+      ];
+    };
+
     recordedArchPrctlReplayCheck = mkStaticUnitCheck {
       name = "recorded-arch-prctl-replay";
       ruffTargets = [
@@ -2567,6 +2580,7 @@
       recorded-fcntl-replay = recordedFcntlReplayCheck;
       recorded-tiocgwinsz-replay = recordedTiocgwinszReplayCheck;
       qemu-syscall-post-boundary = qemuSyscallPostBoundaryCheck;
+      recorded-syscall-clobber-replay = recordedSyscallClobberReplayCheck;
       recorded-arch-prctl-replay = recordedArchPrctlReplayCheck;
       x86-replay-fail-closed = x86ReplayFailClosedCheck;
       x86-nested-output-replay = x86NestedOutputReplayCheck;

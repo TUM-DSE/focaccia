@@ -395,6 +395,33 @@ def test_anonymous_mmap_executes_and_reconciles_exact_result():
     assert engine.coverage_report().by_strategy[ReplayStrategy.EXECUTE_RECONCILE] == 1
 
 
+def test_executed_syscall_applies_recorded_rcx_and_r11_control_effects():
+    pre, post = make_syscall_pair(
+        12,
+        arguments={"rdi": 0x70000000},
+        result=0x70000000,
+        post_registers={"rcx": MASK64, "r11": 0x246},
+    )
+
+    def execute(target: FakeReplayTarget) -> ReadableProgramState:
+        state = install_post_state(target, post)
+        target.state.write_register("rcx", 0)
+        target.state.write_register("r11", 0)
+        return state
+
+    target = make_target_for_event(pre, execute=execute)
+
+    state = X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+    assert target.steps == 1
+    assert state.read_register("rcx") == MASK64
+    assert state.read_register("r11") == 0x246
+    assert target.mutations[-2:] == [
+        ("register", 0, MASK64),
+        ("register", 0, 0x246),
+    ]
+
+
 def test_arch_prctl_replays_recorded_segment_bases_without_live_execution():
     pre, post = make_syscall_pair(
         158,
