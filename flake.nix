@@ -1996,6 +1996,19 @@
       ];
     };
 
+    box64AdjacentFlagsCheck = mkStaticUnitCheck {
+      name = "box64-adjacent-flags";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "box64_parser_separates_adjacent_flags"
+      ];
+    };
+
     traceStructuralValidationCheck = mkStaticUnitCheck {
       name = "trace-structural-validation";
       ruffTargets = [
@@ -2499,6 +2512,7 @@
       json-trace-roundtrip = jsonTraceRoundtripCheck;
       msgpack-trace-roundtrip = msgpackTraceRoundtripCheck;
       legacy-trace-readers = legacyTraceReadersCheck;
+      box64-adjacent-flags = box64AdjacentFlagsCheck;
       trace-structural-validation = traceStructuralValidationCheck;
       typed-empty-traces = typedEmptyTracesCheck;
       concrete-pc-diagnostic = concretePcDiagnosticCheck;

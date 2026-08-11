@@ -8,6 +8,7 @@ from focaccia import trace as trace_module
 from focaccia.arch import aarch64, x86
 from focaccia.parser import (
     SCHEMA_VERSION,
+    parse_box64,
     parse_qemu,
     serialize_snapshots,
     stream_transformation,
@@ -273,6 +274,23 @@ def test_legacy_log_parser_uses_typed_unknown_environment():
     assert trace.env.detlog is None
     assert trace.env.replay_provenance is None
     assert trace.env.architecture == x86.ArchX86().key
+
+
+def test_box64_parser_separates_adjacent_flags_from_register_value():
+    log = io.StringIO(
+        "header\n"
+        "ES=0x002b CS=0x0033\n"
+        "RAX=1234567812345678 RSP=0000ea4a4d7fda68flags=???Z?P?\n"
+        "RIP=0000000000401054 0F B1 D1 cmpxchg ecx, edx\n"
+    )
+
+    parsed = parse_box64(log, x86.ArchX86())
+
+    assert len(parsed) == 1
+    assert parsed[0].read_register("RAX") == 0x1234567812345678
+    assert parsed[0].read_register("RSP") == 0xEA4A4D7FDA68
+    assert parsed[0].read_register("ZF") == 1
+    assert parsed[0].read_register("PF") == 1
 
 
 def test_empty_materialized_snapshot_serialization_returns_after_writing():

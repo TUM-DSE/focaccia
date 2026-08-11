@@ -168,7 +168,11 @@ def parse_box64(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
     blocks = [block.strip() for block in blocks if block.strip()]
 
     states = []
-    pattern = r'([A-Z0-9]{2,3}|flags|FLAGS)=([0-9a-fxODSZAPC?\-]+)'
+    pattern = (
+        r'([A-Z0-9]{2,3}|flags|FLAGS)='
+        r'([0-9a-fxODSZAPC?\-]+?)'
+        r'(?=(?:[A-Z0-9]{2,3}|flags|FLAGS)=|\s|$)'
+    )
     for block in blocks:
         states.append(ProgramState(arch))
         matches = re.findall(pattern, block)
