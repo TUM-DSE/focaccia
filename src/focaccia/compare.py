@@ -286,7 +286,7 @@ def _find_register_errors(
 ) -> list[Error]:
     """Compare symbolic register outputs against a concrete destination."""
     try:
-        truth = transform_truth.eval_register_transforms(txl_from)
+        truth = transform_truth.eval_validation_register_transforms(txl_from)
     except MemoryAccessError as error:
         start, end = transform_truth.range
         return [

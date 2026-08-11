@@ -448,6 +448,33 @@ def test_symbolic_register_validation_distinguishes_missing_inputs_and_outputs()
     assert "RAX changed but is unavailable" in output_report[0]["errors"][0].error_msg
 
 
+def test_symbolic_comparison_uses_only_defined_register_output_slices():
+    source = state(0x1000, 0x1234567812345678)
+    destination = state(0x1001, 0x12345678)
+    destination.write_register("ZF", 1)
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprId("ZF", 1): ExprInt(1, 1),
+            ExprId("RAX", 64): ExprInt(0x1234567812345678, 64),
+            ExprId("RIP", 64): ExprInt(0x1001, 64),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+
+    report = compare_symbolic(
+        TransitionTrace([source, destination], [transform], ENV)
+    )
+
+    confirmed = errors_with_severity(report, ErrorTypes.CONFIRMED)
+    assert len(confirmed) == 1
+    assert "register RAX" in confirmed[0].error_msg
+    assert errors_with_severity(report, ErrorTypes.INCOMPLETE) == []
+
+
 def test_microarchitecture_dependent_register_mismatch_is_not_confirmed():
     arch = x86.ArchX86()
     source = ProgramState(arch)

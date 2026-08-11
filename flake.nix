@@ -2126,6 +2126,19 @@
       pytestTargets = [ "tests/test_compare.py" ];
     };
 
+    definedRegisterOutputValidationCheck = mkStaticUnitCheck {
+      name = "defined-register-output-validation";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "tests/test_compare.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py"
+        "-k"
+        "defined_register_output_slices"
+      ];
+    };
+
     sharedTransitionMatcherCheck = mkStaticUnitCheck {
       name = "shared-transition-matcher";
       ruffTargets = [
@@ -2496,6 +2509,7 @@
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
       comparison-error-classification = comparisonErrorClassificationCheck;
+      defined-register-output-validation = definedRegisterOutputValidationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
       symbolic-composition = symbolicCompositionCheck;
       fp32-to-fp64 = fp32ToFp64Check;
