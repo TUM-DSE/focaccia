@@ -23,6 +23,7 @@ from focaccia.qemu.syscall import (
     CoverageOutcome,
     MaterializedMemoryWrite,
     ReplayEventError,
+    ReplayReconciliationError,
     UnsupportedReplayEffect,
 )
 from focaccia.qemu.x86 import (
@@ -62,6 +63,7 @@ SIGINFO_ADDRESS = FRAME_ADDRESS + 312
 FPSTATE_ADDRESS = FRAME_ADDRESS + 440
 FRAME_SIZE = 440 + 512
 SAVED_MASK = 0x20
+STACK_DELTA = 0x200000
 
 
 class FakeSignalTarget:
@@ -495,6 +497,75 @@ def test_signal_delivery_replays_exact_frame_and_abi_registers_without_hardcodin
     assert engine.coverage_report().records[-1].outcome is CoverageOutcome.HANDLED
 
 
+def test_signal_delivery_relocates_recorded_frame_under_live_stack_delta():
+    pre, post, saved = make_signal_pair()
+    target_saved = {
+        **saved,
+        "rbp": saved["rbp"] + STACK_DELTA,
+        "rsp": saved["rsp"] + STACK_DELTA,
+    }
+    recorded_frame = build_frame({**saved, "rbp": saved["rbp"]})
+    pre, post, _saved = make_signal_pair(frame=recorded_frame)
+    target = FakeSignalTarget(target_saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+
+    state = engine.replay_signal(target, pre, post)
+
+    target_frame = FRAME_ADDRESS + STACK_DELTA
+    assert state is not None
+    assert state.read_register("rsp") == target_frame
+    assert state.read_register("rsi") == SIGINFO_ADDRESS + STACK_DELTA
+    assert state.read_register("rdx") == UCONTEXT_ADDRESS + STACK_DELTA
+    mcontext = target_frame + X86_64_UCONTEXT_OFFSET + X86_64_UCONTEXT_MCONTEXT_OFFSET
+    assert (
+        int.from_bytes(
+            state.read_memory(mcontext + X86_64_SIGCONTEXT_REGISTER_OFFSETS["rsp"], 8),
+            "little",
+        )
+        == saved["rsp"] + STACK_DELTA
+    )
+    assert (
+        int.from_bytes(
+            state.read_memory(mcontext + X86_64_SIGCONTEXT_REGISTER_OFFSETS["rbp"], 8),
+            "little",
+        )
+        == saved["rbp"] + STACK_DELTA
+    )
+    assert (
+        int.from_bytes(
+            state.read_memory(mcontext + X86_64_SIGCONTEXT_FPSTATE_OFFSET, 8),
+            "little",
+        )
+        == FPSTATE_ADDRESS + STACK_DELTA
+    )
+    assert state.read_memory(SIGINFO_ADDRESS + STACK_DELTA, X86_64_SIGINFO_SIZE) == siginfo_bytes()
+    assert state.read_memory(FPSTATE_ADDRESS + STACK_DELTA, 8) == b"FPSTATE!"
+    delivered = engine.state.signal_frames[-1]
+    assert delivered.target_frame_address == target_frame
+    assert delivered.target_saved_registers is not None
+    assert delivered.target_saved_registers["rsp"] == saved["rsp"] + STACK_DELTA
+    assert delivered.target_saved_registers["rbp"] == saved["rbp"] + STACK_DELTA
+
+
+def test_signal_relocation_rejects_nonuniform_register_drift_before_writing_frame():
+    pre, post, saved = make_signal_pair()
+    target = FakeSignalTarget(
+        {
+            **saved,
+            "rsp": saved["rsp"] + STACK_DELTA,
+            "rbp": saved["rbp"] + STACK_DELTA + 8,
+        }
+    )
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+
+    with pytest.raises(ReplayReconciliationError, match="not the proven stack relocation"):
+        engine.replay_signal(target, pre, post)
+
+    assert target.mutations == []
+
+
 def test_non_siginfo_signal_replays_opaque_frame_slot_from_recorded_bytes():
     _pre, _post, saved = make_signal_pair()
     frame = bytearray(build_frame(saved))
@@ -665,6 +736,124 @@ def test_rt_sigreturn_executes_qemu_abi_restore_and_reconciles_all_gprs():
     snapshot = engine.state.snapshot()
     assert snapshot.signal_depth == 0
     assert snapshot.signal_mask == SAVED_MASK
+
+
+def test_relocated_rt_sigreturn_consumes_local_frame_and_reconciles_restored_stack():
+    signal_pre, signal_post, saved = make_signal_pair()
+    target_saved = {**saved, "rsp": saved["rsp"] + STACK_DELTA}
+    target = FakeSignalTarget(target_saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+    engine.replay_signal(target, signal_pre, signal_post)
+
+    syscall_pre, syscall_post = make_sigreturn_pair(saved)
+    for register, value in syscall_pre.registers.items():
+        target.state.write_register(register, value)
+    target.state.write_register("rsp", FRAME_ADDRESS + STACK_DELTA + 8)
+
+    def restore(current: FakeSignalTarget) -> ReadableProgramState:
+        for register, value in syscall_post.registers.items():
+            current.state.write_register(register, value)
+        current.state.write_register("rsp", saved["rsp"] + STACK_DELTA)
+        return current.state
+
+    target.execute_callback = restore
+    state = engine.replay_syscall(target, syscall_pre, syscall_post)
+
+    assert target.steps == 1
+    assert state.read_pc() == SIGNAL_PC
+    assert state.read_register("rsp") == saved["rsp"] + STACK_DELTA
+    assert engine.state.snapshot().signal_depth == 0
+
+
+def test_relocated_rt_sigreturn_accepts_handler_modified_relocated_stack_pointer():
+    signal_pre, signal_post, saved = make_signal_pair()
+    target_saved = {**saved, "rsp": saved["rsp"] + STACK_DELTA}
+    target = FakeSignalTarget(target_saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+    engine.replay_signal(target, signal_pre, signal_post)
+
+    modified_recorded_rsp = saved["rsp"] - 0x80
+    modified_target_rsp = modified_recorded_rsp + STACK_DELTA
+    syscall_pre, syscall_post = make_sigreturn_pair(saved)
+    post_registers = dict(syscall_post.registers)
+    post_registers["RSP"] = modified_recorded_rsp
+    syscall_post = SyscallEvent(
+        syscall_post.pc,
+        syscall_post.tid,
+        syscall_post.arch,
+        post_registers,
+        syscall_post.mem_writes,
+        syscall_post.syscall_arch,
+        syscall_post.syscall_number,
+        syscall_post.syscall_state,
+        syscall_post.failed_during_preparation,
+        event_count=syscall_post.event_count,
+    )
+    for register, value in syscall_pre.registers.items():
+        target.state.write_register(register, value)
+    target.state.write_register("rsp", FRAME_ADDRESS + STACK_DELTA + 8)
+    mcontext = (
+        FRAME_ADDRESS + STACK_DELTA + X86_64_UCONTEXT_OFFSET + X86_64_UCONTEXT_MCONTEXT_OFFSET
+    )
+    target.state.write_memory(
+        mcontext + X86_64_SIGCONTEXT_REGISTER_OFFSETS["rsp"],
+        modified_target_rsp.to_bytes(8, "little"),
+    )
+
+    def restore(current: FakeSignalTarget) -> ReadableProgramState:
+        for register, value in syscall_post.registers.items():
+            current.state.write_register(register, value)
+        current.state.write_register("rsp", modified_target_rsp)
+        return current.state
+
+    target.execute_callback = restore
+    state = engine.replay_syscall(target, syscall_pre, syscall_post)
+
+    assert state.read_register("rsp") == modified_target_rsp
+    assert engine.state.snapshot().signal_depth == 0
+
+
+def test_relocated_rt_sigreturn_rejects_unrelocated_modified_stack_pointer():
+    signal_pre, signal_post, saved = make_signal_pair()
+    target_saved = {**saved, "rsp": saved["rsp"] + STACK_DELTA}
+    target = FakeSignalTarget(target_saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+    engine.replay_signal(target, signal_pre, signal_post)
+
+    modified_recorded_rsp = saved["rsp"] - 0x80
+    syscall_pre, syscall_post = make_sigreturn_pair(saved)
+    post_registers = dict(syscall_post.registers)
+    post_registers["RSP"] = modified_recorded_rsp
+    syscall_post = SyscallEvent(
+        syscall_post.pc,
+        syscall_post.tid,
+        syscall_post.arch,
+        post_registers,
+        syscall_post.mem_writes,
+        syscall_post.syscall_arch,
+        syscall_post.syscall_number,
+        syscall_post.syscall_state,
+        syscall_post.failed_during_preparation,
+        event_count=syscall_post.event_count,
+    )
+    for register, value in syscall_pre.registers.items():
+        target.state.write_register(register, value)
+    target.state.write_register("rsp", FRAME_ADDRESS + STACK_DELTA + 8)
+    mcontext = (
+        FRAME_ADDRESS + STACK_DELTA + X86_64_UCONTEXT_OFFSET + X86_64_UCONTEXT_MCONTEXT_OFFSET
+    )
+    target.state.write_memory(
+        mcontext + X86_64_SIGCONTEXT_REGISTER_OFFSETS["rsp"],
+        modified_recorded_rsp.to_bytes(8, "little"),
+    )
+
+    with pytest.raises(ReplayReconciliationError, match="signal-frame rsp"):
+        engine.replay_syscall(target, syscall_pre, syscall_post)
+
+    assert target.steps == 0
 
 
 def test_rt_sigreturn_rejects_wrong_stack_before_execution():

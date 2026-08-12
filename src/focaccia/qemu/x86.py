@@ -16,6 +16,7 @@ from focaccia.qemu.syscall import (
     FixedExtent,
     IovecResultOutputs,
     MaterializedMemoryWrite,
+    MemoryReplayEffect,
     NoMemoryOutputs,
     PointedU32Extent,
     ReconcileMode,
@@ -851,3 +852,71 @@ class X86RecordedSignalFrame:
             MappingProxyType(saved_registers),
             tuple(writes),
         )
+
+    def relocate(
+        self,
+        target_frame_address: int,
+        target_saved_registers: Mapping[str, int],
+    ) -> tuple[MemoryReplayEffect, ...]:
+        """Relocate validated frame bytes under one proven stack-address delta."""
+        if target_frame_address < 0 or target_frame_address >= 1 << 64:
+            raise ReplayEventError("Relocated x86-64 signal-frame address is invalid.")
+        if target_frame_address & 0xF != 8:
+            raise ReplayEventError(
+                f"Relocated signal frame {target_frame_address:#x} violates x86-64 stack alignment."
+            )
+        if set(target_saved_registers) != set(self.saved_registers):
+            raise ReplayEventError("Relocated signal context has an incomplete register set.")
+
+        delta = target_frame_address - self.frame_address
+        mutable = [bytearray(write.data) for write in self.writes]
+
+        def patch(recorded_address: int, data: bytes) -> None:
+            cursor = recorded_address
+            remaining = memoryview(data)
+            for index, write in enumerate(self.writes):
+                if not remaining:
+                    break
+                if write.end <= cursor:
+                    continue
+                if write.recorded_address > cursor:
+                    break
+                offset = cursor - write.recorded_address
+                take = min(len(remaining), len(write.data) - offset)
+                mutable[index][offset : offset + take] = remaining[:take]
+                remaining = remaining[take:]
+                cursor += take
+            if remaining:
+                raise ReplayEventError(
+                    f"Recorded signal frame cannot patch [{recorded_address:#x}, "
+                    f"{recorded_address + len(data):#x})."
+                )
+
+        mcontext_address = self.ucontext_address + X86_64_UCONTEXT_MCONTEXT_OFFSET
+        for register, offset in X86_64_SIGCONTEXT_REGISTER_OFFSETS.items():
+            value = target_saved_registers[register]
+            if value < 0 or value >= 1 << 64:
+                raise ReplayEventError(
+                    f"Relocated signal context register {register} is not a uint64."
+                )
+            patch(mcontext_address + offset, value.to_bytes(8, "little"))
+
+        target_fpstate_address = self.fpstate_address + delta
+        if target_fpstate_address < 0 or target_fpstate_address >= 1 << 64:
+            raise ReplayEventError("Relocated signal FP-state address is invalid.")
+        if target_fpstate_address & 0x3F:
+            raise ReplayEventError(
+                f"Relocated signal FP state {target_fpstate_address:#x} is not 64-byte aligned."
+            )
+        patch(
+            mcontext_address + X86_64_SIGCONTEXT_FPSTATE_OFFSET,
+            target_fpstate_address.to_bytes(8, "little"),
+        )
+
+        effects: list[MemoryReplayEffect] = []
+        for write, data in zip(self.writes, mutable, strict=True):
+            target_address = write.recorded_address + delta
+            if target_address < 0 or target_address + len(data) > 1 << 64:
+                raise ReplayEventError("Relocated signal-frame write wraps the address space.")
+            effects.append(MemoryReplayEffect(write.recorded_address, target_address, bytes(data)))
+        return tuple(effects)

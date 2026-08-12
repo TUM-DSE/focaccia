@@ -1896,6 +1896,20 @@
       ];
     };
 
+    relocatedX86SignalFrameCheck = mkStaticUnitCheck {
+      name = "relocated-x86-signal-frame";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_signal_replay.py"
+        "-k"
+        "signal_delivery_relocates or signal_relocation_rejects or relocated_rt_sigreturn"
+      ];
+    };
+
     nonSiginfoSignalFrameCheck = mkStaticUnitCheck {
       name = "non-siginfo-signal-frame";
       ruffTargets = [
@@ -2847,6 +2861,7 @@
       x86-nested-output-replay = x86NestedOutputReplayCheck;
       x86-signal-frame-abi = x86SignalFrameAbiCheck;
       interrupted-syscall-signal-frame = interruptedSyscallSignalFrameCheck;
+      relocated-x86-signal-frame = relocatedX86SignalFrameCheck;
       non-siginfo-signal-frame = nonSiginfoSignalFrameCheck;
       partial-x86-signal-state-replay = partialX86SignalStateReplayCheck;
       x86-signal-return = x86SignalReturnCheck;

@@ -67,6 +67,9 @@ from focaccia.qemu.x86 import (
     SYSCALL_ARGUMENT_REGISTERS as X86_64_SYSCALL_ARGUMENT_REGISTERS,
     SYSCALL_NUMBER_REGISTER as X86_64_SYSCALL_NUMBER_REGISTER,
     SYSCALL_RECORDED_RESULT_REGISTERS as X86_64_RECORDED_RESULT_REGISTERS,
+    X86_64_SIGCONTEXT_REGISTER_OFFSETS,
+    X86_64_UCONTEXT_MCONTEXT_OFFSET,
+    X86_64_UCONTEXT_OFFSET,
     X86KernelSigaction,
     X86RecordedSignalFrame,
 )
@@ -197,6 +200,9 @@ class DeliveredSignal:
     frame: RecordedSignalFrame
     action: SignalAction
     handler_pc: int
+    target_frame_address: int | None = None
+    target_saved_registers: Mapping[str, int] | None = None
+    return_saved_registers: Mapping[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +401,7 @@ class X86ReplayEngine:
 
         self._validate_pair(pre_event, post_event, policy)
         if policy.state_action is SyscallStateAction.RETURN_FROM_SIGNAL:
-            self._validate_signal_return_entry(target_state)
+            self._validate_signal_return_entry(target_state, post_event)
         writes = self._materialize_writes(post_event)
         result = _signed_u64(self._event_register(post_event, self.result_register))
         context = SyscallReplayContext(pre_event, post_event, target_state, result)
@@ -586,19 +592,40 @@ class X86ReplayEngine:
             action_uses_siginfo=bool(action.flags & X86KernelSigaction.SA_SIGINFO),
             action_restarts_syscalls=bool(action.flags & _SA_RESTART),
         )
-        if target_state.read_register("rsp") != self._event_register(pre_event, "rsp"):
-            raise ReplayReconciliationError(
-                "Signal-frame replay currently requires the target and RR stack addresses "
-                "to match exactly."
+        recorded_rsp = self._event_register(pre_event, "rsp")
+        target_rsp = target_state.read_register("rsp")
+        stack_delta = target_rsp - recorded_rsp
+        target_saved_registers: dict[str, int] = {}
+        for register in frame.saved_registers:
+            recorded = self._event_register(pre_event, register)
+            actual = target_state.read_register(register)
+            if actual == recorded:
+                target_saved_registers[register] = frame.saved_registers[register]
+                continue
+            if actual - recorded != stack_delta:
+                raise ReplayReconciliationError(
+                    f"RR event {pre_event.event_count} expects {register}={recorded:#x}, "
+                    f"target has {actual:#x}; the difference is not the proven stack "
+                    "relocation."
+                )
+            saved = frame.saved_registers[register]
+            relocated = saved + stack_delta
+            if relocated < 0 or relocated >= 1 << 64:
+                raise ReplayReconciliationError(
+                    f"Relocated saved {register} wraps the address space."
+                )
+            target_saved_registers[register] = relocated
+
+        saved_altstack_pointer = int.from_bytes(frame.altstack[:8], "little")
+        if stack_delta and (
+            action.flags & X86KernelSigaction.SA_ONSTACK or saved_altstack_pointer != 0
+        ):
+            raise UnsupportedReplayEffect(
+                "Relocated x86 signal delivery with an alternate signal stack is unsupported.",
+                event_count=pre_event.event_count,
             )
-        self._reconcile_event_registers(
-            target_state,
-            pre_event,
-            {
-                register: self._event_register(pre_event, register)
-                for register in frame.saved_registers
-            },
-        )
+        target_frame_address = frame.frame_address + stack_delta
+        frame_effects = frame.relocate(target_frame_address, target_saved_registers)
         if post_event.pc != action.handler:
             raise ReplayEventError(
                 f"Signal handler PC {post_event.pc:#x} differs from rt_sigaction handler "
@@ -624,15 +651,29 @@ class X86ReplayEngine:
         )
         target.write_signal_handler_extra_registers(handler_extra)
 
-        # All frame bytes, including siginfo, mask, reserved words, and the
-        # complete recorded FXSAVE/XSTATE area, are known before the first write.
-        for write in writes:
-            target.write_target_memory(write.recorded_address, write.data)
+        # Preserve every recorded byte, changing only validated stack-relative
+        # pointers and saved stack registers under one proven address delta.
+        for effect in frame_effects:
+            target.write_target_memory(effect.target_address, effect.data)
         target.skip(post_event.pc)
-        for register in ("rax", "rdi", "rsi", "rdx", "rsp", "rflags"):
+        for register in ("rax", "rdi", "rflags"):
             target.write_target_register(register, self._event_register(post_event, register))
+        stack_delta = target_frame_address - frame.frame_address
+        for register in ("rsi", "rdx", "rsp"):
+            target.write_target_register(
+                register,
+                self._event_register(post_event, register) + stack_delta,
+            )
 
-        self.state.signal_frames.append(DeliveredSignal(frame, action, post_event.pc))
+        self.state.signal_frames.append(
+            DeliveredSignal(
+                frame,
+                action,
+                post_event.pc,
+                target_frame_address,
+                MappingProxyType(target_saved_registers),
+            )
+        )
         signal_bit = 1 << (signal_number - 1)
         self.state.signal_mask |= action.mask & _BLOCKABLE_SIGNAL_MASK
         if action.flags & _SA_NODEFER == 0:
@@ -1299,15 +1340,62 @@ class X86ReplayEngine:
             f"Recorded outputs do not contain [{address:#x}, {address + size:#x})."
         )
 
-    def _validate_signal_return_entry(self, state: ReadableProgramState) -> None:
+    def _validate_signal_return_entry(
+        self,
+        state: ReadableProgramState,
+        post_event: SyscallEvent,
+    ) -> None:
         if not self.state.signal_frames:
             raise ReplayEventError("rt_sigreturn has no delivered signal frame.")
-        expected_rsp = self.state.signal_frames[-1].frame.frame_address + 8
+        delivered = self.state.signal_frames[-1]
+        target_frame_address = (
+            delivered.target_frame_address
+            if delivered.target_frame_address is not None
+            else delivered.frame.frame_address
+        )
+        expected_rsp = target_frame_address + 8
         actual_rsp = state.read_register("rsp")
         if actual_rsp != expected_rsp:
             raise ReplayEventError(
                 f"rt_sigreturn RSP is {actual_rsp:#x}, expected {expected_rsp:#x}."
             )
+
+        stack_delta = target_frame_address - delivered.frame.frame_address
+        mcontext_address = (
+            target_frame_address + X86_64_UCONTEXT_OFFSET + X86_64_UCONTEXT_MCONTEXT_OFFSET
+        )
+        return_saved: dict[str, int] = {}
+        for register, offset in X86_64_SIGCONTEXT_REGISTER_OFFSETS.items():
+            actual = int.from_bytes(state.read_memory(mcontext_address + offset, 8), "little")
+            recorded = self._event_register(post_event, register)
+            initial_recorded = delivered.frame.saved_registers[register]
+            initial_target = (
+                delivered.target_saved_registers.get(register)
+                if delivered.target_saved_registers is not None
+                else initial_recorded
+            )
+            if recorded == initial_recorded:
+                accepted = (initial_target,)
+            elif register == "rsp" and initial_target != initial_recorded and stack_delta:
+                relocated = recorded + stack_delta
+                accepted = (relocated,) if 0 <= relocated < 1 << 64 else ()
+            else:
+                accepted = (recorded,)
+            if actual not in accepted:
+                encoded = " or ".join(f"{value:#x}" for value in accepted)
+                raise ReplayReconciliationError(
+                    f"RR event {post_event.event_count} expects signal-frame "
+                    f"{register}={encoded}, target frame has {actual:#x}."
+                )
+            return_saved[register] = actual
+        self.state.signal_frames[-1] = DeliveredSignal(
+            delivered.frame,
+            delivered.action,
+            delivered.handler_pc,
+            delivered.target_frame_address,
+            delivered.target_saved_registers,
+            MappingProxyType(return_saved),
+        )
 
     def _finish_signal_return(
         self,
@@ -1318,8 +1406,15 @@ class X86ReplayEngine:
             raise ReplayEventError("rt_sigreturn has no delivered signal frame.")
         delivered = self.state.signal_frames[-1]
         # The syscall-entry RSP was checked before execution. Checking the
-        # complete restored GPR set proves that QEMU consumed this exact frame.
-        self._reconcile_event_registers(state, post_event, _X86_GPRS)
+        # complete restored GPR set under the same delivery-time mapping proves
+        # that QEMU consumed this exact, possibly handler-modified frame.
+        if delivered.return_saved_registers is None:
+            raise ReplayEventError("rt_sigreturn frame was not validated before execution.")
+        self._reconcile_event_registers(
+            state,
+            post_event,
+            delivered.return_saved_registers,
+        )
         self.state.signal_frames.pop()
         self.state.signal_mask = delivered.frame.signal_mask
         self.state.altstack = delivered.frame.altstack
