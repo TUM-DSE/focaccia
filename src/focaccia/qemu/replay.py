@@ -427,7 +427,14 @@ class X86ReplayEngine:
                     f"System call {policy.name} terminated the target unexpectedly."
                 )
             control_effects = self._recorded_execution_control_effects(post_event)
-            if policy.reconcile is ReconcileMode.APPLY_RECORDED:
+            apply_recorded = policy.reconcile is ReconcileMode.APPLY_RECORDED or (
+                policy.reconcile is ReconcileMode.APPLY_RECORDED_ON_ZERO_ARGUMENT
+                and context.target_state.read_register(
+                    self.syscall_argument_registers[0]
+                )
+                == 0
+            )
+            if apply_recorded:
                 self._reconcile_execution_boundary(state, post_event)
                 self._apply_recorded_effects(
                     target,

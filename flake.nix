@@ -1745,6 +1745,21 @@
       ];
     };
 
+    translatedInitialBrkQueryCheck = mkStaticUnitCheck {
+      name = "translated-initial-brk-query";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/syscall.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "brk_zero_query_applies_recorded_address"
+      ];
+    };
+
     recordedSyscallClobberReplayCheck = mkStaticUnitCheck {
       name = "recorded-syscall-clobber-replay";
       ruffTargets = [
@@ -2580,6 +2595,7 @@
       recorded-fcntl-replay = recordedFcntlReplayCheck;
       recorded-tiocgwinsz-replay = recordedTiocgwinszReplayCheck;
       qemu-syscall-post-boundary = qemuSyscallPostBoundaryCheck;
+      translated-initial-brk-query = translatedInitialBrkQueryCheck;
       recorded-syscall-clobber-replay = recordedSyscallClobberReplayCheck;
       recorded-arch-prctl-replay = recordedArchPrctlReplayCheck;
       x86-replay-fail-closed = x86ReplayFailClosedCheck;

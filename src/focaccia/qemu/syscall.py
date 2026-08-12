@@ -72,6 +72,7 @@ class ReconcileMode(str, Enum):
 
     EXACT = "exact"
     APPLY_RECORDED = "apply-recorded"
+    APPLY_RECORDED_ON_ZERO_ARGUMENT = "apply-recorded-on-zero-argument"
 
 
 class SyscallStateAction(str, Enum):

@@ -186,6 +186,7 @@ _POLICIES: dict[int, SyscallPolicy] = {
         12,
         "brk",
         state_action=SyscallStateAction.MEMORY_MAPPING,
+        reconcile=ReconcileMode.APPLY_RECORDED_ON_ZERO_ARGUMENT,
         execution_arguments=("rdi",),
     ),
     13: _direct(

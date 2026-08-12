@@ -395,6 +395,44 @@ def test_anonymous_mmap_executes_and_reconciles_exact_result():
     assert engine.coverage_report().by_strategy[ReplayStrategy.EXECUTE_RECONCILE] == 1
 
 
+def test_brk_zero_query_applies_recorded_address_but_nonzero_growth_remains_exact():
+    pre, post = make_syscall_pair(
+        12,
+        arguments={"rdi": 0},
+        result=0x33CC6000,
+    )
+
+    def query(target: FakeReplayTarget) -> ReadableProgramState:
+        state = install_post_state(target, post)
+        target.state.write_register("rax", 0x45D000)
+        return state
+
+    target = make_target_for_event(pre, execute=query)
+    state = X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+    assert target.steps == 1
+    assert state.read_register("rax") == 0x33CC6000
+
+    grow_pre, grow_post = make_syscall_pair(
+        12,
+        arguments={"rdi": 0x33CC8000},
+        result=0x33CC8000,
+    )
+
+    def grow(target: FakeReplayTarget) -> ReadableProgramState:
+        state = install_post_state(target, grow_post)
+        target.state.write_register("rax", 0x45F000)
+        return state
+
+    grow_target = make_target_for_event(grow_pre, execute=grow)
+    with pytest.raises(ReplayReconciliationError, match="expects rax"):
+        X86ReplayEngine(grow_target.arch).replay_syscall(
+            grow_target,
+            grow_pre,
+            grow_post,
+        )
+
+
 def test_executed_syscall_applies_recorded_rcx_and_r11_control_effects():
     pre, post = make_syscall_pair(
         12,
