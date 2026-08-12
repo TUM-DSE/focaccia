@@ -52,9 +52,11 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     :raise MemoryAccessError: If the concrete state does not contain memory
                               that is referenced by the symbolic expression.
     """
+
     class ConcreteStateWrapper(MiasmSymbolResolver):
         """Extend the state resolver with assumptions about the expressions
         that may be resolved with `eval_symbol`."""
+
         def __init__(self, conc_state: ReadableProgramState):
             super().__init__(conc_state, LocationDB())
 
@@ -65,8 +67,9 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
             return self._state.read_memory(addr, size)
 
         def resolve_location(self, loc):
-            raise ValueError('[In eval_symbol]: Unable to evaluate symbols'
-                             ' that contain IR location expressions.')
+            raise ValueError(
+                "[In eval_symbol]: Unable to evaluate symbols that contain IR location expressions."
+            )
 
     res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
 
@@ -75,17 +78,17 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     # ConcreteStateWrapper
     if not isinstance(res, ExprInt):
         raise SymbolEvaluationError(
-            f'Expression {symbol} remains unresolved as {res}; a concrete value is required.'
+            f"Expression {symbol} remains unresolved as {res}; a concrete value is required."
         )
     return int(res)
 
+
 class Instruction:
     """An instruction."""
-    def __init__(self,
-                 instr: miasm_instr,
-                 machine: Machine,
-                 arch: Arch,
-                 loc_db: LocationDB | None = None):
+
+    def __init__(
+        self, instr: miasm_instr, machine: Machine, arch: Arch, loc_db: LocationDB | None = None
+    ):
         self.arch = arch
         self.machine = machine
 
@@ -94,8 +97,8 @@ class Instruction:
         self.instr: miasm_instr = instr
         """The underlying Miasm instruction object."""
 
-        assert(instr.offset is not None)
-        assert(instr.l is not None)
+        assert instr.offset is not None
+        assert instr.l is not None
         self.addr: int = instr.offset
         self.length: int = instr.l
 
@@ -103,14 +106,14 @@ class Instruction:
     def from_bytecode(asm: bytes, arch: Arch) -> Instruction:
         """Disassemble an instruction."""
         machine = make_machine(arch)
-        assert(machine.mn is not None)
+        assert machine.mn is not None
         _instr = machine.mn.dis(asm, arch.ptr_size)
         return Instruction(_instr, machine, arch, None)
 
     @staticmethod
     def from_string(s: str, arch: Arch, offset: int = 0, length: int = 0) -> Instruction:
         machine = make_machine(arch)
-        assert(machine.mn is not None)
+        assert machine.mn is not None
         _instr = machine.mn.fromstring(s, LocationDB(), arch.ptr_size)
         _instr.offset = offset
         _instr.l = length
@@ -118,7 +121,7 @@ class Instruction:
 
     def to_bytecode(self) -> bytes:
         """Assemble the instruction to byte code."""
-        assert(self.machine.mn is not None)
+        assert self.machine.mn is not None
         return self.machine.mn.asm(self.instr)[0]
 
     def to_string(self) -> str:
@@ -153,7 +156,7 @@ class MemoryWrite:
 
     def __post_init__(self) -> None:
         if self.value.size <= 0 or self.value.size % 8 != 0:
-            raise ValueError('Symbolic memory writes must contain whole bytes.')
+            raise ValueError("Symbolic memory writes must contain whole bytes.")
 
     @property
     def size_bytes(self) -> int:
@@ -165,10 +168,10 @@ class MemoryWrite:
 
 
 GapReason = Literal[
-    'disassembly-error',
-    'symbolic-timeout',
-    'unsupported-semantics',
-    'cross-validation-error',
+    "disassembly-error",
+    "symbolic-timeout",
+    "unsupported-semantics",
+    "cross-validation-error",
 ]
 
 
@@ -193,16 +196,16 @@ class TraceGap:
         recorded_cause_type: str | None = None,
     ):
         if from_addr < 0 or to_addr < 0:
-            raise ValueError('Trace-gap addresses must be non-negative.')
+            raise ValueError("Trace-gap addresses must be non-negative.")
         if reason not in {
-            'disassembly-error',
-            'symbolic-timeout',
-            'unsupported-semantics',
-            'cross-validation-error',
+            "disassembly-error",
+            "symbolic-timeout",
+            "unsupported-semantics",
+            "cross-validation-error",
         }:
-            raise ValueError(f'Unsupported trace-gap reason: {reason}.')
+            raise ValueError(f"Unsupported trace-gap reason: {reason}.")
         if not message:
-            raise ValueError('A trace gap requires a diagnostic message.')
+            raise ValueError("A trace gap requires a diagnostic message.")
         self.tid = tid
         self.arch = arch
         self.addr = from_addr
@@ -222,25 +225,25 @@ class TraceGap:
         if self.cause is None:
             return self._recorded_cause_type
         cls = type(self.cause)
-        return f'{cls.__module__}.{cls.__qualname__}'
+        return f"{cls.__module__}.{cls.__qualname__}"
 
     def __repr__(self) -> str:
         start, end = self.range
-        return (
-            f'Trace gap [{self.tid}] {hex(start)} -> {hex(end)} '
-            f'({self.reason}): {self.message}'
-        )
+        return f"Trace gap [{self.tid}] {hex(start)} -> {hex(end)} ({self.reason}): {self.message}"
 
 
 class SymbolicTransform:
     """A symbolic transformation mapping one program state to another."""
-    def __init__(self,
-                 tid: int, 
-                 transform: dict[Expr, Expr],
-                 instrs: list[Instruction],
-                 arch: Arch,
-                 from_addr: int,
-                 to_addr: int):
+
+    def __init__(
+        self,
+        tid: int,
+        transform: dict[Expr, Expr],
+        instrs: list[Instruction],
+        arch: Arch,
+        from_addr: int,
+        to_addr: int,
+    ):
         """
         :param tid: The thread ID that executed the instructions effecting the transformation.
         :param transform: A map of input symbolic expressions and output symbolic expressions.
@@ -278,32 +281,32 @@ class SymbolicTransform:
         """The sequence of instructions that comprise this transformation."""
 
         for dst, expr in transform.items():
-            assert(isinstance(dst, ExprMem) or isinstance(dst, ExprId))
+            assert isinstance(dst, ExprMem) or isinstance(dst, ExprId)
 
             if isinstance(dst, ExprMem):
                 if dst.ptr.size != arch.ptr_size:
                     raise ValueError(
-                        f'Memory address has width {dst.ptr.size}, expected {arch.ptr_size}.'
+                        f"Memory address has width {dst.ptr.size}, expected {arch.ptr_size}."
                     )
                 if dst.size != expr.size or expr.size % 8 != 0:
-                    raise ValueError('Memory destination and value widths must match in bytes.')
+                    raise ValueError("Memory destination and value widths must match in bytes.")
                 self.memory_writes.append(MemoryWrite(dst.ptr, expr))
             else:
-                assert(isinstance(dst, ExprId))
+                assert isinstance(dst, ExprId)
                 regname = arch.to_regname(dst.name)
                 if regname is None:
-                    if isinstance(dst.name, str) and dst.name.upper() == 'IRDST':
+                    if isinstance(dst.name, str) and dst.name.upper() == "IRDST":
                         continue
                     raise SymbolicCompositionError(
-                        f'Unsupported symbolic destination {dst.name!r}.'
+                        f"Unsupported symbolic destination {dst.name!r}."
                     )
                 if arch.is_constant_register(regname):
                     continue
                 accessor = arch.get_reg_accessor(regname)
                 if accessor is None or accessor.num_bits != expr.size:
                     raise ValueError(
-                        f'Expression width for {regname} is {expr.size}, '
-                        f'expected {accessor.num_bits if accessor else "unknown"}.'
+                        f"Expression width for {regname} is {expr.size}, "
+                        f"expected {accessor.num_bits if accessor else 'unknown'}."
                     )
                 self.changed_regs[regname] = expr
 
@@ -334,11 +337,16 @@ class SymbolicTransform:
         class RegisterCollector(MiasmSymbolResolver):
             def __init__(self, arch: Arch):
                 self._arch = arch  # MiasmSymbolResolver needs this
+
             def resolve_register(self, regname: str) -> int | None:
                 accessed_regs.add(self._miasm_to_regname(regname))
                 return None
-            def resolve_memory(self, addr: int, size: int): pass
-            def resolve_location(self, loc): assert(False)
+
+            def resolve_memory(self, addr: int, size: int):
+                pass
+
+            def resolve_location(self, loc):
+                assert False
 
         resolver = RegisterCollector(self.arch)
         for expr in self.canonical_register_outputs().values():
@@ -355,8 +363,7 @@ class SymbolicTransform:
         :return: A list of memory access expressions.
         """
         from typing import Callable
-        from miasm.expression.expression import ExprLoc, ExprSlice, ExprCond, \
-                                                ExprOp, ExprCompose
+        from miasm.expression.expression import ExprLoc, ExprSlice, ExprCond, ExprOp, ExprCompose
 
         accessed_mem = set[ExprMem]()
 
@@ -364,25 +371,28 @@ class SymbolicTransform:
             def _eval_exprmem(expr: ExprMem):
                 accessed_mem.add(expr)  # <-- this is the only important line!
                 _eval(expr.ptr)
+
             def _eval_exprcond(expr: ExprCond):
                 _eval(expr.cond)
                 _eval(expr.src1)
                 _eval(expr.src2)
+
             def _eval_exprop(expr: ExprOp):
                 for arg in expr.args:
                     _eval(arg)
+
             def _eval_exprcompose(expr: ExprCompose):
                 for arg in expr.args:
                     _eval(arg)
 
             expr_to_visitor: dict[type[Expr], Callable] = {
-                ExprInt:     lambda e: e,
-                ExprId:      lambda e: e,
-                ExprLoc:     lambda e: e,
-                ExprMem:     _eval_exprmem,
-                ExprSlice:   lambda e: _eval(e.arg),
-                ExprCond:    _eval_exprcond,
-                ExprOp:      _eval_exprop,
+                ExprInt: lambda e: e,
+                ExprId: lambda e: e,
+                ExprLoc: lambda e: e,
+                ExprMem: _eval_exprmem,
+                ExprSlice: lambda e: _eval(e.arg),
+                ExprCond: _eval_exprcond,
+                ExprOp: _eval_exprop,
                 ExprCompose: _eval_exprcompose,
             }
             visitor = expr_to_visitor[expr.__class__]
@@ -411,14 +421,13 @@ class SymbolicTransform:
             accessor = self.arch.get_reg_accessor(regname)
             if accessor is None:
                 raise SymbolicCompositionError(
-                    f'Missing accessor for symbolic destination {regname}.'
+                    f"Missing accessor for symbolic destination {regname}."
                 )
             if self.arch.register_write_zero_extends(regname):
                 zero_extended_bases.add(accessor.base_reg)
 
         outputs: dict[str, Expr] = {
-            base_reg: canonical_outputs[base_reg]
-            for base_reg in zero_extended_bases
+            base_reg: canonical_outputs[base_reg] for base_reg in zero_extended_bases
         }
         for regname, expression in self.changed_regs.items():
             accessor = self.arch.get_reg_accessor(regname)
@@ -439,8 +448,7 @@ class SymbolicTransform:
             result[regname] = eval_symbol(expression, conc_state)
         return result
 
-    def eval_register_transforms(self, conc_state: ReadableProgramState) \
-            -> dict[str, int]:
+    def eval_register_transforms(self, conc_state: ReadableProgramState) -> dict[str, int]:
         """Calculate register transformations when applied to a concrete state.
 
         :param conc_state: A concrete program state that serves as the input
@@ -458,8 +466,7 @@ class SymbolicTransform:
             res[regname] = eval_symbol(expr, conc_state)
         return res
 
-    def eval_memory_transforms(self, conc_state: ReadableProgramState) \
-            -> dict[int, bytes]:
+    def eval_memory_transforms(self, conc_state: ReadableProgramState) -> dict[int, bytes]:
         """Calculate memory transformations when applied to a concrete state.
 
         :param conc_state: A concrete program state that serves as the input
@@ -510,35 +517,36 @@ class SymbolicTransform:
                 return Instruction.from_string(text, arch, offset=0, length=length)
             except Exception as err:
                 # Note: from None disables chaining in traceback
-                raise ValueError(f'[In SymbolicTransform.from_json] Unable to parse'
-                                 f' instruction string "{text}": {err}.') from None
+                raise ValueError(
+                    f"[In SymbolicTransform.from_json] Unable to parse"
+                    f' instruction string "{text}": {err}.'
+                ) from None
 
-        tid = int(data['tid'])
-        arch = supported_architectures[data['arch']]
-        start_addr = int(data['from_addr'])
-        end_addr = int(data['to_addr'])
+        tid = int(data["tid"])
+        arch = supported_architectures[data["arch"]]
+        start_addr = int(data["from_addr"])
+        end_addr = int(data["to_addr"])
 
         t = SymbolicTransform(tid, {}, [], arch, start_addr, end_addr)
-        for name, encoded_expression in data['regs'].items():
+        for name, encoded_expression in data["regs"].items():
             canonical = arch.to_regname(name)
             if canonical is None or arch.is_constant_register(canonical):
-                raise ValueError(f'Unsupported symbolic destination {name!r}.')
+                raise ValueError(f"Unsupported symbolic destination {name!r}.")
             expression = parse(encoded_expression)
             accessor = arch.get_reg_accessor(canonical)
             if accessor is None or expression.size != accessor.num_bits:
-                raise ValueError(f'Invalid expression width for register {canonical}.')
+                raise ValueError(f"Invalid expression width for register {canonical}.")
             t.changed_regs[canonical] = expression
-        if 'memory_writes' in data:
+        if "memory_writes" in data:
             t.memory_writes = [
-                MemoryWrite(parse(write['address']), parse(write['value']))
-                for write in data['memory_writes']
+                MemoryWrite(parse(write["address"]), parse(write["value"]))
+                for write in data["memory_writes"]
             ]
         else:
             t.memory_writes = [
-                MemoryWrite(parse(addr), parse(val))
-                for addr, val in data['mem'].items()
+                MemoryWrite(parse(addr), parse(val)) for addr, val in data["mem"].items()
             ]
-        instrs = [decode_inst(b, arch) for b in data['instructions']]
+        instrs = [decode_inst(b, arch) for b in data["instructions"]]
         t.instructions = [inst for inst in instrs if inst is not None]
 
         # Recover the instructions' address information
@@ -551,40 +559,42 @@ class SymbolicTransform:
 
     def to_json(self) -> dict:
         """Serialize a symbolic transformation as a JSON object."""
+
         def encode_inst(inst: Instruction):
             try:
                 return [inst.length, inst.to_string()]
             except Exception as err:
                 # Note: from None disables chaining in traceback
-                raise Exception(f'[In SymbolicTransform.to_json] Unable to serialize'
-                                f' "{inst}" as string: {err}') from None
+                raise Exception(
+                    f'[In SymbolicTransform.to_json] Unable to serialize "{inst}" as string: {err}'
+                ) from None
 
         instrs = [encode_inst(inst) for inst in self.instructions]
         instrs = [inst for inst in instrs if inst is not None]
         return {
-            'arch': self.arch.serialized_name,
-            'tid': self.tid,
-            'from_addr': self.range[0],
-            'to_addr': self.range[1],
-            'instructions': instrs,
-            'regs': { name: repr(expr) for name, expr in self.changed_regs.items() },
-            'memory_writes': [
-                {'address': repr(write.address), 'value': repr(write.value)}
+            "arch": self.arch.serialized_name,
+            "tid": self.tid,
+            "from_addr": self.range[0],
+            "to_addr": self.range[1],
+            "instructions": instrs,
+            "regs": {name: repr(expr) for name, expr in self.changed_regs.items()},
+            "memory_writes": [
+                {"address": repr(write.address), "value": repr(write.value)}
                 for write in self.memory_writes
             ],
         }
 
     def __repr__(self) -> str:
         start, end = self.range
-        res = f'Symbolic state transformation [{self.tid}] {start} -> {end}:\n'
-        res += '  [Symbols]\n'
+        res = f"Symbolic state transformation [{self.tid}] {start} -> {end}:\n"
+        res += "  [Symbols]\n"
         for reg, expr in self.changed_regs.items():
-            res += f'    {reg:6s} = {expr}\n'
+            res += f"    {reg:6s} = {expr}\n"
         for write in self.memory_writes:
-            res += f'    {write.destination} = {write.value}\n'
-        res += '  [Instructions]\n'
+            res += f"    {write.destination} = {write.value}\n"
+        res += "  [Instructions]\n"
         for inst in self.instructions:
-            res += f'    {inst}\n'
+            res += f"    {inst}\n"
 
         return res[:-1]  # Remove trailing newline
 
@@ -601,7 +611,7 @@ class _SymbolicState:
         for base_reg in sorted(arch.regnames):
             accessor = arch.get_reg_accessor(base_reg)
             if accessor is None:
-                raise SymbolicCompositionError(f'Missing accessor for {base_reg}.')
+                raise SymbolicCompositionError(f"Missing accessor for {base_reg}.")
             registers[base_reg] = ExprId(base_reg, accessor.num_bits)
         return cls(arch, registers, [])
 
@@ -616,7 +626,7 @@ def _pointer_with_offset(pointer: Expr, offset: int) -> Expr:
 def _constant_address_delta(left: Expr, right: Expr) -> int | None:
     if left.size != right.size:
         raise SymbolicCompositionError(
-            f'Cannot compare {left.size}- and {right.size}-bit memory addresses.'
+            f"Cannot compare {left.size}- and {right.size}-bit memory addresses."
         )
     difference = expr_simp(left - right)
     if not isinstance(difference, ExprInt):
@@ -629,15 +639,15 @@ def _constant_address_delta(left: Expr, right: Expr) -> int | None:
 def _memory_value_byte(write: MemoryWrite, offset: int, endianness: Arch.Endianness) -> Expr:
     if not 0 <= offset < write.size_bytes:
         raise IndexError(offset)
-    value_index = offset if endianness == 'little' else write.size_bytes - offset - 1
+    value_index = offset if endianness == "little" else write.size_bytes - offset - 1
     start = value_index * 8
     return expr_simp(ExprSlice(write.value, start, start + 8))
 
 
 def _assemble_memory_bytes(values: list[Expr], endianness: Arch.Endianness) -> Expr:
     if not values:
-        raise SymbolicCompositionError('Cannot assemble an empty memory read.')
-    significance_order = values if endianness == 'little' else list(reversed(values))
+        raise SymbolicCompositionError("Cannot assemble an empty memory read.")
+    significance_order = values if endianness == "little" else list(reversed(values))
     if len(significance_order) == 1:
         return significance_order[0]
     return expr_simp(ExprCompose(*significance_order))
@@ -649,9 +659,7 @@ def _read_symbolic_memory(
     state: _SymbolicState,
 ) -> Expr:
     if size_bits <= 0 or size_bits % 8 != 0:
-        raise SymbolicCompositionError(
-            f'Symbolic memory read has non-byte width {size_bits}.'
-        )
+        raise SymbolicCompositionError(f"Symbolic memory read has non-byte width {size_bits}.")
 
     values: list[Expr] = []
     for load_offset in range(size_bits // 8):
@@ -666,7 +674,7 @@ def _read_symbolic_memory(
 
             for write_offset in range(write.size_bytes):
                 write_address = _pointer_with_offset(write.address, write_offset)
-                condition = ExprOp('==', load_address, write_address)
+                condition = ExprOp("==", load_address, write_address)
                 forwarded = _memory_value_byte(write, write_offset, state.arch.endianness)
                 value = expr_simp(ExprCond(condition, forwarded, value))
         values.append(value)
@@ -681,22 +689,22 @@ def _read_symbolic_register(identifier: ExprId, state: _SymbolicState) -> Expr:
         return identifier
     accessor = state.arch.get_reg_accessor(canonical)
     if accessor is None:
-        raise SymbolicCompositionError(f'Missing accessor for symbolic register {canonical}.')
+        raise SymbolicCompositionError(f"Missing accessor for symbolic register {canonical}.")
     if accessor.num_bits != identifier.size:
         raise SymbolicCompositionError(
-            f'Symbolic register {identifier.name} has width {identifier.size}, '
-            f'expected {accessor.num_bits}.'
+            f"Symbolic register {identifier.name} has width {identifier.size}, "
+            f"expected {accessor.num_bits}."
         )
     if state.arch.is_constant_register(canonical):
         value = state.arch.get_constant_register_value(canonical)
         if value is None:
-            raise SymbolicCompositionError(f'Missing constant value for {canonical}.')
+            raise SymbolicCompositionError(f"Missing constant value for {canonical}.")
         return ExprInt(value, accessor.num_bits)
 
     base = state.registers.get(accessor.base_reg)
     if base is None:
         raise SymbolicCompositionError(
-            f'Missing symbolic base register {accessor.base_reg} for {identifier.name}.'
+            f"Missing symbolic base register {accessor.base_reg} for {identifier.name}."
         )
     if accessor.start == 0 and accessor.end == base.size:
         return base
@@ -734,7 +742,7 @@ def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Exp
             ExprCompose(*(_rewrite_symbolic_expression(arg, state) for arg in expression.args))
         )
     raise SymbolicCompositionError(
-        f'Unsupported symbolic expression class {type(expression).__name__}.'
+        f"Unsupported symbolic expression class {type(expression).__name__}."
     )
 
 
@@ -747,8 +755,7 @@ def _write_symbolic_register(
 ) -> Expr:
     if value.size != accessor.num_bits:
         raise SymbolicCompositionError(
-            f'Register write to {accessor} has {value.size} bits, '
-            f'expected {accessor.num_bits}.'
+            f"Register write to {accessor} has {value.size} bits, expected {accessor.num_bits}."
         )
     if accessor.start == 0 and accessor.end == current.size:
         return value
@@ -766,20 +773,24 @@ def _write_symbolic_register(
 
 
 def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransform) -> None:
-    before = _SymbolicState(state.arch, state.registers.copy(), list(state.memory_writes))
+    # Register outputs within one transform are simultaneous, so they need a
+    # snapshot of the incoming register map. Memory writes are appended only
+    # after every expression has been rewritten and can therefore share the
+    # incoming ordered-write list without copying its complete history.
+    before = _SymbolicState(state.arch, state.registers.copy(), state.memory_writes)
     register_updates: list[tuple[str, RegisterAccessor, Expr]] = []
     written_masks: dict[str, int] = {}
     for regname, expression in transform.changed_regs.items():
         canonical = state.arch.to_regname(regname)
         if canonical is None:
-            raise SymbolicCompositionError(f'Unknown symbolic destination register {regname}.')
+            raise SymbolicCompositionError(f"Unknown symbolic destination register {regname}.")
         accessor = state.arch.get_reg_accessor(canonical)
         if accessor is None:
-            raise SymbolicCompositionError(f'Missing accessor for {canonical}.')
+            raise SymbolicCompositionError(f"Missing accessor for {canonical}.")
         previous_mask = written_masks.get(accessor.base_reg, 0)
         if previous_mask & accessor.mask:
             raise SymbolicCompositionError(
-                f'Transform has overlapping writes to {accessor.base_reg}.'
+                f"Transform has overlapping writes to {accessor.base_reg}."
             )
         written_masks[accessor.base_reg] = previous_mask | accessor.mask
         register_updates.append(
@@ -816,43 +827,63 @@ def _canonical_register_outputs(transform: SymbolicTransform) -> dict[str, Expr]
     }
 
 
+class SymbolicTransformComposer:
+    """Incrementally compose a contiguous transform sequence in one symbolic state."""
+
+    def __init__(self, first: SymbolicTransform):
+        self._arch = first.arch
+        self._tid = first.tid
+        self._start = first.range[0]
+        self._end = first.range[0]
+        self._state = _SymbolicState.identity(first.arch)
+        self._instructions: list[Instruction] = []
+        self.append(first)
+
+    def append(self, transform: SymbolicTransform) -> None:
+        if self._arch != transform.arch:
+            raise SymbolicCompositionError(
+                f"Cannot compose architectures {self._arch} and {transform.arch}."
+            )
+        if self._tid != transform.tid:
+            raise SymbolicCompositionError(
+                f"Cannot compose thread {self._tid} with thread {transform.tid}."
+            )
+        if self._end != transform.range[0]:
+            previous_range = (self._start, self._end)
+            raise SymbolicCompositionError(
+                f"Cannot compose discontinuous ranges {previous_range!r} and {transform.range!r}."
+            )
+
+        _apply_symbolic_transform(self._state, transform)
+        self._instructions.extend(transform.instructions)
+        self._end = transform.range[1]
+
+    def finish(self) -> SymbolicTransform:
+        result = SymbolicTransform(
+            self._tid,
+            {},
+            list(self._instructions),
+            self._arch,
+            self._start,
+            self._end,
+        )
+        identity = _SymbolicState.identity(self._arch)
+        result.changed_regs = {
+            base_reg: expression
+            for base_reg, expression in self._state.registers.items()
+            if expression != identity.registers[base_reg]
+        }
+        result.memory_writes = list(self._state.memory_writes)
+        return result
+
+
 def _compose_symbolic_transforms(
     first: SymbolicTransform,
     second: SymbolicTransform,
 ) -> SymbolicTransform:
-    if first.arch != second.arch:
-        raise SymbolicCompositionError(
-            f'Cannot compose architectures {first.arch} and {second.arch}.'
-        )
-    if first.tid != second.tid:
-        raise SymbolicCompositionError(
-            f'Cannot compose thread {first.tid} with thread {second.tid}.'
-        )
-    if first.range[1] != second.range[0]:
-        raise SymbolicCompositionError(
-            f'Cannot compose discontinuous ranges {first.range!r} and {second.range!r}.'
-        )
-
-    state = _SymbolicState.identity(first.arch)
-    _apply_symbolic_transform(state, first)
-    _apply_symbolic_transform(state, second)
-
-    result = SymbolicTransform(
-        first.tid,
-        {},
-        [*first.instructions, *second.instructions],
-        first.arch,
-        first.range[0],
-        second.range[1],
-    )
-    identity = _SymbolicState.identity(first.arch)
-    result.changed_regs = {
-        base_reg: expression
-        for base_reg, expression in state.registers.items()
-        if expression != identity.registers[base_reg]
-    }
-    result.memory_writes = list(state.memory_writes)
-    return result
+    composer = SymbolicTransformComposer(first)
+    composer.append(second)
+    return composer.finish()
 
 
 SymbolicTraceItem = SymbolicTransform | TraceGap
@@ -861,16 +892,18 @@ SymbolicTraceItem = SymbolicTransform | TraceGap
 class MemoryBinstream:
     """A binary stream interface that reads bytes from a program state's
     memory."""
+
     def __init__(self, state: ReadableProgramState):
         self._state = state
 
     def __len__(self):
-        return 0xffffffff
+        return 0xFFFFFFFF
 
     def __getitem__(self, key: int | slice):
         if isinstance(key, slice):
             return self._state.read_instructions(key.start, key.stop - key.start)
         return self._state.read_instructions(key, 1)
+
 
 class DisassemblyContext:
     def __init__(self, target: ReadableProgramState):
@@ -881,7 +914,7 @@ class DisassemblyContext:
         self.arch = target.arch
 
         # Create disassembly/lifting context
-        assert(self.machine.dis_engine is not None)
+        assert self.machine.dis_engine is not None
         binstream = MemoryBinstream(target)
         self.mdis = self.machine.dis_engine(binstream, loc_db=self.loc_db)
         self.mdis.follow_call = True
@@ -894,15 +927,13 @@ class DisassemblyContext:
             # Miasm's dis_instr indexes block.lines[0] when decoding produced
             # an empty block. Normalize that dependency failure at its direct
             # boundary so callers can attempt another disassembler.
-            raise Disasm_Exception(
-                f'Miasm decoded no instruction at {hex(address)}.'
-            ) from err
+            raise Disasm_Exception(f"Miasm decoded no instruction at {hex(address)}.") from err
         return Instruction(miasm_instr, self.machine, self.arch, self.loc_db)
 
-def run_instruction(instr: miasm_instr,
-                    conc_state: MiasmSymbolResolver,
-                    lifter: Lifter) \
-        -> tuple[ExprInt | None, dict[Expr, Expr]]:
+
+def run_instruction(
+    instr: miasm_instr, conc_state: MiasmSymbolResolver, lifter: Lifter
+) -> tuple[ExprInt | None, dict[Expr, Expr]]:
     """Compute the symbolic equation of a single instruction.
 
     The concolic engine tries to express the instruction's equation as
@@ -988,7 +1019,7 @@ def run_instruction(instr: miasm_instr,
                 # conditional states based on the possible outcomes.
                 if not isinstance(new_pc, ExprCond):
                     raise SymbolEvaluationError(
-                        f'Conditional program counter has invalid type {type(new_pc)!r}.'
+                        f"Conditional program counter has invalid type {type(new_pc)!r}."
                     )
                 cond = new_pc.cond
                 pc_iftrue, pc_iffalse = new_pc.src1, new_pc.src2
@@ -1008,9 +1039,7 @@ def run_instruction(instr: miasm_instr,
                 seen_locs.clear()
 
         if not isinstance(new_pc, ExprInt):
-            raise SymbolEvaluationError(
-                f'Program counter remains unresolved as {new_pc!r}.'
-            )
+            raise SymbolEvaluationError(f"Program counter remains unresolved as {new_pc!r}.")
         return new_pc, modified
 
     # Lift and execute the instruction through one typed unsupported boundary.
@@ -1019,16 +1048,13 @@ def run_instruction(instr: miasm_instr,
         loc = lifter.add_instr_to_ircfg(instr, ircfg, None, False)
         if not isinstance(loc, (Expr, LocKey)):
             raise UnsupportedInstructionError(
-                f'Lifter returned an invalid location for {instr}: {loc!r}.'
+                f"Lifter returned an invalid location for {instr}: {loc!r}."
             )
         new_pc, modified = execute_location(loc)
     except UnsupportedInstructionError:
         raise
     except NotImplementedError as err:
-        raise UnsupportedInstructionError(
-            f'Unable to execute instruction {instr}: {err}'
-        ) from err
+        raise UnsupportedInstructionError(f"Unable to execute instruction {instr}: {err}") from err
 
     modified[lifter.pc] = new_pc  # Add PC update to state
     return new_pc, modified
-

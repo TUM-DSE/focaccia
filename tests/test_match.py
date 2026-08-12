@@ -1,9 +1,11 @@
+from typing import cast
+
 from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch import aarch64, x86
 from focaccia.match import TransitionMatcher, fold_traces, match_traces, match_transitions
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicTransform
+from focaccia.symbolic import Instruction, SymbolicTransform, SymbolicTransformComposer
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 
@@ -194,6 +196,47 @@ def test_indexed_terminal_destination_composes_and_verifies_full_suffix():
     assert stream.position == len(transforms)
     assert stream.exhausted
     assert result.complete
+
+
+def test_large_terminal_cutpoint_uses_one_incremental_composer(monkeypatch):
+    transforms = tuple(
+        changing_transform(
+            0x1000 + index,
+            0x1001 + index,
+            "RAX",
+            index,
+        )
+        for index in range(2_000)
+    )
+    instruction_markers = [cast(Instruction, object()) for _ in transforms]
+    for item, marker in zip(transforms, instruction_markers, strict=True):
+        item.instructions = [marker]
+    append_calls = 0
+    original_append = SymbolicTransformComposer.append
+
+    def counted_append(self, item):
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(self, item)
+
+    monkeypatch.setattr(SymbolicTransformComposer, "append", counted_append)
+    stream = TransformStream(
+        iter(transforms),
+        environment(stop_address=0x1000 + len(transforms)),
+        [item.addr for item in transforms],
+    )
+
+    result = match_transitions(
+        [state(0x1000), state(0x1000 + len(transforms))],
+        stream,
+    )
+
+    assert result.trace is not None
+    assert result.complete
+    assert result.trace.transforms[0].range == (0x1000, 0x1000 + len(transforms))
+    assert append_calls == len(transforms)
+    assert result.trace.transforms[0].instructions == instruction_markers
+    assert stream.exhausted
 
 
 def test_legacy_trace_without_stop_address_still_matches_terminal_destination():

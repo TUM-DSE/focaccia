@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Iterable, Sequence
-from copy import copy
 from dataclasses import dataclass
 
 from .snapshot import ProgramState, RegisterAccessError
-from .symbolic import SymbolicTraceItem, SymbolicTransform, TraceGap
+from .symbolic import (
+    SymbolicTraceItem,
+    SymbolicTransformComposer,
+    TraceGap,
+)
 from .trace import (
     DiagnosticLevel,
     MaterializedTrace,
@@ -42,15 +45,6 @@ class MatchResult:
         return self.trace is not None and all(
             diagnostic.level == "info" for diagnostic in self.diagnostics
         )
-
-
-def _clone_transform(transform: SymbolicTransform) -> SymbolicTransform:
-    """Copy the mutable transform containers without copying immutable expressions."""
-    cloned = copy(transform)
-    cloned.changed_regs = transform.changed_regs.copy()
-    cloned.memory_writes = list(transform.memory_writes)
-    cloned.instructions = list(transform.instructions)
-    return cloned
 
 
 def _as_symbolic_trace(
@@ -406,9 +400,10 @@ class TransitionMatcher:
             )
             return self._current
 
-        composite = (
-            self._current if end_index == self._current_index else _clone_transform(self._current)
-        )
+        if end_index == self._current_index:
+            return self._current
+
+        composer = SymbolicTransformComposer(self._current)
         previous: SymbolicTraceItem = self._current
 
         for index in range(self._current_index + 1, end_index + 1):
@@ -444,9 +439,8 @@ class TransitionMatcher:
                     pending=transform,
                 )
                 return None
-            assert isinstance(composite, SymbolicTransform)
             try:
-                composite.concat(transform)
+                composer.append(transform)
             except Exception as error:
                 self._fatal(
                     "symbolic-composition-failed",
@@ -456,7 +450,7 @@ class TransitionMatcher:
                 )
                 return None
             previous = transform
-        return composite
+        return composer.finish()
 
     def observe(self, pc: int) -> MatchedBoundary | None:
         concrete_index = self._concrete_count

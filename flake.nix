@@ -2214,6 +2214,22 @@
       ];
     };
 
+    linearCutpointCompositionCheck = mkStaticUnitCheck {
+      name = "linear-cutpoint-composition";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_match.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_symbolic_composition.py"
+        "-k"
+        "large_terminal_cutpoint or symbolic_state_composition_is_associative or memory"
+      ];
+    };
+
     terminalTransitionValidationCheck = mkStaticUnitCheck {
       name = "terminal-transition-validation";
       ruffTargets = [
@@ -2658,6 +2674,7 @@
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;
+      linear-cutpoint-composition = linearCutpointCompositionCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;

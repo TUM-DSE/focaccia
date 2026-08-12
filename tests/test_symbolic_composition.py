@@ -3,7 +3,11 @@ from miasm.expression.expression import ExprCompose, ExprId, ExprInt, ExprMem
 
 from focaccia.arch import aarch64, x86
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicCompositionError, SymbolicTransform
+from focaccia.symbolic import (
+    SymbolicCompositionError,
+    SymbolicTransform,
+    SymbolicTransformComposer,
+)
 
 
 X86 = x86.ArchX86()
@@ -116,6 +120,25 @@ def test_register_dependencies_use_canonical_alias_identity_and_zero_extension()
     assert composed.eval_register_transforms(concrete)["RBX"] == 6
     assert first.range == (0x1000, 0x1001)
     assert first.changed_regs == {"EAX": ExprInt(5, 32)}
+
+
+def test_concat_compatibility_mutates_only_the_receiver():
+    first = transform(X86, 0x1000, 0x1001, {ExprId("EAX", 32): ExprInt(5, 32)})
+    second = transform(
+        X86,
+        0x1001,
+        0x1002,
+        {ExprId("EBX", 32): ExprId("EAX", 32) + ExprInt(1, 32)},
+    )
+    original_second = second.changed_regs.copy()
+
+    returned = first.concat(second)
+
+    assert returned is first
+    assert first.range == (0x1000, 0x1002)
+    assert first.eval_register_transforms(state(X86, RAX=0, RBX=0))["RBX"] == 6
+    assert second.range == (0x1001, 0x1002)
+    assert second.changed_regs == original_second
 
 
 def test_flag_aliases_compose_through_the_base_register():
@@ -330,10 +353,18 @@ def test_symbolic_state_composition_is_associative_for_register_and_memory_depen
 
 def test_composition_rejects_discontinuous_architecture_and_thread_inputs():
     linear = transform(X86, 0x1000, 0x1001, {})
+    composer = SymbolicTransformComposer(linear)
+    invalid = (
+        ("discontinuous", transform(X86, 0x1002, 0x1003, {})),
+        ("thread", transform(X86, 0x1001, 0x1002, {}, tid=2)),
+        (
+            "architectures",
+            transform(aarch64.ArchAArch64("little"), 0x1001, 0x1002, {}),
+        ),
+    )
 
-    with pytest.raises(SymbolicCompositionError, match="discontinuous"):
-        linear.composed_with(transform(X86, 0x1002, 0x1003, {}))
-    with pytest.raises(SymbolicCompositionError, match="thread"):
-        linear.composed_with(transform(X86, 0x1001, 0x1002, {}, tid=2))
-    with pytest.raises(SymbolicCompositionError, match="architectures"):
-        linear.composed_with(transform(aarch64.ArchAArch64("little"), 0x1001, 0x1002, {}))
+    for message, item in invalid:
+        with pytest.raises(SymbolicCompositionError, match=message):
+            linear.composed_with(item)
+        with pytest.raises(SymbolicCompositionError, match=message):
+            composer.append(item)
