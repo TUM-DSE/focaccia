@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -76,7 +77,7 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     monkeypatch.setattr(
         qemu_tool,
         "collect_conc_trace",
-        lambda _server, _trace: SimpleNamespace(
+        lambda _server, _trace, **_kwargs: SimpleNamespace(
             trace=None,
             diagnostics=(),
             pending_transform=None,
@@ -132,6 +133,8 @@ def test_structured_qemu_report_preserves_validation_and_replay_coverage(tmp_pat
         {
             "severity": "confirmed",
             "severity_label": "ERROR",
+            "code": None,
+            "subject": None,
             "message": "RAX differs",
         }
     ]
@@ -147,9 +150,88 @@ def test_structured_qemu_report_preserves_validation_and_replay_coverage(tmp_pat
     ]
     assert document["replay"]["by_strategy"] == {"recorded-replay": 1}
 
+    classified = ValidationReport(
+        (
+            {
+                "pc": 0x401000,
+                "txl": state,
+                "ref": state,
+                "errors": [
+                    Error(
+                        ErrorTypes.CONFIRMED,
+                        "RAX differs",
+                        code="register-content-mismatch",
+                        subject="RAX",
+                    )
+                ],
+                "snap": state,
+            },
+        )
+    )
+    classified_error = validation_report_document(classified, None)["validation"]["entries"][0][
+        "errors"
+    ][0]
+    assert classified_error["code"] == "register-content-mismatch"
+    assert classified_error["subject"] == "RAX"
+
     path = tmp_path / "report.json"
     write_validation_report(path, report, coverage.report())
     assert json.loads(path.read_text()) == document
+
+
+def test_gdb_validation_persists_artifacts_before_renderer_failure(
+    tmp_path,
+    monkeypatch,
+):
+    qemu_tool = load_qemu_tool(monkeypatch)
+    oracle = tmp_path / "oracle.json"
+    report_path = tmp_path / "validation.json"
+    states_path = tmp_path / "states.trace"
+    oracle.write_text("{}")
+    trace = SimpleNamespace(
+        env=TraceEnvironment(None, (), (), binary_hash=None, architecture=x86.ArchX86().key)
+    )
+    state = ProgramState(x86.ArchX86())
+    state.write_register("RIP", 0x401000)
+    matched = SimpleNamespace(
+        trace=SimpleNamespace(state_boundaries=(state,)),
+        diagnostics=(),
+        pending_transform=None,
+    )
+    server = SimpleNamespace(
+        binary="/guest",
+        replay_coverage_report=lambda: None,
+    )
+    arguments = [
+        "--symb-trace",
+        str(oracle),
+        "--remote",
+        "localhost:1234",
+        "--report",
+        str(report_path),
+        "--output",
+        str(states_path),
+    ]
+    monkeypatch.setattr(qemu_tool, "decode_gdb_arguments", lambda _environment: arguments)
+    monkeypatch.setattr(qemu_tool, "DeterministicLog", lambda _path: object())
+    monkeypatch.setattr(qemu_tool.parser, "parse_transformations", lambda _file: trace)
+    monkeypatch.setattr(qemu_tool, "GDBServerStateIterator", lambda _remote, _log: server)
+    monkeypatch.setattr(qemu_tool, "collect_conc_trace", lambda *_args, **_kwargs: matched)
+    monkeypatch.setattr(qemu_tool, "compare_symbolic", lambda *_args, **_kwargs: ValidationReport())
+
+    def renderer_failure(*_args, **_kwargs):
+        assert report_path.is_file()
+        assert states_path.is_file()
+        raise RuntimeError("renderer failed")
+
+    monkeypatch.setattr(qemu_tool, "print_result", renderer_failure)
+
+    with pytest.raises(RuntimeError, match="renderer failed"):
+        qemu_tool.main()
+
+    assert Path(report_path).is_file()
+    assert json.loads(report_path.read_text())["status"] == "accepted"
+    assert states_path.is_file()
 
 
 def test_structured_qemu_failure_preserves_rejected_coverage():

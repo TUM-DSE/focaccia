@@ -166,6 +166,7 @@ def main() -> None:
     logging.basicConfig(level=logging_level, force=True)
 
     gdb_server: GDBServerStateIterator | None = None
+    report_written = False
 
     # Keep streaming trace input open until collection consumes it.
     mode = "r" if args.trace_type == "json" else "rb"
@@ -219,14 +220,14 @@ def main() -> None:
                     "snap": source,
                 }
             )
-        if not args.quiet:
-            print_result(validation_report, verbosity[args.error_level])
+        replay_coverage = gdb_server.replay_coverage_report()
         if args.report:
             write_validation_report(
                 args.report,
                 validation_report,
-                gdb_server.replay_coverage_report(),
+                replay_coverage,
             )
+            report_written = True
 
         if args.output:
             from focaccia.parser import serialize_snapshots
@@ -237,10 +238,27 @@ def main() -> None:
                 output_env = env.with_architecture(states[0].arch.key)
             elif symb_transforms.env.architecture is not None:
                 output_env = env.with_architecture(symb_transforms.env.architecture)
-            with open(args.output, "w") as file:
-                serialize_snapshots(MaterializedTrace(states, output_env), file)
+            output_path = os.fspath(args.output)
+            output_directory = os.path.dirname(output_path) or "."
+            temporary_output = os.path.join(
+                output_directory,
+                f".{os.path.basename(output_path)}.tmp",
+            )
+            try:
+                with open(temporary_output, "w") as file:
+                    serialize_snapshots(MaterializedTrace(states, output_env), file)
+                os.replace(temporary_output, output_path)
+            finally:
+                try:
+                    os.unlink(temporary_output)
+                except FileNotFoundError:
+                    pass
+
+        if not args.quiet:
+            print_result(validation_report, verbosity[args.error_level])
     except Exception as error:
-        _write_failure_report(args, error, gdb_server)
+        if not report_written:
+            _write_failure_report(args, error, gdb_server)
         raise
 
 

@@ -27,11 +27,20 @@ class ErrorTypes:
 
 
 class Error:
-    """A state comparison error."""
+    """A state comparison error with optional machine-readable classification."""
 
-    def __init__(self, severity: ErrorSeverity, msg: str):
+    def __init__(
+        self,
+        severity: ErrorSeverity,
+        msg: str,
+        *,
+        code: str | None = None,
+        subject: str | None = None,
+    ):
         self.severity = severity
         self.error_msg = msg
+        self.code = code
+        self.subject = subject
 
     def __repr__(self) -> str:
         return f"{self.severity} {self.error_msg}"
@@ -355,6 +364,8 @@ def _find_register_errors(
                     ErrorTypes.CONFIRMED,
                     f"Content of register {regname} is false. Expected "
                     f"{hex(truth_val)}, actual {hex(txl_val)}.",
+                    code="register-content-mismatch",
+                    subject=regname,
                 )
             )
     return errors

@@ -1924,6 +1924,18 @@
       ];
     };
 
+    nonDestructiveQemuReportingCheck = mkStaticUnitCheck {
+      name = "non-destructive-qemu-reporting";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_report.py::test_gdb_validation_persists_artifacts_before_renderer_failure"
+      ];
+    };
+
     rrQemuRunManifestCheck = mkStaticUnitCheck {
       name = "rr-qemu-run-manifest";
       ruffTargets = [
@@ -2715,6 +2727,7 @@
       replay-effect-coverage = replayEffectCoverageCheck;
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
+      non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;
       rr-qemu-run-manifest = rrQemuRunManifestCheck;
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;

@@ -29,6 +29,8 @@ def _error_document(error: object) -> dict[str, object]:
     return {
         "severity": classification,
         "severity_label": str(name),
+        "code": getattr(error, "code", None),
+        "subject": getattr(error, "subject", None),
         "message": str(message),
     }
 
