@@ -89,12 +89,18 @@ def collect_conc_trace(
 
         boundary = matcher.observe(pc)
         if boundary is not None:
+            source_outgoing = boundary.outgoing
+            if boundary.outgoing is not None:
+                destination_pc = state_iterator.next_cutpoint_pc(matcher)
+                if destination_pc is not None:
+                    source_outgoing = matcher.plan_destination(destination_pc)
             previous_state = retained_states[-1] if retained_states else current_state
             collection = collect_minimal_snapshot(
                 previous_state,
                 current_state,
                 boundary.incoming,
                 boundary.outgoing,
+                source_outgoing=source_outgoing,
             )
             diagnostics.extend(
                 snapshot_diagnostics(

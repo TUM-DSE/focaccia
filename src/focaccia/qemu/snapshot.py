@@ -128,9 +128,15 @@ def collect_minimal_snapshot(
     current_state: ReadableProgramState,
     incoming: SymbolicTraceItem | None,
     outgoing: SymbolicTraceItem | None,
+    *,
+    source_outgoing: SymbolicTraceItem | None = None,
 ) -> SnapshotCollection:
     """Collect a plan, retaining unavailable values as explicit unknowns."""
-    plan = plan_minimal_snapshot(current_state, incoming, outgoing)
+    plan = plan_minimal_snapshot(
+        current_state,
+        incoming,
+        source_outgoing if source_outgoing is not None else outgoing,
+    )
     if previous_state.arch != plan.architecture:
         raise SnapshotPlanningError(
             f"Previous concrete architecture {previous_state.arch} does not match "

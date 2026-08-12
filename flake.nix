@@ -2228,6 +2228,23 @@
       ];
     };
 
+    completeCutpointSourceSnapshotCheck = mkStaticUnitCheck {
+      name = "complete-cutpoint-source-snapshot";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py"
+        "-k"
+        "late_composed_source_dependencies or gdb_collector"
+      ];
+    };
+
     linearCutpointCompositionCheck = mkStaticUnitCheck {
       name = "linear-cutpoint-composition";
       ruffTargets = [
@@ -2689,6 +2706,7 @@
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;
       deferred-memory-alias-resolution = deferredMemoryAliasCheck;
+      complete-cutpoint-source-snapshot = completeCutpointSourceSnapshotCheck;
       linear-cutpoint-composition = linearCutpointCompositionCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;

@@ -3,7 +3,7 @@ import sys
 from types import ModuleType
 
 import pytest
-from miasm.expression.expression import ExprId, ExprInt
+from miasm.expression.expression import ExprId, ExprInt, ExprMem
 
 from focaccia.arch import x86
 from focaccia.qemu.validation_server import collect_conc_trace
@@ -22,11 +22,21 @@ ENV = TraceEnvironment(
 )
 
 
-def state(pc: int, *, rax: int | None = None) -> ProgramState:
+def state(
+    pc: int,
+    *,
+    rax: int | None = None,
+    rbx: int | None = None,
+    memory: dict[int, bytes] | None = None,
+) -> ProgramState:
     result = ProgramState(ARCH)
     result.write_register("PC", pc)
     if rax is not None:
         result.write_register("RAX", rax)
+    if rbx is not None:
+        result.write_register("RBX", rbx)
+    for address, data in (memory or {}).items():
+        result.write_memory(address, data)
     return result
 
 
@@ -88,6 +98,48 @@ def test_plugin_collector_composes_symbolic_interior_cutpoints():
     assert "symbolic-transforms-composed" in codes(result)
 
 
+def test_plugin_collector_captures_late_composed_source_dependencies():
+    first = transform(0x1000, 0x1001)
+    second = SymbolicTransform(
+        1,
+        {
+            ExprId("RAX", 64): ExprId("RBX", 64),
+            ExprId("RBX", 64): ExprMem(ExprInt(0x2000, 64), 64),
+        },
+        [],
+        ARCH,
+        0x1001,
+        0x1002,
+    )
+
+    class PlannedStates:
+        def __init__(self):
+            self._states = iter(
+                [
+                    state(0x1000, rbx=7, memory={0x2000: b"abcdefgh"}),
+                    state(0x1002, rax=7, rbx=int.from_bytes(b"abcdefgh", "little")),
+                ]
+            )
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+        def next_cutpoint_pc(self, matcher):
+            return 0x1002 if matcher.current_destination_pc is not None else None
+
+    result = collect_conc_trace(PlannedStates(), trace(first, second))
+
+    assert result.trace is not None
+    source = result.trace.state_boundaries[0]
+    assert source.read_register("RBX") == 7
+    assert source.read_memory(0x2000, 8) == b"abcdefgh"
+    assert "snapshot-register-unavailable" not in codes(result)
+    assert "snapshot-memory-unavailable" not in codes(result)
+
+
 def test_plugin_collector_classifies_missing_terminal_state():
     item = transform(0x1000, 0x1001)
 
@@ -127,6 +179,9 @@ def test_gdb_collector_uses_shared_matcher_and_keeps_terminal_state(monkeypatch)
 
         def run_until(self, _address: int):
             return next(self)
+
+        def next_cutpoint_pc(self, matcher):
+            return matcher.current_destination_pc
 
     try:
         result = qemu_tool.collect_conc_trace(

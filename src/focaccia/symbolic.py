@@ -452,6 +452,8 @@ class SymbolicTransform:
                 _eval(expr.src2)
 
             def _eval_exprop(expr: ExprOp):
+                if expr.op == _DEFERRED_MEMORY_BYTE_OP and len(expr.args) == 2:
+                    accessed_mem.add(ExprMem(expr.args[0], 8))
                 for arg in expr.args:
                     _eval(arg)
 

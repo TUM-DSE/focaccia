@@ -467,6 +467,10 @@ class GDBServerStateIterator(GDBServerConnector):
     def __iter__(self):
         return self
 
+    def next_cutpoint_pc(self, matcher) -> int | None:
+        """Declare the next symbolic destination before the inferior advances."""
+        return matcher.current_destination_pc
+
     def __next__(self) -> ReadableProgramState:
         # The first call to __next__ should yield the first program state,
         # i.e. before stepping the first time

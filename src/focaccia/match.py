@@ -111,6 +111,7 @@ class TransitionMatcher:
         self._extra_concrete_count = 0
         self._first_extra_concrete_index: int | None = None
         self._pending_transform: SymbolicTraceItem | None = None
+        self._planned_destination: tuple[int, int, SymbolicTraceItem] | None = None
         self._architecture = None
         self._thread_id: int | None = None
 
@@ -125,6 +126,11 @@ class TransitionMatcher:
     @property
     def pending_transform(self) -> SymbolicTraceItem | None:
         return self._pending_transform
+
+    @property
+    def current_destination_pc(self) -> int | None:
+        """Return the next symbolic destination from the retained source."""
+        return self._current.range[1] if self._has_source and self._current is not None else None
 
     def _diagnose(
         self,
@@ -452,6 +458,30 @@ class TransitionMatcher:
             previous = transform
         return composer.finish()
 
+    def plan_destination(self, pc: int) -> SymbolicTraceItem | None:
+        """Compose the current source through a backend-declared next cutpoint.
+
+        Live emulator states cannot be read after execution advances. Backends
+        therefore declare their next observable PC while still stopped, and
+        the collector snapshots dependencies from this complete composition.
+        The later observation must reach the same range or fail closed.
+        """
+        if self._done or not self._has_source:
+            return None
+        assert self._current is not None
+        assert self._current_index is not None
+        start_index = self._current_index
+        end_index = self._find_destination(start_index, pc, self._concrete_count)
+        if end_index is None:
+            return None
+        cached = self._planned_destination
+        if cached is not None and cached[:2] == (start_index, end_index):
+            return cached[2]
+        planned = self._compose_through(end_index, self._concrete_count)
+        if planned is not None:
+            self._planned_destination = (start_index, end_index, planned)
+        return planned
+
     def observe(self, pc: int) -> MatchedBoundary | None:
         concrete_index = self._concrete_count
         self._concrete_count += 1
@@ -550,7 +580,11 @@ class TransitionMatcher:
                 self._done = True
             return None
 
-        incoming = self._compose_through(end_index, concrete_index)
+        planned = self._planned_destination
+        if planned is not None and planned[:2] == (start_index, end_index):
+            incoming = planned[2]
+        else:
+            incoming = self._compose_through(end_index, concrete_index)
         if incoming is None:
             return None
         if incoming.range != (self._source_pc, pc):
@@ -580,6 +614,7 @@ class TransitionMatcher:
         outgoing: SymbolicTraceItem | None = None
         self._current = None
         self._current_index = None
+        self._planned_destination = None
 
         if self._stop_address == pc:
             self._stop_at_boundary(next_index, pc)
