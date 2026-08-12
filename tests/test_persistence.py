@@ -269,6 +269,8 @@ def test_schema_v2_state_documents_remain_readable():
     serialize_snapshots(trace, output)
     document = json.loads(output.getvalue())
     document["schema_version"] = 2
+    document["items"][0]["registers"] = {"RIP": 0x1000}
+    document["items"][0]["register_validity"] = {"RIP": (1 << 64) - 1}
 
     parsed = parse_snapshots(io.StringIO(json.dumps(document)))
 
@@ -546,11 +548,11 @@ def test_state_memory_ranges_and_register_values_are_validated():
     document = json.loads(output.getvalue())
 
     bad_register = copy.deepcopy(document)
-    bad_register["items"][0]["registers"]["RIP"] = 1 << 64
+    bad_register["items"][0]["registers"]["RIP"] = "0x10000000000000000"
     bad_memory = copy.deepcopy(document)
     bad_memory["items"][0]["memory"] = [{"range": [0x2000, 0x2002], "data": "AA=="}]
     bad_validity = copy.deepcopy(document)
-    bad_validity["items"][0]["register_validity"]["RIP"] = 0xFF
+    bad_validity["items"][0]["register_validity"]["RIP"] = "0x00000000000000ff"
     bad_range = copy.deepcopy(document)
     bad_range["items"][0]["memory"] = [{"range": [0x2002, 0x2001], "data": ""}]
     overlapping_ranges = copy.deepcopy(document)
@@ -697,8 +699,8 @@ def test_state_documents_reject_noncanonical_registers_and_invalid_memory_data()
         parse_snapshots(io.StringIO(json.dumps(mismatched_validity)))
 
     noncanonical = copy.deepcopy(document)
-    noncanonical["items"][0]["registers"] = {"rip": 0x1000}
-    noncanonical["items"][0]["register_validity"] = {"rip": (1 << 64) - 1}
+    noncanonical["items"][0]["registers"] = {"rip": "0x0000000000001000"}
+    noncanonical["items"][0]["register_validity"] = {"rip": "0xffffffffffffffff"}
     with pytest.raises(StateParseError, match="not canonical"):
         parse_snapshots(io.StringIO(json.dumps(noncanonical)))
 

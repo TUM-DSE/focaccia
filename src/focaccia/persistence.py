@@ -179,6 +179,39 @@ def _optional_integer(value: object, path: str) -> int | None:
     return _integer(value, path, minimum=0, maximum=MAX_ADDRESS)
 
 
+def _register_integer(
+    value: object,
+    path: str,
+    *,
+    num_bits: int,
+    schema_version: int,
+) -> int:
+    if schema_version < 4:
+        return _integer(value, path, minimum=0)
+    encoded = _string(value, path)
+    assert encoded is not None
+    digits = (num_bits + 3) // 4
+    if len(encoded) != digits + 2 or not encoded.startswith("0x"):
+        raise FieldTypeError(
+            f"{path} must be a 0x-prefixed {digits}-digit hexadecimal string."
+        )
+    try:
+        parsed = int(encoded[2:], 16)
+    except ValueError as error:
+        raise FieldTypeError(f"{path} contains invalid hexadecimal digits.") from error
+    if encoded != f"0x{parsed:0{digits}x}":
+        raise FieldTypeError(f"{path} must use canonical lowercase hexadecimal.")
+    if parsed >= 1 << num_bits:
+        raise FieldTypeError(f"{path} does not fit in {num_bits} bits.")
+    return parsed
+
+
+def _encode_register_integer(value: int, num_bits: int) -> str:
+    if value < 0 or value >= 1 << num_bits:
+        raise ValueError(f"Register value does not fit in {num_bits} bits.")
+    return f"0x{value:0{(num_bits + 3) // 4}x}"
+
+
 def _string_array(value: object, path: str) -> tuple[str, ...]:
     values = _list(value, path)
     result = []
@@ -464,7 +497,14 @@ def _trace_architecture(
     return architecture, environment
 
 
-def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool) -> ProgramState:
+def _decode_state(
+    value: object,
+    architecture: Arch,
+    path: str,
+    *,
+    legacy: bool,
+    schema_version: int = SCHEMA_VERSION,
+) -> ProgramState:
     document = _mapping(value, path)
     registers = _mapping(_required(document, "registers", path), f"{path}.registers")
     register_validity: Mapping[object, object] | None = None
@@ -494,10 +534,11 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
             )
         accessor = architecture.get_reg_accessor(normalized)
         assert accessor is not None
-        register_value = _integer(
+        register_value = _register_integer(
             encoded_value,
             f"{path}.registers.{encoded_name}",
-            minimum=0,
+            num_bits=accessor.num_bits,
+            schema_version=0 if legacy else schema_version,
         )
         if register_value >= 1 << accessor.num_bits:
             raise StateParseError(f"Value {register_value} does not fit in register {normalized}.")
@@ -520,11 +561,16 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
                     f"Version 2 state register {normalized} must use base-register storage."
                 )
             assert register_validity is not None
-            valid_mask = _integer(
+            valid_mask = _register_integer(
                 register_validity[encoded_name],
                 f"{path}.register_validity.{encoded_name}",
-                minimum=1,
+                num_bits=accessor.num_bits,
+                schema_version=schema_version,
             )
+            if valid_mask == 0:
+                raise StateParseError(
+                    f"Validity mask for {normalized} must be nonzero."
+                )
             if valid_mask >= 1 << accessor.num_bits:
                 raise StateParseError(f"Validity mask for {normalized} does not fit its width.")
             if register_value & ~valid_mask:
@@ -598,8 +644,17 @@ def _encode_state(
     path: str,
 ) -> dict:
     register_bits = state.known_register_bits()
-    registers = {name: value for name, (value, _) in register_bits.items()}
-    register_validity = {name: valid_mask for name, (_, valid_mask) in register_bits.items()}
+    registers = {
+        name: _encode_register_integer(value, architecture.get_reg_accessor(name).num_bits)
+        for name, (value, _) in register_bits.items()
+    }
+    register_validity = {
+        name: _encode_register_integer(
+            valid_mask,
+            architecture.get_reg_accessor(name).num_bits,
+        )
+        for name, (_, valid_mask) in register_bits.items()
+    }
     memory = [
         {
             "range": [address, address + len(data)],
@@ -1138,7 +1193,13 @@ def _parse_versioned_states(document: Mapping) -> MaterializedTrace[ProgramState
             f"trace.items length {len(items)} does not match item_count {header.item_count}."
         )
     states = [
-        _decode_state(item, header.architecture, f"trace.items[{index}]", legacy=False)
+        _decode_state(
+            item,
+            header.architecture,
+            f"trace.items[{index}]",
+            legacy=False,
+            schema_version=header.version,
+        )
         for index, item in enumerate(items)
     ]
     _validate_state_addresses(states, header.addresses)

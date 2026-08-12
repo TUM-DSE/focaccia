@@ -1481,6 +1481,20 @@
       ];
     };
 
+    wideRegisterStateSerializationCheck = mkStaticUnitCheck {
+      name = "wide-register-state-serialization";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+        "tests/test_state_serialization.py"
+      ];
+      pytestTargets = [
+        "tests/test_state_serialization.py::test_wide_x86_registers_serialize_without_integer_limits"
+        "tests/test_state_serialization.py::test_snapshot_serialization_preserves_identity_and_partial_validity"
+        "tests/test_persistence.py::test_schema_v2_state_documents_remain_readable"
+      ];
+    };
+
     undefinedShiftFlagSemanticsCheck = mkStaticUnitCheck {
       name = "undefined-shift-flag-semantics";
       ruffTargets = [
@@ -2952,6 +2966,7 @@
       narrow-vector-observation = narrowVectorObservationCheck;
       qemu-mmx-observation = qemuMmxObservationCheck;
       undefined-shift-flag-semantics = undefinedShiftFlagSemanticsCheck;
+      wide-register-state-serialization = wideRegisterStateSerializationCheck;
       x86-eflags-observation = x86EflagsObservationCheck;
       code-naming-policy = codeNamingPolicyCheck;
       flake-source-boundary = flakeSourceBoundaryCheck;
