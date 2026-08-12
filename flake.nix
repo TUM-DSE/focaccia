@@ -2241,6 +2241,27 @@
       ];
     };
 
+    optInUnmatchedTransformSkippingCheck = mkStaticUnitCheck {
+      name = "opt-in-unmatched-transform-skipping";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/symbolic.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_match.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_matching.py"
+        "-k"
+        "unmatched_skip or unmatched_skipping"
+      ];
+    };
+
     completeCutpointSourceSnapshotCheck = mkStaticUnitCheck {
       name = "complete-cutpoint-source-snapshot";
       ruffTargets = [
@@ -2720,6 +2741,7 @@
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;
       deferred-memory-alias-resolution = deferredMemoryAliasCheck;
+      opt-in-unmatched-transform-skipping = optInUnmatchedTransformSkippingCheck;
       complete-cutpoint-source-snapshot = completeCutpointSourceSnapshotCheck;
       linear-cutpoint-composition = linearCutpointCompositionCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;

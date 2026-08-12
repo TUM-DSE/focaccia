@@ -8,7 +8,7 @@ from miasm.expression.expression import ExprId, ExprInt, ExprMem
 from focaccia.arch import x86
 from focaccia.qemu.validation_server import collect_conc_trace
 from focaccia.snapshot import ProgramState, RegisterAccessError
-from focaccia.symbolic import SymbolicTransform
+from focaccia.symbolic import SymbolicTransform, TraceGap
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 
@@ -96,6 +96,23 @@ def test_plugin_collector_composes_symbolic_interior_cutpoints():
     assert len(result.trace) == 1
     assert result.trace.transforms[0].range == (0x1000, 0x1002)
     assert "symbolic-transforms-composed" in codes(result)
+
+
+def test_plugin_collector_propagates_opt_in_unmatched_skip():
+    result = collect_conc_trace(
+        iter([state(0x1000), state(0x1002), state(0x1003)]),
+        trace(
+            transform(0x1000, 0x1001),
+            transform(0x1001, 0x1002),
+            transform(0x1002, 0x1003),
+        ),
+        skip_unmatched=True,
+    )
+
+    assert result.trace is not None
+    assert isinstance(result.trace.transforms[0], TraceGap)
+    assert result.trace.transforms[1].range == (0x1002, 0x1003)
+    assert "unmatched-symbolic-transforms-skipped" in codes(result)
 
 
 def test_plugin_collector_captures_late_composed_source_dependencies():

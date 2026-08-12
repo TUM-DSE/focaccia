@@ -19,6 +19,14 @@ def parsed(*arguments: str):
     return make_argparser().parse_args(["--symb-trace", "/tmp/trace", *arguments])
 
 
+def test_unmatched_skipping_is_explicitly_opt_in():
+    default = parsed("--remote", "localhost:1234")
+    enabled = parsed("--remote", "localhost:1234", "--skip-unmatched")
+
+    assert default.skip_unmatched is False
+    assert enabled.skip_unmatched is True
+
+
 def test_backend_selection_requires_remote_or_plugin_configuration():
     parser = make_argparser()
     args = parser.parse_args(["--symb-trace", "/tmp/trace"])

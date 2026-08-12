@@ -929,6 +929,7 @@ _GAP_REASONS: set[str] = {
     "symbolic-timeout",
     "unsupported-semantics",
     "cross-validation-error",
+    "unmatched-transform-skip",
 }
 
 

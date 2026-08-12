@@ -5,7 +5,12 @@ from miasm.expression.expression import ExprId, ExprInt
 from focaccia.arch import aarch64, x86
 from focaccia.match import TransitionMatcher, fold_traces, match_traces, match_transitions
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import Instruction, SymbolicTransform, SymbolicTransformComposer
+from focaccia.symbolic import (
+    Instruction,
+    SymbolicTransform,
+    SymbolicTransformComposer,
+    TraceGap,
+)
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 
@@ -120,6 +125,45 @@ def test_skipped_symbolic_interior_is_composed_without_mutating_inputs():
     assert result.trace.transforms[0].range == (0x1000, 0x1002)
     assert result.trace.transforms[0] is not first
     assert [first.to_json(), second.to_json()] == before
+
+
+def test_opt_in_unmatched_skip_retains_explicit_gap_and_later_transition():
+    first = changing_transform(0x1000, 0x1001, "RAX", 1)
+    hidden = changing_transform(0x1001, 0x1002, "RBX", 2)
+    later = changing_transform(0x1002, 0x1003, "RAX", 3)
+    stream = symbolic_trace(first, hidden, later).cursor()
+
+    result = match_transitions(
+        [state(0x1000), state(0x1002), state(0x1003)],
+        stream,
+        skip_unmatched=True,
+    )
+
+    assert result.trace is not None
+    assert len(result.trace) == 2
+    gap = result.trace.transforms[0]
+    assert isinstance(gap, TraceGap)
+    assert gap.reason == "unmatched-transform-skip"
+    assert gap.range == (0x1000, 0x1002)
+    assert result.trace.transforms[1] is later
+    assert "unmatched-symbolic-transforms-skipped" in diagnostic_codes(result)
+    assert not result.complete
+    assert stream.exhausted
+
+
+def test_unmatched_skip_is_off_by_default():
+    result = match_transitions(
+        [state(0x1000), state(0x1002)],
+        symbolic_trace(
+            changing_transform(0x1000, 0x1001, "RAX", 1),
+            changing_transform(0x1001, 0x1002, "RBX", 2),
+        ),
+    )
+
+    assert result.trace is not None
+    assert isinstance(result.trace.transforms[0], SymbolicTransform)
+    assert set(result.trace.transforms[0].changed_regs) == {"RAX", "RBX"}
+    assert "unmatched-symbolic-transforms-skipped" not in diagnostic_codes(result)
 
 
 def test_composed_cutpoint_retains_outputs_from_every_skipped_transform():

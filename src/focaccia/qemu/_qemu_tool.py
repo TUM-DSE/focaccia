@@ -40,7 +40,7 @@ from focaccia.qemu.report import (
 from focaccia.qemu.snapshot import collect_minimal_snapshot, snapshot_diagnostics
 from focaccia.qemu.target import GDBServerStateIterator
 
-logger = logging.getLogger('focaccia-qemu-validator')
+logger = logging.getLogger("focaccia-qemu-validator")
 debug = logger.debug
 info = logger.info
 
@@ -48,9 +48,11 @@ info = logger.info
 def collect_conc_trace(
     gdb: GDBServerStateIterator,
     strace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
+    *,
+    skip_unmatched: bool = False,
 ) -> MatchResult:
     """Collect matched concrete boundaries while preserving the terminal state."""
-    matcher = TransitionMatcher(strace)
+    matcher = TransitionMatcher(strace, skip_unmatched=skip_unmatched)
     retained_states: list[ProgramState] = []
     retained_transforms: list[SymbolicTraceItem] = []
     diagnostics = []
@@ -106,9 +108,7 @@ def collect_conc_trace(
                 snapshot_diagnostics(
                     collection,
                     len(retained_states),
-                    len(retained_transforms)
-                    if boundary.incoming is not None
-                    else None,
+                    len(retained_transforms) if boundary.incoming is not None else None,
                 )
             )
             if boundary.incoming is not None:
@@ -190,22 +190,20 @@ def main() -> None:
                 )
 
             gdb_server = GDBServerStateIterator(args.remote, detlog)
-            executable = (
-                gdb_server.binary if args.executable is None else args.executable
-            )
+            executable = gdb_server.binary if args.executable is None else args.executable
             env = make_gdb_trace_environment(executable)
-            matched = collect_conc_trace(gdb_server, symb_transforms)
+            matched = collect_conc_trace(
+                gdb_server,
+                symb_transforms,
+                skip_unmatched=args.skip_unmatched,
+            )
 
         validation_report = compare_symbolic(
             matched.trace,
             diagnostics=matched.diagnostics,
         )
         if matched.pending_transform is not None:
-            source = (
-                matched.trace.state_boundaries[-1]
-                if matched.trace is not None
-                else None
-            )
+            source = matched.trace.state_boundaries[-1] if matched.trace is not None else None
             validation_report = validation_report.with_entry(
                 {
                     "pc": matched.pending_transform.addr,
@@ -233,11 +231,7 @@ def main() -> None:
         if args.output:
             from focaccia.parser import serialize_snapshots
 
-            states = (
-                matched.trace.state_boundaries
-                if matched.trace is not None
-                else ()
-            )
+            states = matched.trace.state_boundaries if matched.trace is not None else ()
             output_env = env
             if states:
                 output_env = env.with_architecture(states[0].arch.key)

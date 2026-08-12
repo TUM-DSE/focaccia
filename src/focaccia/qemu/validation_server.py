@@ -148,9 +148,11 @@ class PluginStateIterator:
 def collect_conc_trace(
     qemu: Iterable[ReadableProgramState],
     strace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
+    *,
+    skip_unmatched: bool = False,
 ) -> MatchResult:
     """Collect a cardinality-valid concrete transition trace from the plugin."""
-    matcher = TransitionMatcher(strace)
+    matcher = TransitionMatcher(strace, skip_unmatched=skip_unmatched)
     retained_states: list[ProgramState] = []
     retained_transforms: list[SymbolicTraceItem] = []
     diagnostics = []
@@ -212,6 +214,7 @@ def start_validation_server(
     verbosity: ErrorTypes,
     is_quiet: bool = False,
     trace_type: str = "json",
+    skip_unmatched: bool = False,
 ) -> MatchResult:
     architecture = supported_architectures.get(guest_arch)
     if architecture is None:
@@ -232,7 +235,11 @@ def start_validation_server(
             raise ValueError(f"Unsupported symbolic trace type {trace_type!r}.")
 
         with PluginStateIterator(socket_path, architecture) as qemu:
-            matched = collect_conc_trace(qemu, symb_transforms)
+            matched = collect_conc_trace(
+                qemu,
+                symb_transforms,
+                skip_unmatched=skip_unmatched,
+            )
 
     if not is_quiet:
         report = compare_symbolic(

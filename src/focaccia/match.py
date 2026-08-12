@@ -82,6 +82,7 @@ class TransitionMatcher:
         | Iterable[SymbolicTraceItem],
         *,
         stop_address: int | None = None,
+        skip_unmatched: bool = False,
     ):
         self.trace = _as_symbolic_trace(transforms)
         self.environment = self.trace.env
@@ -96,6 +97,7 @@ class TransitionMatcher:
             self.trace.cursor() if isinstance(self.trace, MaterializedTrace) else self.trace
         )
         self._stop_address = self.environment.stop_address if stop_address is None else stop_address
+        self._skip_unmatched = skip_unmatched
 
         self._diagnostics: list[TraceDiagnostic] = []
         self._next_transform_index = 0
@@ -378,6 +380,65 @@ class TransitionMatcher:
             previous = transform
         return None
 
+    def _skip_through(
+        self,
+        end_index: int,
+        concrete_index: int,
+    ) -> TraceGap | None:
+        assert self._current is not None
+        assert self._current_index is not None
+        start_index = self._current_index
+        previous = self._current
+        first_instruction = previous.instructions[0] if previous.instructions else None
+
+        for index in range(start_index + 1, end_index + 1):
+            transform = self._read_transform(index)
+            if transform is None:
+                return None
+            if previous.range[1] != transform.range[0]:
+                self._fatal(
+                    "symbolic-trace-discontinuous",
+                    f"Cannot skip transform {index - 1} ending at "
+                    f"{hex(previous.range[1])} before transform {index} starting "
+                    f"at {hex(transform.range[0])}.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            if previous.tid != transform.tid:
+                self._fatal(
+                    "unsupported-thread-transition",
+                    "Cannot skip transforms from different threads; concurrent "
+                    "traces are unsupported.",
+                    concrete_index=concrete_index,
+                    transform_index=index,
+                )
+                return None
+            previous = transform
+
+        count = end_index - start_index + 1
+        message = (
+            f"Skipped {count} unmatched symbolic transforms from "
+            f"{hex(self._current.range[0])} to {hex(previous.range[1])}; "
+            "their semantics were not composed."
+        )
+        self._diagnose(
+            "incomplete",
+            "unmatched-symbolic-transforms-skipped",
+            message,
+            concrete_index=concrete_index,
+            transform_index=start_index,
+        )
+        return TraceGap(
+            self._current.tid,
+            self._current.arch,
+            self._current.range[0],
+            previous.range[1],
+            "unmatched-transform-skip",
+            message,
+            instruction=first_instruction,
+        )
+
     def _compose_through(
         self,
         end_index: int,
@@ -581,7 +642,9 @@ class TransitionMatcher:
             return None
 
         planned = self._planned_destination
-        if planned is not None and planned[:2] == (start_index, end_index):
+        if end_index > start_index and self._skip_unmatched:
+            incoming = self._skip_through(end_index, concrete_index)
+        elif planned is not None and planned[:2] == (start_index, end_index):
             incoming = planned[2]
         else:
             incoming = self._compose_through(end_index, concrete_index)
@@ -711,9 +774,11 @@ def match_transitions(
     symbolic_transforms: MaterializedTrace[SymbolicTraceItem]
     | TransformStream[SymbolicTraceItem]
     | Iterable[SymbolicTraceItem],
+    *,
+    skip_unmatched: bool = False,
 ) -> MatchResult:
     """Match materialized concrete states to symbolic transitions."""
-    matcher = TransitionMatcher(symbolic_transforms)
+    matcher = TransitionMatcher(symbolic_transforms, skip_unmatched=skip_unmatched)
     retained_states: list[ProgramState] = []
     retained_transforms: list[SymbolicTraceItem] = []
 

@@ -40,8 +40,7 @@ class GDBLaunchError(RuntimeError):
         self.returncode = returncode
         self.command = tuple(command)
         super().__init__(
-            f"GDB validation process exited with status {returncode}: "
-            f"{list(command)!r}."
+            f"GDB validation process exited with status {returncode}: {list(command)!r}."
         )
 
 
@@ -123,6 +122,14 @@ observe guest state and validate it against a symbolic native trace.
         help="Input symbolic trace format.",
     )
     parser.add_argument(
+        "--skip-unmatched",
+        action="store_true",
+        help=(
+            "Skip unmatched symbolic ranges as explicit incomplete gaps instead "
+            "of composing them (diagnostic mode; default: off)."
+        ),
+    )
+    parser.add_argument(
         "--report",
         help="Write a versioned JSON validation and replay-coverage report.",
     )
@@ -150,9 +157,7 @@ def validate_backend_options(
         if args.guest_arch is None:
             parser.error("--guest-arch is required with --use-socket")
         if args.report is not None or args.run_manifest is not None or args.run_input:
-            parser.error(
-                "--report and run-manifest verification currently require the GDB backend"
-            )
+            parser.error("--report and run-manifest verification currently require the GDB backend")
     elif args.remote is None:
         parser.error("--remote is required unless --use-socket is specified")
     if args.run_manifest is not None:
@@ -251,12 +256,8 @@ def build_gdb_launch(
     if args.remote is None or args.use_socket is not None:
         raise ValueError("A GDB launch requires the remote backend.")
     child_environment = dict(os.environ if environment is None else environment)
-    child_environment[GDB_ARGUMENTS_ENV] = encode_gdb_arguments(
-        tuple(forwarded_arguments)
-    )
-    selected_paths = (
-        list(python_paths) if python_paths is not None else _default_python_paths()
-    )
+    child_environment[GDB_ARGUMENTS_ENV] = encode_gdb_arguments(tuple(forwarded_arguments))
+    selected_paths = list(python_paths) if python_paths is not None else _default_python_paths()
     child_environment["PYTHONPATH"] = _merge_pythonpath(
         selected_paths,
         child_environment.get("PYTHONPATH"),
@@ -307,6 +308,7 @@ def main() -> None:
             verbosity[args.error_level],
             args.quiet,
             args.trace_type,
+            args.skip_unmatched,
         )
         return
 

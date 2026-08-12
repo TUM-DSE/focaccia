@@ -246,6 +246,7 @@ GapReason = Literal[
     "symbolic-timeout",
     "unsupported-semantics",
     "cross-validation-error",
+    "unmatched-transform-skip",
 ]
 
 
@@ -276,6 +277,7 @@ class TraceGap:
             "symbolic-timeout",
             "unsupported-semantics",
             "cross-validation-error",
+            "unmatched-transform-skip",
         }:
             raise ValueError(f"Unsupported trace-gap reason: {reason}.")
         if not message:
