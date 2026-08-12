@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain
@@ -19,6 +21,7 @@ from typing import BinaryIO, Literal, TextIO, cast
 
 import msgpack
 import orjson as json
+from miasm.expression.expression import Expr
 from miasm.expression.parser import str_to_expr
 
 from .arch import Arch, supported_architectures
@@ -26,7 +29,9 @@ from .arch.arch import ArchitectureKey
 from .snapshot import ProgramState, RegisterAccessError
 from .symbolic import (
     GapReason,
+    Instruction,
     InstructionRecord,
+    MemoryWrite,
     SymbolicTraceItem,
     SymbolicTransform,
     TraceGap,
@@ -51,6 +56,8 @@ MAX_INSTRUCTIONS_PER_TRANSFORM = 1_000_000
 MAX_GAP_MESSAGE_CHARS = 1024 * 1024
 MAX_ADDRESS = (1 << 64) - 1
 MAX_RANGE_END = 1 << 64
+_STREAM_EXPRESSION_CACHE_SIZE = 65_536
+_STREAM_INSTRUCTION_CACHE_SIZE = 16_384
 
 
 class ParseError(ValueError):
@@ -185,9 +192,7 @@ def _string_array(value: object, path: str) -> tuple[str, ...]:
 def _read_json_document(stream: TextIO) -> Mapping:
     encoded = stream.read(MAX_JSON_CHARS + 1)
     if len(encoded) > MAX_JSON_CHARS:
-        raise TraceLimitError(
-            f"JSON trace exceeds the {MAX_JSON_CHARS}-character input limit."
-        )
+        raise TraceLimitError(f"JSON trace exceeds the {MAX_JSON_CHARS}-character input limit.")
     try:
         document = json.loads(encoded)
     except json.JSONDecodeError as error:
@@ -225,10 +230,7 @@ def _resolve_legacy_architecture(
     architecture_id = _string(value, path)
     assert architecture_id is not None
     if architecture_id == "aarch64":
-        if (
-            environment_architecture is None
-            or environment_architecture.isa != "aarch64"
-        ):
+        if environment_architecture is None or environment_architecture.isa != "aarch64":
             raise AmbiguousArchitectureError(
                 "Legacy architecture 'aarch64' does not preserve endianness and "
                 "has no explicit environment identity."
@@ -236,10 +238,7 @@ def _resolve_legacy_architecture(
         return environment_architecture
 
     architecture = _architecture_from_id(value, path, legacy=True)
-    if (
-        environment_architecture is not None
-        and environment_architecture != architecture
-    ):
+    if environment_architecture is not None and environment_architecture != architecture:
         raise ArchitectureParseError(
             f"Legacy architecture {architecture} conflicts with environment "
             f"architecture {environment_architecture}."
@@ -249,9 +248,7 @@ def _resolve_legacy_architecture(
 
 def _architecture_from_key(key: ArchitectureKey) -> Arch:
     matches = {
-        architecture
-        for architecture in supported_architectures.values()
-        if architecture.key == key
+        architecture for architecture in supported_architectures.values() if architecture.key == key
     }
     if len(matches) != 1:
         raise ArchitectureParseError(f"No unique registered architecture for {key}.")
@@ -311,23 +308,15 @@ def _parse_environment(
             allow_none=True,
         )
 
-    if (
-        start_address is not None
-        and stop_address is not None
-        and start_address > stop_address
-    ):
-        raise TraceCardinalityError(
-            "trace.environment.start_address must not exceed stop_address."
-        )
+    if start_address is not None and stop_address is not None and start_address > stop_address:
+        raise TraceCardinalityError("trace.environment.start_address must not exceed stop_address.")
 
     architecture_document = document.get("architecture")
     if architecture_document is None:
         if not legacy:
             raise MissingFieldError("Missing required field trace.environment.architecture.")
     else:
-        encoded_architecture = _mapping(
-            architecture_document, "trace.environment.architecture"
-        )
+        encoded_architecture = _mapping(architecture_document, "trace.environment.architecture")
         isa = _string(
             _required(encoded_architecture, "isa", "trace.environment.architecture"),
             "trace.environment.architecture.isa",
@@ -379,8 +368,7 @@ def _parse_addresses(
     )
     if len(addresses) != item_count:
         raise TraceCardinalityError(
-            "Trace address count does not match item_count: "
-            f"{len(addresses)} != {item_count}."
+            f"Trace address count does not match item_count: {len(addresses)} != {item_count}."
         )
     return addresses
 
@@ -412,9 +400,7 @@ def _parse_versioned_header(document: Mapping, expected_kind: TraceKind) -> _Tra
         minimum=0,
     )
     if item_count > MAX_TRACE_ITEMS:
-        raise TraceLimitError(
-            f"trace.item_count exceeds the {MAX_TRACE_ITEMS}-item limit."
-        )
+        raise TraceLimitError(f"trace.item_count exceeds the {MAX_TRACE_ITEMS}-item limit.")
     architecture = _architecture_from_id(
         _required(document, "architecture", "trace"),
         "trace.architecture",
@@ -424,9 +410,7 @@ def _parse_versioned_header(document: Mapping, expected_kind: TraceKind) -> _Tra
         architecture,
         legacy=False,
     )
-    addresses = _parse_addresses(
-        _required(document, "addresses", "trace"), item_count, kind
-    )
+    addresses = _parse_addresses(_required(document, "addresses", "trace"), item_count, kind)
     return _TraceHeader(version, kind, architecture, environment, addresses, item_count)
 
 
@@ -516,9 +500,7 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
             minimum=0,
         )
         if register_value >= 1 << accessor.num_bits:
-            raise StateParseError(
-                f"Value {register_value} does not fit in register {normalized}."
-            )
+            raise StateParseError(f"Value {register_value} does not fit in register {normalized}.")
 
         if architecture.is_constant_register(normalized):
             if not legacy:
@@ -544,9 +526,7 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
                 minimum=1,
             )
             if valid_mask >= 1 << accessor.num_bits:
-                raise StateParseError(
-                    f"Validity mask for {normalized} does not fit its width."
-                )
+                raise StateParseError(f"Validity mask for {normalized} does not fit its width.")
             if register_value & ~valid_mask:
                 raise StateParseError(
                     f"Value for {normalized} sets bits outside its validity mask."
@@ -563,9 +543,9 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
                 f"Conflicting aliases for register {accessor.base_reg} at {path}.registers."
             )
         known_masks[accessor.base_reg] = previous_mask | accessor.mask
-        known_values[accessor.base_reg] = (
-            previous_value & ~accessor.mask
-        ) | (shifted & accessor.mask)
+        known_values[accessor.base_reg] = (previous_value & ~accessor.mask) | (
+            shifted & accessor.mask
+        )
         state.write_register(normalized, register_value)
 
     ranges: list[tuple[int, int]] = []
@@ -605,9 +585,7 @@ def _decode_state(value: object, architecture: Arch, path: str, *, legacy: bool)
         except (binascii.Error, ValueError) as error:
             raise StateParseError(f"Invalid base64 data at {memory_path}.data.") from error
         if len(data) != size:
-            raise StateParseError(
-                f"{memory_path} declares {size} bytes but contains {len(data)}."
-            )
+            raise StateParseError(f"{memory_path} declares {size} bytes but contains {len(data)}.")
         ranges.append((start, end))
         state.write_memory(start, data)
 
@@ -621,9 +599,7 @@ def _encode_state(
 ) -> dict:
     register_bits = state.known_register_bits()
     registers = {name: value for name, (value, _) in register_bits.items()}
-    register_validity = {
-        name: valid_mask for name, (_, valid_mask) in register_bits.items()
-    }
+    register_validity = {name: valid_mask for name, (_, valid_mask) in register_bits.items()}
     memory = [
         {
             "range": [address, address + len(data)],
@@ -658,6 +634,49 @@ def _validate_state_addresses(
             )
 
 
+class _BoundedCache:
+    def __init__(self, maximum: int):
+        self.maximum = maximum
+        self.values: OrderedDict[object, object] = OrderedDict()
+
+    def get_or_create(self, key: object, factory):
+        try:
+            value = self.values.pop(key)
+        except KeyError:
+            value = factory()
+            if len(self.values) >= self.maximum:
+                self.values.popitem(last=False)
+        self.values[key] = value
+        return value
+
+
+@dataclass(slots=True)
+class _TransformDecodeCache:
+    expressions: _BoundedCache
+    instructions: _BoundedCache
+
+    @classmethod
+    def bounded(cls) -> _TransformDecodeCache:
+        return cls(
+            _BoundedCache(_STREAM_EXPRESSION_CACHE_SIZE),
+            _BoundedCache(_STREAM_INSTRUCTION_CACHE_SIZE),
+        )
+
+
+def _parse_cached_expression(
+    text: str,
+    cache: _TransformDecodeCache | None,
+) -> Expr:
+    value = (
+        str_to_expr(text)
+        if cache is None
+        else cache.expressions.get_or_create(text, lambda: str_to_expr(text))
+    )
+    if not isinstance(value, Expr):
+        raise ValueError(f"Expression parser returned {type(value).__name__}.")
+    return value
+
+
 def _validate_transform_document(
     value: object,
     architecture: Arch,
@@ -665,6 +684,7 @@ def _validate_transform_document(
     *,
     legacy: bool,
     schema_version: int = SCHEMA_VERSION,
+    decode_cache: _TransformDecodeCache | None = None,
 ) -> SymbolicTransform:
     document = _mapping(value, path)
     if not legacy and schema_version >= 3:
@@ -693,19 +713,19 @@ def _validate_transform_document(
             f"{path}.arch is {encoded_architecture}, expected {architecture}."
         )
 
-    _integer(
+    tid = _integer(
         _required(document, "tid", path),
         f"{path}.tid",
         minimum=0,
         maximum=MAX_ADDRESS,
     )
-    _integer(
+    start = _integer(
         _required(document, "from_addr", path),
         f"{path}.from_addr",
         minimum=0,
         maximum=MAX_ADDRESS,
     )
-    _integer(
+    end = _integer(
         _required(document, "to_addr", path),
         f"{path}.to_addr",
         minimum=0,
@@ -713,6 +733,7 @@ def _validate_transform_document(
     )
 
     registers = _mapping(_required(document, "regs", path), f"{path}.regs")
+    parsed_registers = {}
     changed_register_masks: dict[str, int] = {}
     for name, expression in registers.items():
         if not isinstance(name, str):
@@ -737,7 +758,7 @@ def _validate_transform_document(
         if len(expression_text) > MAX_EXPRESSION_CHARS:
             raise TraceLimitError(f"Expression at {path}.regs.{name} is too large.")
         try:
-            parsed_expression = str_to_expr(expression_text)
+            parsed_expression = _parse_cached_expression(expression_text, decode_cache)
         except Exception as error:
             raise TransformParseError(
                 f"Unable to parse expression at {path}.regs.{name}: {error}."
@@ -747,7 +768,9 @@ def _validate_transform_document(
                 f"Expression for {name} at {path}.regs is {parsed_expression.size} bits, "
                 f"expected {accessor.num_bits}."
             )
+        parsed_registers[normalized] = parsed_expression
 
+    parsed_memory_writes: list[MemoryWrite] = []
     memory_write_count: int
     if not legacy and schema_version >= 3:
         memory_writes = _list(
@@ -763,6 +786,17 @@ def _validate_transform_document(
             assert address is not None and expression is not None
             if len(address) > MAX_EXPRESSION_CHARS or len(expression) > MAX_EXPRESSION_CHARS:
                 raise TraceLimitError(f"Memory expression at {write_path} is too large.")
+            try:
+                parsed_memory_writes.append(
+                    MemoryWrite(
+                        _parse_cached_expression(address, decode_cache),
+                        _parse_cached_expression(expression, decode_cache),
+                    )
+                )
+            except Exception as error:
+                raise TransformParseError(
+                    f"Unable to parse memory expression at {write_path}: {error}."
+                ) from error
     else:
         memory = _mapping(_required(document, "mem", path), f"{path}.mem")
         memory_write_count = len(memory)
@@ -771,22 +805,29 @@ def _validate_transform_document(
                 raise FieldTypeError(f"{path}.mem keys must be strings.")
             expression_text = _string(expression, f"{path}.mem[{address}]")
             assert expression_text is not None
-            if (
-                len(address) > MAX_EXPRESSION_CHARS
-                or len(expression_text) > MAX_EXPRESSION_CHARS
-            ):
+            if len(address) > MAX_EXPRESSION_CHARS or len(expression_text) > MAX_EXPRESSION_CHARS:
                 raise TraceLimitError(f"Memory expression at {path}.mem is too large.")
+            try:
+                parsed_memory_writes.append(
+                    MemoryWrite(
+                        _parse_cached_expression(address, decode_cache),
+                        _parse_cached_expression(expression_text, decode_cache),
+                    )
+                )
+            except Exception as error:
+                raise TransformParseError(
+                    f"Unable to parse memory expression at {path}.mem: {error}."
+                ) from error
 
     instructions = _list(_required(document, "instructions", path), f"{path}.instructions")
+    parsed_instructions: list[Instruction] = []
     if len(instructions) > MAX_INSTRUCTIONS_PER_TRANSFORM:
         raise TraceLimitError(f"{path}.instructions contains too many instructions.")
     for index, encoded_instruction in enumerate(instructions):
         instruction_path = f"{path}.instructions[{index}]"
         instruction = _list(encoded_instruction, instruction_path)
         if len(instruction) != 2:
-            raise InstructionParseError(
-                f"{instruction_path} must contain [length, text]."
-            )
+            raise InstructionParseError(f"{instruction_path} must contain [length, text].")
         instruction_length = _integer(
             instruction[0],
             f"{instruction_path}[0]",
@@ -800,11 +841,40 @@ def _validate_transform_document(
         assert text is not None
         if not text or len(text) > MAX_INSTRUCTION_TEXT_CHARS:
             raise InstructionParseError(f"Invalid instruction text at {instruction_path}.")
+        assert text is not None
+        key = (architecture.key, instruction_length, text)
+        try:
+            template = (
+                Instruction.from_string(text, architecture, offset=0, length=instruction_length)
+                if decode_cache is None
+                else decode_cache.instructions.get_or_create(
+                    key,
+                    lambda: Instruction.from_string(
+                        text,
+                        architecture,
+                        offset=0,
+                        length=instruction_length,
+                    ),
+                )
+            )
+        except Exception as error:
+            raise InstructionParseError(
+                f"Unable to parse instruction at {instruction_path}: {error}."
+            ) from error
+        assert isinstance(template, Instruction)
+        decoded_instruction = copy.copy(template)
+        decoded_instruction.instr = copy.copy(template.instr)
+        parsed_instructions.append(decoded_instruction)
 
-    decode_document = dict(document)
-    decode_document["arch"] = architecture.serialized_name
     try:
-        transform = SymbolicTransform.from_json(decode_document)
+        transform = SymbolicTransform(tid, {}, [], architecture, start, end)
+        transform.changed_regs = parsed_registers
+        transform.memory_writes = parsed_memory_writes
+        transform.instructions = parsed_instructions
+        instruction_address = start
+        for instruction in transform.instructions:
+            instruction.addr = instruction_address
+            instruction_address += instruction.length
     except Exception as error:
         raise TransformParseError(f"Unable to decode {path}: {error}.") from error
     if transform.arch != architecture:
@@ -980,6 +1050,7 @@ def _decode_symbolic_item(
     architecture: Arch,
     path: str,
     schema_version: int,
+    decode_cache: _TransformDecodeCache | None = None,
 ) -> SymbolicTraceItem:
     if schema_version == 2:
         return _validate_transform_document(
@@ -988,6 +1059,7 @@ def _decode_symbolic_item(
             path,
             legacy=False,
             schema_version=2,
+            decode_cache=decode_cache,
         )
     document = _mapping(value, path)
     record_kind = _string(
@@ -1001,6 +1073,7 @@ def _decode_symbolic_item(
             path,
             legacy=False,
             schema_version=schema_version,
+            decode_cache=decode_cache,
         )
     if record_kind == "gap":
         return _validate_gap_document(document, architecture, path)
@@ -1049,20 +1122,14 @@ def _parse_legacy_states(document: Mapping) -> MaterializedTrace[ProgramState]:
             "Legacy empty snapshot documents do not identify trace kind or architecture."
         )
     environment_document = _required(document, "env", "legacy trace")
-    environment_architecture = _legacy_architecture_from_environment(
-        environment_document
-    )
+    environment_architecture = _legacy_architecture_from_environment(environment_document)
     architecture = _resolve_legacy_architecture(
         _required(document, "architecture", "legacy trace"),
         "legacy trace.architecture",
         environment_architecture,
     )
-    environment = _parse_environment(
-        environment_document, architecture, legacy=True
-    )
-    items = _list(
-        _required(document, "snapshots", "legacy trace"), "legacy trace.snapshots"
-    )
+    environment = _parse_environment(environment_document, architecture, legacy=True)
+    items = _list(_required(document, "snapshots", "legacy trace"), "legacy trace.snapshots")
     if len(items) > MAX_TRACE_ITEMS:
         raise TraceLimitError("Legacy state trace contains too many items.")
     states = [
@@ -1094,9 +1161,7 @@ def serialize_snapshots(
     addresses = snapshots.addresses
     if addresses is not None:
         _validate_state_addresses(snapshots, addresses)
-    document = _header_document(
-        "states", architecture, environment, addresses, len(snapshots)
-    )
+    document = _header_document("states", architecture, environment, addresses, len(snapshots))
     document["items"] = [
         _encode_state(state, architecture, f"trace.items[{index}]")
         for index, state in enumerate(snapshots)
@@ -1130,9 +1195,7 @@ def _parse_legacy_transforms(document: Mapping) -> MaterializedTrace[SymbolicTra
     if len(items) > MAX_TRACE_ITEMS:
         raise TraceLimitError("Legacy transform trace contains too many items.")
     environment_document = _required(document, "env", "legacy trace")
-    environment_architecture = _legacy_architecture_from_environment(
-        environment_document
-    )
+    environment_architecture = _legacy_architecture_from_environment(environment_document)
     if items:
         first_item = _mapping(items[0], "legacy trace.states[0]")
         architecture = _resolve_legacy_architecture(
@@ -1146,9 +1209,7 @@ def _parse_legacy_transforms(document: Mapping) -> MaterializedTrace[SymbolicTra
         )
     else:
         architecture = environment_architecture
-    environment = _parse_environment(
-        environment_document, architecture, legacy=True
-    )
+    environment = _parse_environment(environment_document, architecture, legacy=True)
     transforms = [
         _validate_transform_document(
             item,
@@ -1218,17 +1279,13 @@ def _serialize_transform_json(
             raise ArchitectureParseError(
                 f"Transform {index} has architecture {transform.arch}, expected {architecture}."
             )
-        items.append(
-            _encode_symbolic_item(transform, architecture, f"trace.items[{index}]")
-        )
+        items.append(_encode_symbolic_item(transform, architecture, f"trace.items[{index}]"))
     if len(items) != len(addresses):
         raise TraceCardinalityError(
             f"Transform stream ended after {len(items)} items; expected {len(addresses)}."
         )
 
-    document = _header_document(
-        "transforms", architecture, environment, addresses, len(items)
-    )
+    document = _header_document("transforms", architecture, environment, addresses, len(items))
     document["items"] = items
     with open(out_file, "w") as out_stream:
         out_stream.write(json.dumps(document, option=json.OPT_INDENT_2).decode())
@@ -1252,9 +1309,7 @@ def _serialize_transform_msgpack(
     out_file: str | PathLike[str],
 ) -> None:
     architecture, environment, addresses = _transform_trace_metadata(trace)
-    header = _header_document(
-        "transforms", architecture, environment, addresses, len(addresses)
-    )
+    header = _header_document("transforms", architecture, environment, addresses, len(addresses))
     with open(out_file, "wb") as out_stream:
         out_stream.write(MSGPACK_MAGIC)
         _write_msgpack_frame(out_stream, header)
@@ -1268,8 +1323,7 @@ def _serialize_transform_msgpack(
                 )
             if transform.arch != architecture:
                 raise ArchitectureParseError(
-                    f"Transform {index} has architecture {transform.arch}, "
-                    f"expected {architecture}."
+                    f"Transform {index} has architecture {transform.arch}, expected {architecture}."
                 )
             item = _encode_symbolic_item(
                 transform,
@@ -1312,6 +1366,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
         self._header = header
         self._frame_key = frame_key
         self._legacy = legacy
+        self._decode_cache = _TransformDecodeCache.bounded()
         self._index = 0
         self._finished = False
 
@@ -1343,9 +1398,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
             except ParseError:
                 raise
             except Exception as error:
-                raise TraceDecodeError(
-                    f"Invalid trailing MessagePack frame: {error}."
-                ) from error
+                raise TraceDecodeError(f"Invalid trailing MessagePack frame: {error}.") from error
             raise TraceCardinalityError(
                 f"Transform stream contains more than {self._header.item_count} items."
             )
@@ -1358,6 +1411,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
                 self._header.architecture,
                 f"trace.items[{self._index}]",
                 legacy=True,
+                decode_cache=self._decode_cache,
             )
         else:
             transform = _decode_symbolic_item(
@@ -1365,6 +1419,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
                 self._header.architecture,
                 f"trace.items[{self._index}]",
                 self._header.version,
+                self._decode_cache,
             )
         assert self._header.addresses is not None
         expected_address = self._header.addresses[self._index]
@@ -1402,9 +1457,7 @@ def _read_exact(stream: BinaryIO, size: int, path: str, *, prefix: bytes = b"") 
     while len(data) < size:
         chunk = stream.read(size - len(data))
         if not chunk:
-            raise TruncatedTraceError(
-                f"{path} ended after {len(data)} bytes; expected {size}."
-            )
+            raise TruncatedTraceError(f"{path} ended after {len(data)} bytes; expected {size}.")
         data.extend(chunk)
     return bytes(data)
 
@@ -1430,9 +1483,7 @@ def _read_msgpack_frame(
     if length == 0:
         raise TraceDecodeError(f"{path} has an empty MessagePack payload.")
     if length > MAX_MSGPACK_FRAME_BYTES:
-        raise TraceLimitError(
-            f"{path} exceeds the {MAX_MSGPACK_FRAME_BYTES}-byte frame limit."
-        )
+        raise TraceLimitError(f"{path} exceeds the {MAX_MSGPACK_FRAME_BYTES}-byte frame limit.")
     payload = _read_exact(stream, length, f"{path} payload")
     try:
         return msgpack.unpackb(payload, raw=False, strict_map_key=False)
@@ -1555,9 +1606,7 @@ def _stream_legacy_transformations(
         )
 
     assert architecture is not None
-    environment = _parse_environment(
-        environment_document, architecture, legacy=True
-    )
+    environment = _parse_environment(environment_document, architecture, legacy=True)
     header = _TraceHeader(
         1,
         "transforms",
@@ -1603,7 +1652,5 @@ def stream_transformation(stream: BinaryIO) -> TransformStream[SymbolicTraceItem
     unpacker = _msgpack_unpacker(legacy_stream)
     header = _next_msgpack_header(unpacker)
     if "schema_version" in header:
-        raise TraceDecodeError(
-            "Versioned MessagePack traces require the Focaccia magic envelope."
-        )
+        raise TraceDecodeError("Versioned MessagePack traces require the Focaccia magic envelope.")
     return _stream_legacy_transformations(header, unpacker)

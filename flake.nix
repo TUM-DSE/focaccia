@@ -2176,6 +2176,19 @@
       pytestTargets = [ "tests/test_match.py" ];
     };
 
+    repeatedTransformDecodingCheck = mkStaticUnitCheck {
+      name = "repeated-transform-decoding";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_persistence.py"
+      ];
+      pytestTargets = [
+        "tests/test_persistence.py"
+        "-k"
+        "repeated_msgpack_decode or msgpack_transform_round_trip or msgpack_stream_rejects"
+      ];
+    };
+
     persistenceAdversarialInputsCheck = mkStaticUnitCheck {
       name = "persistence-adversarial-inputs";
       ruffTargets = [
@@ -2702,6 +2715,7 @@
       typed-empty-traces = typedEmptyTracesCheck;
       concrete-pc-diagnostic = concretePcDiagnosticCheck;
       matching-failure-diagnostics = matchingFailureDiagnosticsCheck;
+      repeated-transform-decoding = repeatedTransformDecodingCheck;
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;

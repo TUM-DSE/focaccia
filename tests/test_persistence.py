@@ -34,7 +34,7 @@ from focaccia.parser import (
 )
 from focaccia.persistence import MAX_MSGPACK_FRAME_BYTES, MAX_TRACE_ITEMS, MSGPACK_MAGIC
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import InstructionRecord, SymbolicTransform, TraceGap
+from focaccia.symbolic import Instruction, InstructionRecord, SymbolicTransform, TraceGap
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 FIXTURES = Path(__file__).parent / "fixtures" / "traces"
@@ -135,10 +135,69 @@ def test_schema_v3_json_transform_round_trip(tmp_path):
         parsed = parse_transformations(stream)
     assert parsed.env == transform_trace().env
     assert parsed.require_addresses() == (0x1000,)
-    assert [cast(SymbolicTransform, item).to_json() for item in parsed] == [
-        transform().to_json()
-    ]
+    assert [cast(SymbolicTransform, item).to_json() for item in parsed] == [transform().to_json()]
     assert list(parsed) == list(parsed)
+
+
+def test_repeated_msgpack_decode_caches_content_without_sharing_mutable_items(
+    tmp_path, monkeypatch
+):
+    import focaccia.persistence as persistence
+
+    first = transform()
+    first.instructions = [Instruction.from_string("NOP", first.arch, length=1)]
+    second = transform()
+    second.instructions = [Instruction.from_string("NOP", second.arch, length=1)]
+    second.addr = 0x1001
+    second.range = (0x1001, 0x1002)
+    trace = MaterializedTrace(
+        [first, second],
+        environment(first.arch),
+        [first.addr, second.addr],
+    )
+    path = tmp_path / "repeated.msgpack"
+    serialize_transformations(trace, path, "msgpack")
+
+    expression_calls = 0
+    instruction_calls = 0
+    original_expression_parser = persistence.str_to_expr
+    original_instruction_parser = persistence.Instruction.from_string
+
+    def counted_expression_parser(text):
+        nonlocal expression_calls
+        expression_calls += 1
+        return original_expression_parser(text)
+
+    def counted_instruction_parser(text, arch, offset=0, length=0):
+        nonlocal instruction_calls
+        instruction_calls += 1
+        return original_instruction_parser(text, arch, offset, length)
+
+    monkeypatch.setattr(persistence, "str_to_expr", counted_expression_parser)
+    monkeypatch.setattr(
+        persistence.Instruction,
+        "from_string",
+        staticmethod(counted_instruction_parser),
+    )
+
+    with path.open("rb") as source:
+        parsed = list(stream_transformation(source))
+
+    assert expression_calls == 3
+    assert instruction_calls == 1
+    assert parsed[0] is not parsed[1]
+    assert (
+        cast(SymbolicTransform, parsed[0]).changed_regs
+        is not cast(SymbolicTransform, parsed[1]).changed_regs
+    )
+    assert (
+        cast(SymbolicTransform, parsed[0]).instructions[0]
+        is not cast(SymbolicTransform, parsed[1]).instructions[0]
+    )
+    cast(SymbolicTransform, parsed[0]).changed_regs.clear()
+    cast(SymbolicTransform, parsed[0]).instructions.clear()
+    assert cast(SymbolicTransform, parsed[1]).changed_regs
+    assert cast(SymbolicTransform, parsed[1]).instructions
 
 
 def test_schema_v3_msgpack_transform_round_trip(tmp_path):
@@ -167,9 +226,7 @@ def test_schema_v2_transform_documents_remain_readable(tmp_path):
     document["schema_version"] = 2
     for item in document["items"]:
         item.pop("record_kind")
-        item["mem"] = {
-            write["address"]: write["value"] for write in item.pop("memory_writes")
-        }
+        item["mem"] = {write["address"]: write["value"] for write in item.pop("memory_writes")}
 
     parsed = parse_transformations(io.StringIO(json.dumps(document)))
 
@@ -223,9 +280,7 @@ def test_ordered_memory_writes_round_trip_without_collapsing(tmp_path):
     parsed_transform = cast(SymbolicTransform, parsed[0])
     assert len(parsed_transform.memory_writes) == 2
     initial = ProgramState(arch)
-    assert parsed_transform.eval_memory_transforms(initial) == {
-        0x2000: b"\xbb\xaa"
-    }
+    assert parsed_transform.eval_memory_transforms(initial) == {0x2000: b"\xbb\xaa"}
 
 
 def test_trace_gaps_round_trip_in_json_and_streaming_msgpack(tmp_path):
@@ -387,9 +442,7 @@ def test_known_legacy_json_fixtures_are_readable():
 
 
 def test_ambiguous_legacy_aarch64_identity_is_rejected():
-    transform_document = json.loads(
-        (FIXTURES / "legacy-transform-v1.json").read_text()
-    )
+    transform_document = json.loads((FIXTURES / "legacy-transform-v1.json").read_text())
     transform_document["states"][0]["arch"] = "aarch64"
     state_document = json.loads((FIXTURES / "legacy-state-v1.json").read_text())
     state_document["architecture"] = "aarch64"
@@ -405,9 +458,7 @@ def test_ambiguous_legacy_aarch64_identity_is_rejected():
     transform_document["env"]["architecture"] = explicit_identity
     state_document["env"]["architecture"] = explicit_identity
     state_document["snapshots"][0]["registers"] = {"PC": 0x1000}
-    transforms = parse_transformations(
-        io.StringIO(json.dumps(transform_document))
-    )
+    transforms = parse_transformations(io.StringIO(json.dumps(transform_document)))
     states = parse_snapshots(io.StringIO(json.dumps(state_document)))
     assert transforms[0].arch == aarch64.ArchAArch64("big")
     assert states[0].arch == aarch64.ArchAArch64("big")
@@ -431,9 +482,7 @@ def test_unknown_schema_versions_and_wrong_trace_kinds_are_rejected(tmp_path):
     wrong_kind = copy.deepcopy(document)
     wrong_kind["trace_kind"] = "states"
     wrong_item_shape = copy.deepcopy(document)
-    wrong_item_shape["items"] = [
-        {"registers": {}, "register_validity": {}, "memory": []}
-    ]
+    wrong_item_shape["items"] = [{"registers": {}, "register_validity": {}, "memory": []}]
 
     with pytest.raises(UnsupportedSchemaVersionError):
         parse_transformations(io.StringIO(json.dumps(unknown)))
@@ -473,15 +522,11 @@ def test_state_memory_ranges_and_register_values_are_validated():
     bad_register = copy.deepcopy(document)
     bad_register["items"][0]["registers"]["RIP"] = 1 << 64
     bad_memory = copy.deepcopy(document)
-    bad_memory["items"][0]["memory"] = [
-        {"range": [0x2000, 0x2002], "data": "AA=="}
-    ]
+    bad_memory["items"][0]["memory"] = [{"range": [0x2000, 0x2002], "data": "AA=="}]
     bad_validity = copy.deepcopy(document)
     bad_validity["items"][0]["register_validity"]["RIP"] = 0xFF
     bad_range = copy.deepcopy(document)
-    bad_range["items"][0]["memory"] = [
-        {"range": [0x2002, 0x2001], "data": ""}
-    ]
+    bad_range["items"][0]["memory"] = [{"range": [0x2002, 0x2001], "data": ""}]
     overlapping_ranges = copy.deepcopy(document)
     overlapping_ranges["items"][0]["memory"] = [
         {"range": [0x2000, 0x2002], "data": "AAE="},
@@ -554,16 +599,12 @@ def test_truncated_and_trailing_msgpack_streams_are_rejected(tmp_path):
     with pytest.raises(TruncatedTraceError):
         next(truncated_stream)
 
-    trailing = io.BytesIO(
-        encode_msgpack_frames([frames[0], frames[1], frames[1]])
-    )
+    trailing = io.BytesIO(encode_msgpack_frames([frames[0], frames[1], frames[1]]))
     trailing_stream = stream_transformation(trailing)
     with pytest.raises(TraceCardinalityError):
         list(trailing_stream)
 
-    incomplete_trailing = io.BytesIO(
-        encode_msgpack_frames([frames[0], frames[1]]) + b"\x00"
-    )
+    incomplete_trailing = io.BytesIO(encode_msgpack_frames([frames[0], frames[1]]) + b"\x00")
     incomplete_trailing_stream = stream_transformation(incomplete_trailing)
     with pytest.raises(TruncatedTraceError, match="frame 1 length"):
         list(incomplete_trailing_stream)
@@ -636,9 +677,7 @@ def test_state_documents_reject_noncanonical_registers_and_invalid_memory_data()
         parse_snapshots(io.StringIO(json.dumps(noncanonical)))
 
     invalid_base64 = copy.deepcopy(document)
-    invalid_base64["items"][0]["memory"] = [
-        {"range": [0x2000, 0x2001], "data": "!"}
-    ]
+    invalid_base64["items"][0]["memory"] = [{"range": [0x2000, 0x2001], "data": "!"}]
     with pytest.raises(StateParseError, match="Invalid base64"):
         parse_snapshots(io.StringIO(json.dumps(invalid_base64)))
 
