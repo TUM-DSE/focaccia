@@ -113,7 +113,7 @@ class TransitionMatcher:
         self._extra_concrete_count = 0
         self._first_extra_concrete_index: int | None = None
         self._pending_transform: SymbolicTraceItem | None = None
-        self._planned_destination: tuple[int, int, SymbolicTraceItem] | None = None
+        self._planned_destinations: dict[tuple[int, int], SymbolicTraceItem] = {}
         self._architecture = None
         self._thread_id: int | None = None
 
@@ -133,6 +133,46 @@ class TransitionMatcher:
     def current_destination_pc(self) -> int | None:
         """Return the next symbolic destination from the retained source."""
         return self._current.range[1] if self._has_source and self._current is not None else None
+
+    def plan_successors(self) -> tuple[SymbolicTraceItem, ...]:
+        """Compose candidate observable ranges through one bounded basic block.
+
+        QEMU may expose only a later boundary within the native execution's
+        current basic block. Every intervening oracle destination is therefore
+        a candidate until the executed control-flow instruction terminates the
+        block. The persisted trace fixes the executed path; divergent emulator
+        destinations remain unmatched and fail closed.
+        """
+        if self._done or not self._has_source:
+            return ()
+        assert self._current is not None
+        assert self._current_index is not None
+        planned: list[SymbolicTraceItem] = []
+        previous: SymbolicTraceItem | None = None
+        for end_index in range(self._current_index, len(self.addresses)):
+            transform = self._read_transform(end_index)
+            if transform is None:
+                return tuple(planned)
+            if previous is not None and previous.range[1] != transform.range[0]:
+                self._fatal(
+                    "symbolic-trace-discontinuous",
+                    f"Candidate transform {end_index - 1} ends at "
+                    f"{hex(previous.range[1])}, but transform {end_index} starts "
+                    f"at {hex(transform.range[0])}.",
+                    transform_index=end_index,
+                )
+                return tuple(planned)
+            candidate = self.plan_destination(transform.range[1])
+            if candidate is not None:
+                planned.append(candidate)
+            previous = transform
+            if isinstance(transform, TraceGap):
+                break
+            if end_index > self._current_index and transform.instructions:
+                underlying = getattr(transform.instructions[-1], "instr", None)
+                if underlying is None or underlying.breakflow():
+                    break
+        return tuple(planned)
 
     def _diagnose(
         self,
@@ -535,12 +575,13 @@ class TransitionMatcher:
         end_index = self._find_destination(start_index, pc, self._concrete_count)
         if end_index is None:
             return None
-        cached = self._planned_destination
-        if cached is not None and cached[:2] == (start_index, end_index):
-            return cached[2]
+        key = (start_index, end_index)
+        cached = self._planned_destinations.get(key)
+        if cached is not None:
+            return cached
         planned = self._compose_through(end_index, self._concrete_count)
         if planned is not None:
-            self._planned_destination = (start_index, end_index, planned)
+            self._planned_destinations[key] = planned
         return planned
 
     def observe(self, pc: int) -> MatchedBoundary | None:
@@ -641,11 +682,11 @@ class TransitionMatcher:
                 self._done = True
             return None
 
-        planned = self._planned_destination
+        planned = self._planned_destinations.get((start_index, end_index))
         if end_index > start_index and self._skip_unmatched:
             incoming = self._skip_through(end_index, concrete_index)
-        elif planned is not None and planned[:2] == (start_index, end_index):
-            incoming = planned[2]
+        elif planned is not None:
+            incoming = planned
         else:
             incoming = self._compose_through(end_index, concrete_index)
         if incoming is None:
@@ -677,7 +718,7 @@ class TransitionMatcher:
         outgoing: SymbolicTraceItem | None = None
         self._current = None
         self._current_index = None
-        self._planned_destination = None
+        self._planned_destinations.clear()
 
         if self._stop_address == pc:
             self._stop_at_boundary(next_index, pc)

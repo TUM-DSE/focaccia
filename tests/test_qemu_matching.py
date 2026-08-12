@@ -8,7 +8,7 @@ from miasm.expression.expression import ExprId, ExprInt, ExprMem
 from focaccia.arch import x86
 from focaccia.qemu.validation_server import collect_conc_trace
 from focaccia.snapshot import ProgramState, RegisterAccessError
-from focaccia.symbolic import SymbolicTransform, TraceGap
+from focaccia.symbolic import Instruction, SymbolicTransform, TraceGap
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 
@@ -113,6 +113,52 @@ def test_plugin_collector_propagates_opt_in_unmatched_skip():
     assert isinstance(result.trace.transforms[0], TraceGap)
     assert result.trace.transforms[1].range == (0x1002, 0x1003)
     assert "unmatched-symbolic-transforms-skipped" in codes(result)
+
+
+def test_plugin_collector_captures_union_of_direct_successor_dependencies():
+    branch = transform(0x1000, 0x1001)
+    branch.instructions = [Instruction.from_string("JNZ 0x1002", ARCH, 0x1000, 2)]
+    fallthrough = SymbolicTransform(
+        1,
+        {ExprId("RAX", 64): ExprId("RBX", 64)},
+        [],
+        ARCH,
+        0x1001,
+        0x1002,
+    )
+    taken = SymbolicTransform(
+        1,
+        {ExprId("RAX", 64): ExprMem(ExprInt(0x2000, 64), 64)},
+        [],
+        ARCH,
+        0x1002,
+        0x1003,
+    )
+
+    class TakenStates:
+        def __init__(self):
+            self._states = iter(
+                [
+                    state(0x1000, rbx=7, memory={0x2000: b"abcdefgh"}),
+                    state(0x1002, rax=7, rbx=7, memory={0x2000: b"abcdefgh"}),
+                    state(0x1003, rax=int.from_bytes(b"abcdefgh", "little")),
+                ]
+            )
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+    result = collect_conc_trace(TakenStates(), trace(branch, fallthrough, taken))
+
+    assert result.trace is not None
+    source = result.trace.state_boundaries[0]
+    assert source.read_register("RBX") == 7
+    assert source.read_memory(0x2000, 8) == b"abcdefgh"
+    assert "snapshot-register-unavailable" not in codes(result)
+    assert "snapshot-memory-unavailable" not in codes(result)
 
 
 def test_plugin_collector_captures_late_composed_source_dependencies():

@@ -11,7 +11,12 @@ import focaccia.parser as parser
 from focaccia.arch import Arch, supported_architectures
 from focaccia.compare import ErrorTypes, compare_symbolic
 from focaccia.match import MatchResult, TransitionMatcher
-from focaccia.qemu.snapshot import collect_minimal_snapshot, snapshot_diagnostics
+from focaccia.qemu.snapshot import (
+    collect_snapshot_plan,
+    merge_snapshot_plans,
+    plan_minimal_snapshot,
+    snapshot_diagnostics,
+)
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
 from focaccia.qemu.transport import PluginListener, PluginTransport
 from focaccia.snapshot import ProgramState, ReadableProgramState, RegisterAccessError
@@ -171,20 +176,23 @@ def collect_conc_trace(
         boundary = matcher.observe(pc)
         if boundary is None:
             continue
-        source_outgoing = boundary.outgoing
-        if boundary.outgoing is not None:
-            next_cutpoint = getattr(state_iterator, "next_cutpoint_pc", None)
-            if next_cutpoint is not None:
-                destination_pc = next_cutpoint(matcher)
-                if destination_pc is not None:
-                    source_outgoing = matcher.plan_destination(destination_pc)
         previous_state = retained_states[-1] if retained_states else current_state
-        collection = collect_minimal_snapshot(
+        plans = [
+            plan_minimal_snapshot(
+                current_state,
+                boundary.incoming,
+                boundary.outgoing,
+            )
+        ]
+        if boundary.outgoing is not None:
+            plans.extend(
+                plan_minimal_snapshot(current_state, boundary.incoming, candidate)
+                for candidate in matcher.plan_successors()
+            )
+        collection = collect_snapshot_plan(
             previous_state,
             current_state,
-            boundary.incoming,
-            boundary.outgoing,
-            source_outgoing=source_outgoing,
+            merge_snapshot_plans(*plans),
         )
         diagnostics.extend(
             snapshot_diagnostics(

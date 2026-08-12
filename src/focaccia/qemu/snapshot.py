@@ -83,6 +83,26 @@ def _transform_architecture(
     return architecture
 
 
+def merge_snapshot_plans(*plans: SnapshotPlan) -> SnapshotPlan:
+    """Merge candidate plans without weakening architecture identity."""
+    if not plans:
+        raise SnapshotPlanningError("Cannot merge an empty snapshot-plan set.")
+    architecture = plans[0].architecture
+    registers: set[str] = set()
+    memory: list[MemoryDependency] = []
+    seen_memory: set[tuple[ExprMem, AddressState]] = set()
+    for plan in plans:
+        if plan.architecture != architecture:
+            raise SnapshotPlanningError("Candidate snapshot plans use different architectures.")
+        registers.update(plan.registers)
+        for dependency in plan.memory:
+            key = (dependency.expression, dependency.address_state)
+            if key not in seen_memory:
+                seen_memory.add(key)
+                memory.append(dependency)
+    return SnapshotPlan(architecture, tuple(sorted(registers)), tuple(memory))
+
+
 def plan_minimal_snapshot(
     current_state: ReadableProgramState,
     incoming: SymbolicTraceItem | None,
@@ -96,8 +116,7 @@ def plan_minimal_snapshot(
     if isinstance(incoming, SymbolicTransform):
         registers.update(incoming.canonical_register_outputs())
         memory.extend(
-            MemoryDependency(write.destination, "previous")
-            for write in incoming.memory_writes
+            MemoryDependency(write.destination, "previous") for write in incoming.memory_writes
         )
 
     if isinstance(outgoing, SymbolicTransform):
@@ -123,20 +142,17 @@ def plan_minimal_snapshot(
     )
 
 
-def collect_minimal_snapshot(
+def collect_snapshot_plan(
     previous_state: ReadableProgramState,
     current_state: ReadableProgramState,
-    incoming: SymbolicTraceItem | None,
-    outgoing: SymbolicTraceItem | None,
-    *,
-    source_outgoing: SymbolicTraceItem | None = None,
+    plan: SnapshotPlan,
 ) -> SnapshotCollection:
-    """Collect a plan, retaining unavailable values as explicit unknowns."""
-    plan = plan_minimal_snapshot(
-        current_state,
-        incoming,
-        source_outgoing if source_outgoing is not None else outgoing,
-    )
+    """Collect a prepared plan, retaining unavailable values as unknowns."""
+    if current_state.arch != plan.architecture:
+        raise SnapshotPlanningError(
+            f"Concrete architecture {current_state.arch} does not match "
+            f"snapshot architecture {plan.architecture}."
+        )
     if previous_state.arch != plan.architecture:
         raise SnapshotPlanningError(
             f"Previous concrete architecture {previous_state.arch} does not match "
@@ -164,14 +180,8 @@ def collect_minimal_snapshot(
     for dependency in plan.memory:
         expression = dependency.expression
         if expression.size <= 0 or expression.size % 8 != 0:
-            raise SnapshotPlanningError(
-                f"Non-byte memory expression width {expression.size}."
-            )
-        address_state = (
-            previous_state
-            if dependency.address_state == "previous"
-            else current_state
-        )
+            raise SnapshotPlanningError(f"Non-byte memory expression width {expression.size}.")
+        address_state = previous_state if dependency.address_state == "previous" else current_state
         try:
             address = eval_symbol(expression.ptr, address_state)
         except (RegisterAccessError, MemoryAccessError, SymbolEvaluationError, ValueError) as error:
@@ -201,8 +211,7 @@ def collect_minimal_snapshot(
             issues.append(
                 SnapshotIssue(
                     "memory-unavailable",
-                    f"Concrete backend returned {len(data)} of {size} bytes at "
-                    f"{hex(address)}.",
+                    f"Concrete backend returned {len(data)} of {size} bytes at {hex(address)}.",
                     address=address,
                     size=size,
                 )
@@ -211,6 +220,23 @@ def collect_minimal_snapshot(
         snapshot.write_memory(address, data)
 
     return SnapshotCollection(snapshot, tuple(issues))
+
+
+def collect_minimal_snapshot(
+    previous_state: ReadableProgramState,
+    current_state: ReadableProgramState,
+    incoming: SymbolicTraceItem | None,
+    outgoing: SymbolicTraceItem | None,
+    *,
+    source_outgoing: SymbolicTraceItem | None = None,
+) -> SnapshotCollection:
+    """Collect a plan, retaining unavailable values as explicit unknowns."""
+    plan = plan_minimal_snapshot(
+        current_state,
+        incoming,
+        source_outgoing if source_outgoing is not None else outgoing,
+    )
+    return collect_snapshot_plan(previous_state, current_state, plan)
 
 
 def snapshot_diagnostics(

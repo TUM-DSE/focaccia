@@ -37,7 +37,12 @@ from focaccia.qemu.report import (
     write_validation_failure_report,
     write_validation_report,
 )
-from focaccia.qemu.snapshot import collect_minimal_snapshot, snapshot_diagnostics
+from focaccia.qemu.snapshot import (
+    collect_snapshot_plan,
+    merge_snapshot_plans,
+    plan_minimal_snapshot,
+    snapshot_diagnostics,
+)
 from focaccia.qemu.target import GDBServerStateIterator
 
 logger = logging.getLogger("focaccia-qemu-validator")
@@ -91,18 +96,23 @@ def collect_conc_trace(
 
         boundary = matcher.observe(pc)
         if boundary is not None:
-            source_outgoing = boundary.outgoing
-            if boundary.outgoing is not None:
-                destination_pc = state_iterator.next_cutpoint_pc(matcher)
-                if destination_pc is not None:
-                    source_outgoing = matcher.plan_destination(destination_pc)
             previous_state = retained_states[-1] if retained_states else current_state
-            collection = collect_minimal_snapshot(
+            plans = [
+                plan_minimal_snapshot(
+                    current_state,
+                    boundary.incoming,
+                    boundary.outgoing,
+                )
+            ]
+            if boundary.outgoing is not None:
+                plans.extend(
+                    plan_minimal_snapshot(current_state, boundary.incoming, candidate)
+                    for candidate in matcher.plan_successors()
+                )
+            collection = collect_snapshot_plan(
                 previous_state,
                 current_state,
-                boundary.incoming,
-                boundary.outgoing,
-                source_outgoing=source_outgoing,
+                merge_snapshot_plans(*plans),
             )
             diagnostics.extend(
                 snapshot_diagnostics(

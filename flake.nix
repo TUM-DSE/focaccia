@@ -1450,6 +1450,21 @@
       ];
     };
 
+    adaptiveSuccessorSourcePlanningCheck = mkStaticUnitCheck {
+      name = "adaptive-successor-source-planning";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py::test_plugin_collector_captures_union_of_direct_successor_dependencies"
+        "tests/test_qemu_matching.py::test_plugin_collector_captures_late_composed_source_dependencies"
+      ];
+    };
+
     gdbWideRegisterCheck = mkStaticUnitCheck {
       name = "gdb-wide-registers";
       ruffTargets = [
@@ -2744,6 +2759,7 @@
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
       shared-snapshot-planner = sharedSnapshotPlannerCheck;
+      adaptive-successor-source-planning = adaptiveSuccessorSourcePlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
       x86-eflags-observation = x86EflagsObservationCheck;
       code-naming-policy = codeNamingPolicyCheck;
