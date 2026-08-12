@@ -1465,6 +1465,22 @@
       ];
     };
 
+    narrowVectorObservationCheck = mkStaticUnitCheck {
+      name = "narrow-vector-observation";
+      ruffTargets = [
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/state.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py::test_gdb_reads_narrow_vector_alias_without_requiring_zmm"
+        "tests/test_qemu_snapshot.py"
+      ];
+    };
+
     gdbWideRegisterCheck = mkStaticUnitCheck {
       name = "gdb-wide-registers";
       ruffTargets = [
@@ -2761,6 +2777,7 @@
       shared-snapshot-planner = sharedSnapshotPlannerCheck;
       adaptive-successor-source-planning = adaptiveSuccessorSourcePlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
+      narrow-vector-observation = narrowVectorObservationCheck;
       x86-eflags-observation = x86EflagsObservationCheck;
       code-naming-policy = codeNamingPolicyCheck;
       flake-source-boundary = flakeSourceBoundaryCheck;

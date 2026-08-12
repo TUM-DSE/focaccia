@@ -30,6 +30,30 @@ from focaccia.snapshot import (
 )
 
 
+class FakeVectorComponents:
+    def __init__(self, values: list[int]):
+        self.values = values
+
+    def __getitem__(self, index: int):
+        return FakeValue(self.values[index], 8)
+
+
+class FakeVectorValue:
+    def __init__(self, value: int, size: int):
+        self.value = value
+        self.type = SimpleNamespace(sizeof=size // 8)
+
+    def __getitem__(self, name: str):
+        if name != f"v{self.type.sizeof // 8}_int64":
+            raise KeyError(name)
+        return FakeVectorComponents(
+            [
+                self.value >> offset & ((1 << 64) - 1)
+                for offset in range(0, self.type.sizeof * 8, 64)
+            ]
+        )
+
+
 class FakeValue:
     def __init__(self, value: int, size: int):
         self.value = value
@@ -43,11 +67,11 @@ class FakeValue:
 
 
 class FakeFrame:
-    def __init__(self, registers: dict[str, FakeValue]):
+    def __init__(self, registers: dict[str, FakeValue | FakeVectorValue]):
         self.registers = registers
         self.reads: list[str] = []
 
-    def read_register(self, name: str) -> FakeValue:
+    def read_register(self, name: str) -> FakeValue | FakeVectorValue:
         self.reads.append(name)
         try:
             return self.registers[name]
@@ -114,6 +138,22 @@ def test_gdb_state_caches_base_registers_and_flag_aliases(monkeypatch):
     assert state.read_register("IOPL") == 3
     assert state.read_register("RFLAGS") == (1 << 0) | (1 << 6) | (3 << 12)
     assert frame.reads == ["rax", "eflags"]
+
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_gdb_reads_narrow_vector_alias_without_requiring_zmm(monkeypatch):
+    target = load_target_module(monkeypatch)
+    value = 0x112233445566778899AABBCCDDEEFF00
+    frame = FakeFrame({"xmm2": FakeVectorValue(value, 128)})
+    state = target.GDBProgramState(FakeInferior({}), frame, x86.ArchX86())
+
+    assert state.read_register("XMM2") == value
+    assert frame.reads == ["xmm2"]
+    with pytest.raises(RegisterAccessError):
+        ProgramState.read_register(state, "YMM2")
+    with pytest.raises(RegisterAccessError):
+        ProgramState.read_register(state, "ZMM2")
 
     sys.modules.pop("focaccia.qemu.target", None)
 

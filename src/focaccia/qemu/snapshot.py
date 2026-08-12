@@ -114,7 +114,7 @@ def plan_minimal_snapshot(
     memory: list[MemoryDependency] = []
 
     if isinstance(incoming, SymbolicTransform):
-        registers.update(incoming.canonical_register_outputs())
+        registers.update(incoming.validation_register_outputs())
         memory.extend(
             MemoryDependency(write.destination, "previous") for write in incoming.memory_writes
         )

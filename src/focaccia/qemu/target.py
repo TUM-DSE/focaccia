@@ -30,7 +30,7 @@ from focaccia.qemu.syscall import (
     UnsupportedReplayEffect,
 )
 
-logger = logging.getLogger('focaccia-qemu-target')
+logger = logging.getLogger("focaccia-qemu-target")
 debug = logger.debug
 info = logger.info
 
@@ -51,7 +51,7 @@ def match_event(event: Event, target: ReadableProgramState) -> bool:
     # Match just on PC. Some valid RR bookkeeping events record no registers.
     if event.pc is None:
         return False
-    debug(f'Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}')
+    debug(f"Matching for PC {hex(target.read_pc())} with event {hex(event.pc)}")
     if event.pc == target.read_pc():
         return True
     return False
@@ -106,9 +106,7 @@ class GDBProgramState(CachedBackendProgramState):
         values = value[f"v{num_longs}_int64"]
         result = 0
         for index in range(num_longs):
-            component = int(
-                values[index].cast(gdb.lookup_type("unsigned long"))
-            )
+            component = int(values[index].cast(gdb.lookup_type("unsigned long")))
             result |= component << (index * 64)
         return result
 
@@ -117,11 +115,17 @@ class GDBProgramState(CachedBackendProgramState):
         x86.archname: _read_vector_reg_x86,
     }
 
-    def _read_backend_register(self, base_reg: str) -> RegisterObservation:
+    def _read_backend_register(
+        self,
+        base_reg: str,
+        requested_reg: str | None = None,
+    ) -> RegisterObservation:
+        requested = self.arch.get_reg_accessor(requested_reg) if requested_reg else None
+        use_narrow_alias = requested is not None and requested.num_bits >= 128
         wire_name = (
             self.flag_backend_names[self.arch.archname]
             if self._flags_base is not None and base_reg == self._flags_base
-            else base_reg.lower()
+            else (requested_reg if use_narrow_alias else base_reg).lower()
         )
         canonical = self.arch.to_regname(wire_name)
         if canonical is None:
@@ -135,9 +139,7 @@ class GDBProgramState(CachedBackendProgramState):
             if size >= 128:
                 reader = self.read_vector_reg.get(self.arch.archname)
                 if reader is None:
-                    raise ValueError(
-                        f"Vector registers are unsupported for {self.arch}."
-                    )
+                    raise ValueError(f"Vector registers are unsupported for {self.arch}.")
                 numeric = reader(value, size)
             elif size <= 32:
                 numeric = int(value.cast(gdb.lookup_type("unsigned int")))
@@ -158,21 +160,22 @@ class GDBProgramState(CachedBackendProgramState):
         except gdb.MemoryError as error:
             raise MemoryAccessError(addr, size, str(error)) from error
 
+
 class GDBServerConnector:
     def __init__(self, remote: str):
-        gdb.execute('set pagination 0')
-        gdb.execute('set sysroot')
-        gdb.execute('set python print-stack full') # enable complete Python tracebacks
-        gdb.execute(f'target remote {remote}')
-        gdb.execute('set scheduler-locking on')
+        gdb.execute("set pagination 0")
+        gdb.execute("set sysroot")
+        gdb.execute("set python print-stack full")  # enable complete Python tracebacks
+        gdb.execute(f"target remote {remote}")
+        gdb.execute("set scheduler-locking on")
         self._process = gdb.selected_inferior()
         require_single_inferior(len(self._process.threads()))
 
-        split = self._process.architecture().name().split(':')
+        split = self._process.architecture().name().split(":")
         archname = split[1] if len(split) > 1 else split[0]
-        archname = archname.replace('-', '_')
+        archname = archname.replace("-", "_")
         if archname not in supported_architectures:
-            raise NotImplementedError(f'Platform {archname} is not supported by Focaccia')
+            raise NotImplementedError(f"Platform {archname} is not supported by Focaccia")
 
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
@@ -181,11 +184,11 @@ class GDBServerConnector:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
 
     def skip(self, new_pc: int) -> None:
-        gdb.execute(f'set $pc = {hex(new_pc)}', to_string=True)
+        gdb.execute(f"set $pc = {hex(new_pc)}", to_string=True)
 
     def write_target_register(self, register: str, value: int) -> None:
         wire_name = "eflags" if register.lower() == "rflags" else register.lower()
-        gdb.execute(f'set ${wire_name} = {hex(value)}', to_string=True)
+        gdb.execute(f"set ${wire_name} = {hex(value)}", to_string=True)
 
     def write_target_memory(self, address: int, data: bytes) -> None:
         self._process.write_memory(address, data)
@@ -242,13 +245,13 @@ class GDBServerConnector:
             return None
 
     def _step(self):
-        pc = gdb.selected_frame().read_register('pc')
+        pc = gdb.selected_frame().read_register("pc")
         new_pc = pc
         while pc == new_pc:  # Skip instruction chains from REP STOS etc.
-            gdb.execute('si', to_string=True)
+            gdb.execute("si", to_string=True)
             if self.is_exited():
                 raise StopIteration
-            new_pc = gdb.selected_frame().read_register('pc')
+            new_pc = gdb.selected_frame().read_register("pc")
         return self.current_state()
 
     def is_exited(self) -> bool:
@@ -260,7 +263,7 @@ class GDBServerConnector:
         # Skip everything until the header line
         started = False
 
-        text = gdb.execute('info proc mappings', to_string=True)
+        text = gdb.execute("info proc mappings", to_string=True)
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -283,11 +286,11 @@ class GDBServerConnector:
             if len(parts) < 5:
                 continue
 
-            start   = int(parts[0], 16)
-            end     = int(parts[1], 16)
-            size    = int(parts[2], 16)
-            offset  = int(parts[3], 16)
-            perms   = parts[4]
+            start = int(parts[0], 16)
+            end = int(parts[1], 16)
+            size = int(parts[2], 16)
+            offset = int(parts[3], 16)
+            perms = parts[4]
 
             file_or_tag = None
             is_special = False
@@ -303,13 +306,7 @@ class GDBServerConnector:
                     # Might be a filename or absent
                     file_or_tag = tail
 
-            mapping = MemoryMapping(0,
-                                    start,
-                                    end,
-                                    'debugger',
-                                    offset,
-                                    0,
-                                    0)
+            mapping = MemoryMapping(0, start, end, "debugger", offset, 0, 0)
             mappings.append(mapping)
 
         return mappings
@@ -336,18 +333,18 @@ class GDBServerStateIterator(GDBServerConnector):
         # self._process.write_memory(0x7ffff6165d20, at_random)
         # actual_at_random = self._process.read_memory(0x7ffff6165d20, 16).tobytes()
         # assert(at_random == actual_at_random)
-        
+
         if event is not None:
             require_event_pc(event)
-            info(f'Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}')
+            info(f"Synchronized at PC={hex(first_state.read_pc())} to event:\n{event}")
         elif events:
             self._next_synchronization_event()
             info(
-                f'Started at PC={hex(first_state.read_pc())} before the first '
-                'synchronizable RR event'
+                f"Started at PC={hex(first_state.read_pc())} before the first "
+                "synchronizable RR event"
             )
         else:
-            info(f'Started at PC={hex(first_state.read_pc())} without an RR event log')
+            info(f"Started at PC={hex(first_state.read_pc())} without an RR event log")
 
     def _synchronize_at_state(self, state: ReadableProgramState) -> Event | None:
         event = self._events.synchronize(state)
@@ -439,9 +436,7 @@ class GDBServerStateIterator(GDBServerConnector):
             if policy.requires_post_event:
                 matched = self._events.match_pair(event)
                 if not isinstance(matched, SyscallEvent):
-                    raise RuntimeError(
-                        "The deterministic cursor returned a non-syscall pair."
-                    )
+                    raise RuntimeError("The deterministic cursor returned a non-syscall pair.")
                 require_event_thread(
                     self._replay_tid,
                     matched.tid,
@@ -484,7 +479,7 @@ class GDBServerStateIterator(GDBServerConnector):
 
         if state is None:
             # Step
-            debug('State is not provided; stepping')
+            debug("State is not provided; stepping")
             state = self._step()
 
         return state
@@ -495,24 +490,19 @@ class GDBServerStateIterator(GDBServerConnector):
             return self._run_until_any([addr])
 
         state = self.current_state()
-        while (
-            self._events.state is CursorState.UNSYNCHRONIZED
-            and state.read_pc() != addr
-        ):
+        while self._events.state is CursorState.UNSYNCHRONIZED and state.read_pc() != addr:
             if self._synchronize_at_state(state) is not None:
                 handled_state = self._handle_event()
                 events_handled += 1
                 if self.is_exited():
-                    raise RuntimeError(
-                        f'Exited before reaching start address {hex(addr)}'
-                    )
+                    raise RuntimeError(f"Exited before reaching start address {hex(addr)}")
                 state = handled_state or self.current_state()
             else:
                 try:
                     state = self._step()
                 except StopIteration as error:
                     raise RuntimeError(
-                        f'Exited before reaching start address {hex(addr)}'
+                        f"Exited before reaching start address {hex(addr)}"
                     ) from error
 
         if state.read_pc() == addr:
@@ -543,7 +533,7 @@ class GDBServerStateIterator(GDBServerConnector):
 
             handled_state = self._handle_event()
             if self.is_exited():
-                raise RuntimeError(f'Exited before reaching start address {hex(addr)}')
+                raise RuntimeError(f"Exited before reaching start address {hex(addr)}")
             if handled_state is None and self._events.state is CursorState.UNSYNCHRONIZED:
                 raise EventSynchronizationError(
                     f"QEMU stopped at RR event PC {event_pc:#x} but the event log "
@@ -557,17 +547,15 @@ class GDBServerStateIterator(GDBServerConnector):
         return state
 
     def _run_until_any(self, addresses: list[int]) -> ReadableProgramState:
-        info(f'Executing until {[hex(x) for x in addresses]}')
+        info(f"Executing until {[hex(x) for x in addresses]}")
 
         breakpoints = []
         for addr in addresses:
-            breakpoints.append(gdb.Breakpoint(f'*{addr:#x}'))
+            breakpoints.append(gdb.Breakpoint(f"*{addr:#x}"))
 
-        gdb.execute('continue')
+        gdb.execute("continue")
 
         for bp in breakpoints:
             bp.delete()
 
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
-
-

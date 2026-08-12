@@ -29,7 +29,11 @@ class CachedBackendProgramState(ProgramState):
         super().__init__(arch)
         self._observed_register_bases: set[str] = set()
 
-    def _read_backend_register(self, base_reg: str) -> RegisterObservation:
+    def _read_backend_register(
+        self,
+        base_reg: str,
+        requested_reg: str | None = None,
+    ) -> RegisterObservation:
         raise NotImplementedError
 
     def _read_backend_memory(self, addr: int, size: int) -> bytes:
@@ -94,7 +98,7 @@ class CachedBackendProgramState(ProgramState):
             raise RegisterAccessError(reg, f"Not a register name: {reg}")
         base_reg = accessor.base_reg
         if base_reg not in self._observed_register_bases:
-            observation = self._read_backend_register(base_reg)
+            observation = self._read_backend_register(base_reg, canonical)
             self._cache_register_observation(base_reg, observation)
             self._observed_register_bases.add(base_reg)
 
@@ -111,8 +115,7 @@ class CachedBackendProgramState(ProgramState):
             raise MemoryAccessError(
                 addr,
                 size,
-                f"Backend returned {len(data)} bytes for a {size}-byte read at "
-                f"{hex(addr)}.",
+                f"Backend returned {len(data)} bytes for a {size}-byte read at {hex(addr)}.",
             )
         self.write_memory(addr, data)
         return data

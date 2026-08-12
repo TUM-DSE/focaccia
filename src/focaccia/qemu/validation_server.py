@@ -52,11 +52,17 @@ class PluginProgramState(CachedBackendProgramState):
         flags = arch.get_reg_accessor(canonical_flags) if canonical_flags else None
         self._flags_base = flags.base_reg if flags is not None else None
 
-    def _read_backend_register(self, base_reg: str) -> RegisterObservation:
+    def _read_backend_register(
+        self,
+        base_reg: str,
+        requested_reg: str | None = None,
+    ) -> RegisterObservation:
+        requested = self.arch.get_reg_accessor(requested_reg) if requested_reg else None
+        use_narrow_alias = requested is not None and requested.num_bits >= 128
         wire_name = (
             self.flag_backend_names[self.arch.archname]
             if self._flags_base is not None and base_reg == self._flags_base
-            else base_reg.lower()
+            else (requested_reg if use_narrow_alias else base_reg).lower()
         )
         return self.transport.read_register(wire_name)
 
