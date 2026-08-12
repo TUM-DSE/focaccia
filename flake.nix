@@ -2515,6 +2515,20 @@
       ];
     };
 
+    boundedNoSkipCollectorPlanningCheck = mkStaticUnitCheck {
+      name = "bounded-no-skip-collector-planning";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py"
+        "-k"
+        "no_skip_collector_plans_declared_long_block_once"
+      ];
+    };
+
     boundedLongCutpointCompositionCheck = mkStaticUnitCheck {
       name = "bounded-long-cutpoint-composition";
       ruffTargets = [
@@ -2877,6 +2891,7 @@
       shared-snapshot-planner = sharedSnapshotPlannerCheck;
       adaptive-successor-source-planning = adaptiveSuccessorSourcePlanningCheck;
       linear-successor-planning = linearSuccessorPlanningCheck;
+      bounded-no-skip-collector-planning = boundedNoSkipCollectorPlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       x86-eflags-observation = x86EflagsObservationCheck;

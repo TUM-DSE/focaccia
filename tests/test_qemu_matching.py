@@ -9,7 +9,12 @@ from focaccia.arch import x86
 from focaccia.match import TransitionMatcher
 from focaccia.qemu.validation_server import collect_conc_trace
 from focaccia.snapshot import ProgramState, RegisterAccessError
-from focaccia.symbolic import Instruction, SymbolicTransform, TraceGap
+from focaccia.symbolic import (
+    Instruction,
+    SymbolicTransform,
+    SymbolicTransformComposer,
+    TraceGap,
+)
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 
@@ -281,6 +286,59 @@ def test_plugin_collector_captures_late_composed_source_dependencies():
     assert "snapshot-memory-unavailable" not in codes(result)
 
 
+def test_no_skip_collector_plans_declared_long_block_once(monkeypatch):
+    count = 200
+    items = tuple(
+        SymbolicTransform(
+            1,
+            {ExprId("RAX", 64): ExprId("RBX", 64)},
+            [
+                Instruction.from_string(
+                    "RET" if index == count - 1 else "NOP",
+                    ARCH,
+                    0x1000 + index,
+                    1,
+                )
+            ],
+            ARCH,
+            0x1000 + index,
+            0x1001 + index,
+        )
+        for index in range(count)
+    )
+    states = [state(0x1000 + index, rax=7, rbx=7) for index in range(count + 1)]
+
+    class DeclaredStates:
+        def __init__(self):
+            self._states = iter(states)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+        def next_cutpoint_pc(self, matcher):
+            return matcher.current_destination_pc
+
+    append_calls = 0
+    original_append = SymbolicTransformComposer.append
+
+    def counted_append(self, item):
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(self, item)
+
+    monkeypatch.setattr(SymbolicTransformComposer, "append", counted_append)
+
+    result = collect_conc_trace(DeclaredStates(), trace(*items))
+
+    assert result.trace is not None
+    assert result.complete
+    assert len(result.trace) == count
+    assert append_calls <= count * 3
+
+
 def test_plugin_collector_classifies_missing_terminal_state():
     item = transform(0x1000, 0x1001)
 
@@ -336,6 +394,78 @@ def test_gdb_collector_uses_shared_matcher_and_keeps_terminal_state(monkeypatch)
     assert result.trace is not None
     assert len(result.trace) == 2
     assert result.trace[-1].destination.read_pc() == 0x1002
+
+
+def test_gdb_no_skip_collector_plans_declared_long_block_once(monkeypatch):
+    fake_gdb = ModuleType("gdb")
+    for name in ("Breakpoint", "Frame", "Inferior", "Value"):
+        setattr(fake_gdb, name, object)
+    setattr(fake_gdb, "MemoryError", RuntimeError)
+    monkeypatch.setitem(sys.modules, "gdb", fake_gdb)
+    sys.modules.pop("focaccia.qemu.target", None)
+    sys.modules.pop("focaccia.qemu._qemu_tool", None)
+    qemu_tool = importlib.import_module("focaccia.qemu._qemu_tool")
+
+    count = 200
+    items = tuple(
+        SymbolicTransform(
+            1,
+            {ExprId("RAX", 64): ExprId("RBX", 64)},
+            [
+                Instruction.from_string(
+                    "RET" if index == count - 1 else "NOP",
+                    ARCH,
+                    0x2000 + index,
+                    1,
+                )
+            ],
+            ARCH,
+            0x2000 + index,
+            0x2001 + index,
+        )
+        for index in range(count)
+    )
+
+    class FakeGDBStates:
+        class Events:
+            events = ()
+
+        _events = Events()
+
+        def __init__(self):
+            self._states = iter(state(0x2000 + index, rax=7, rbx=7) for index in range(count + 1))
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+        def run_until(self, _address: int):
+            return next(self)
+
+        def next_cutpoint_pc(self, matcher):
+            return matcher.current_destination_pc
+
+    append_calls = 0
+    original_append = SymbolicTransformComposer.append
+
+    def counted_append(self, item):
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(self, item)
+
+    monkeypatch.setattr(SymbolicTransformComposer, "append", counted_append)
+    try:
+        result = qemu_tool.collect_conc_trace(FakeGDBStates(), trace(*items))
+    finally:
+        sys.modules.pop("focaccia.qemu._qemu_tool", None)
+        sys.modules.pop("focaccia.qemu.target", None)
+
+    assert result.trace is not None
+    assert result.complete
+    assert len(result.trace) == count
+    assert append_calls <= count * 3
 
 
 def test_plugin_snapshot_does_not_fabricate_unavailable_register_outputs():

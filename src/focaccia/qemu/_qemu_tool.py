@@ -106,9 +106,22 @@ def collect_conc_trace(
                 )
             ]
             if boundary.outgoing is not None and not skip_unmatched:
-                dependencies = matcher.plan_successor_dependencies()
-                if dependencies is not None:
-                    plans.append(plan_symbolic_dependencies(current_state, dependencies))
+                next_cutpoint = getattr(state_iterator, "next_cutpoint_pc", None)
+                destination_pc = next_cutpoint(matcher) if next_cutpoint is not None else None
+                if destination_pc is not None:
+                    planned = matcher.plan_destination(destination_pc)
+                    if planned is not None:
+                        plans.append(
+                            plan_minimal_snapshot(
+                                current_state,
+                                boundary.incoming,
+                                planned,
+                            )
+                        )
+                else:
+                    dependencies = matcher.plan_successor_dependencies()
+                    if dependencies is not None:
+                        plans.append(plan_symbolic_dependencies(current_state, dependencies))
             collection = collect_snapshot_plan(
                 previous_state,
                 current_state,
