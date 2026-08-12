@@ -7,6 +7,7 @@ from focaccia.miasm_util import MiasmSymbolResolver, eval_expr, expression_depth
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import (
     _TransformEvaluator,
+    Instruction,
     SymbolicCompositionError,
     SymbolicTransform,
     SymbolicTransformComposer,
@@ -166,6 +167,43 @@ def test_x86_extended_register_aliases_are_canonical_and_composable():
 
     assert values["R8"] == 0x1234
     assert values["R9"] == 0x1235
+
+
+def test_undefined_shift_flag_propagates_until_a_later_definition():
+    arch = x86.ArchX86()
+    shift = SymbolicTransform(
+        1,
+        {ExprId("OF", 1): ExprInt(0, 1)},
+        [Instruction.from_string("SHL EAX, 0x5", arch, 0x1000, 2)],
+        arch,
+        0x1000,
+        0x1002,
+    )
+    dependent = SymbolicTransform(
+        1,
+        {ExprId("RAX", 64): ExprId("OF", 1).zeroExtend(64)},
+        [],
+        arch,
+        0x1002,
+        0x1003,
+    )
+
+    composed = shift.composed_with(dependent)
+
+    assert "OF" not in composed.validation_register_outputs()
+    assert "RAX" in composed.changed_regs
+    assert "RAX" not in composed.validation_register_outputs()
+
+    defined = SymbolicTransform(
+        1,
+        {ExprId("OF", 1): ExprInt(1, 1)},
+        [],
+        arch,
+        0x1002,
+        0x1003,
+    )
+    redefined = shift.composed_with(defined)
+    assert redefined.validation_register_outputs()["OF"] == ExprInt(1, 1)
 
 
 def test_single_alias_writes_expose_complete_base_register_outputs():

@@ -221,6 +221,32 @@ def test_schema_v3_msgpack_transform_round_trip(tmp_path):
         assert parsed.exhausted
 
 
+def test_undefined_shift_flag_metadata_round_trips(tmp_path):
+    arch = x86.ArchX86()
+    item = SymbolicTransform(
+        7,
+        {ExprId("OF", 1): ExprInt(0, 1)},
+        [Instruction.from_string("SHL EAX, 0x5", arch, 0x1000, 2)],
+        arch,
+        0x1000,
+        0x1002,
+    )
+    path = tmp_path / "undefined-shift.trace"
+
+    serialize_transformations(
+        MaterializedTrace([item], environment(arch), [item.addr]),
+        path,
+        "msgpack",
+    )
+    with path.open("rb") as source:
+        decoded = cast(SymbolicTransform, next(stream_transformation(source)))
+
+    assert "OF" not in decoded.validation_register_outputs()
+    assert decoded.to_json()["validation_registers"] == item.to_json()[
+        "validation_registers"
+    ]
+
+
 def test_schema_v2_transform_documents_remain_readable(tmp_path):
     _, document = write_transform_json(tmp_path)
     document["schema_version"] = 2

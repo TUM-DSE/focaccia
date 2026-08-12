@@ -504,6 +504,64 @@ def test_symbolic_comparison_uses_only_defined_register_output_slices():
     assert errors_with_severity(report, ErrorTypes.INCOMPLETE) == []
 
 
+@pytest.mark.parametrize(
+    "instruction_text",
+    ["SHL EAX, 0x5", "ROR RDX, 0x13", "ROL AL, 0xA"],
+)
+def test_undefined_shift_rotate_overflow_is_not_compared(instruction_text: str):
+    source = ProgramState(ARCH)
+    source.write_register("PC", 0x1000)
+    source.write_register("OF", 1)
+    destination = ProgramState(ARCH)
+    destination.write_register("PC", 0x1002)
+    destination.write_register("OF", 1)
+    instruction = Instruction.from_string(instruction_text, ARCH, 0x1000, 2)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("OF", 1): ExprInt(0, 1)},
+        [instruction],
+        ARCH,
+        0x1000,
+        0x1002,
+    )
+
+    report = compare_symbolic(
+        TransitionTrace([source, destination], [transform], ENV)
+    )
+
+    assert transform.changed_regs["OF"] != ExprInt(0, 1)
+    assert "OF" not in transform.validation_register_outputs()
+    assert errors_with_severity(report, ErrorTypes.CONFIRMED) == []
+
+
+def test_shift_count_at_operand_width_makes_carry_unknown():
+    instruction = Instruction.from_string("SHL AL, 0x8", ARCH, 0x1000, 2)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("CF", 1): ExprInt(0, 1)},
+        [instruction],
+        ARCH,
+        0x1000,
+        0x1002,
+    )
+
+    assert "CF" not in transform.validation_register_outputs()
+
+
+def test_shift_overflow_remains_defined_for_effective_count_one():
+    instruction = Instruction.from_string("SHL EAX, 0x21", ARCH, 0x1000, 2)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("OF", 1): ExprInt(1, 1)},
+        [instruction],
+        ARCH,
+        0x1000,
+        0x1002,
+    )
+
+    assert transform.validation_register_outputs()["OF"] == ExprInt(1, 1)
+
+
 def test_mmx_source_detects_the_rex_movq_mismatch_without_zmm_state():
     source = ProgramState(ARCH)
     source.write_register("PC", 0x40250E)

@@ -1481,6 +1481,24 @@
       ];
     };
 
+    undefinedShiftFlagSemanticsCheck = mkStaticUnitCheck {
+      name = "undefined-shift-flag-semantics";
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_compare.py"
+        "tests/test_persistence.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py::test_undefined_shift_rotate_overflow_is_not_compared"
+        "tests/test_compare.py::test_shift_count_at_operand_width_makes_carry_unknown"
+        "tests/test_compare.py::test_shift_overflow_remains_defined_for_effective_count_one"
+        "tests/test_symbolic_composition.py::test_undefined_shift_flag_propagates_until_a_later_definition"
+        "tests/test_persistence.py::test_undefined_shift_flag_metadata_round_trips"
+      ];
+    };
+
     qemuMmxObservationCheck = mkStaticUnitCheck {
       name = "qemu-mmx-observation";
       ruffTargets = [
@@ -2933,6 +2951,7 @@
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       qemu-mmx-observation = qemuMmxObservationCheck;
+      undefined-shift-flag-semantics = undefinedShiftFlagSemanticsCheck;
       x86-eflags-observation = x86EflagsObservationCheck;
       code-naming-policy = codeNamingPolicyCheck;
       flake-source-boundary = flakeSourceBoundaryCheck;

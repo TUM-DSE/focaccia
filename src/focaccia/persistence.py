@@ -38,8 +38,8 @@ from .symbolic import (
 )
 from .trace import MaterializedTrace, TraceEnvironment, TransformStream
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = (2, 3, SCHEMA_VERSION)
 TraceKind = Literal["states", "transforms"]
 
 MAX_JSON_CHARS = 64 * 1024 * 1024
@@ -770,6 +770,30 @@ def _validate_transform_document(
             )
         parsed_registers[normalized] = parsed_expression
 
+    validation_register_names: set[str] | None = None
+    if not legacy and schema_version >= 4:
+        encoded_validation_registers = _list(
+            _required(document, "validation_registers", path),
+            f"{path}.validation_registers",
+        )
+        validation_register_names = set()
+        for index, encoded_name in enumerate(encoded_validation_registers):
+            name = _string(
+                encoded_name,
+                f"{path}.validation_registers[{index}]",
+            )
+            assert name is not None
+            normalized = architecture.to_regname(name)
+            if normalized is None or normalized != name:
+                raise TransformParseError(
+                    f"Invalid validation register {name!r} at {path}."
+                )
+            if normalized in validation_register_names:
+                raise TransformParseError(
+                    f"Duplicate validation register {name!r} at {path}."
+                )
+            validation_register_names.add(normalized)
+
     parsed_memory_writes: list[MemoryWrite] = []
     memory_write_count: int
     if not legacy and schema_version >= 3:
@@ -875,6 +899,10 @@ def _validate_transform_document(
         for instruction in transform.instructions:
             instruction.addr = instruction_address
             instruction_address += instruction.length
+        transform.normalize_architectural_unknowns()
+        transform._reset_validation_register_names()
+        if validation_register_names is not None:
+            transform._validation_register_names = validation_register_names
     except Exception as error:
         raise TransformParseError(f"Unable to decode {path}: {error}.") from error
     if transform.arch != architecture:

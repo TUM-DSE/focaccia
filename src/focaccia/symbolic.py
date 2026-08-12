@@ -39,6 +39,28 @@ from .miasm_util import (
 )
 
 
+_ARCHITECTURAL_UNKNOWN_PREFIX = "FOCACCIA_UNDEFINED_"
+
+
+def _architectural_unknown(register: str, instruction_address: int, size: int) -> ExprId:
+    return ExprId(
+        f"{_ARCHITECTURAL_UNKNOWN_PREFIX}{register}_{instruction_address:X}",
+        size,
+    )
+
+
+def _is_architectural_unknown(expression: Expr) -> bool:
+    return (
+        isinstance(expression, ExprId)
+        and isinstance(expression.name, str)
+        and expression.name.startswith(_ARCHITECTURAL_UNKNOWN_PREFIX)
+    )
+
+
+def _contains_architectural_unknown(expression: Expr) -> bool:
+    return any(_is_architectural_unknown(node) for node in iter_expression_dag(expression))
+
+
 class SymbolEvaluationError(ValueError):
     """Raised when an expression cannot be reduced from a concrete state."""
 
@@ -395,6 +417,69 @@ class SymbolicTransform:
                     )
                 self.changed_regs[regname] = expr
 
+        self.normalize_architectural_unknowns()
+        self._reset_validation_register_names()
+
+    def _reset_validation_register_names(self) -> None:
+        names: set[str] = set()
+        for regname, expression in self.changed_regs.items():
+            if _contains_architectural_unknown(expression):
+                continue
+            accessor = self.arch.get_reg_accessor(regname)
+            if accessor is None:
+                raise SymbolicCompositionError(
+                    f"Missing accessor for symbolic destination {regname}."
+                )
+            names.add(accessor.base_reg if self.arch.register_write_zero_extends(regname) else regname)
+        self._validation_register_names = names
+
+    def normalize_architectural_unknowns(self) -> None:
+        """Replace analyzer values for architecturally undefined x86 flags."""
+        if self.arch.archname != "x86_64" or len(self.instructions) != 1:
+            return
+        instruction = self.instructions[0]
+        underlying = getattr(instruction, "instr", None)
+        if underlying is None:
+            return
+        mnemonic = str(getattr(underlying, "name", "")).upper()
+        shifts = {"SAL", "SAR", "SHL", "SHR"}
+        rotates = {"RCL", "RCR", "ROL", "ROR"}
+        if mnemonic not in shifts | rotates or len(underlying.args) < 2:
+            return
+
+        destination = underlying.args[0]
+        count = underlying.args[-1]
+        destination_size = int(destination.size)
+        effective_count: int | None = None
+        if isinstance(count, ExprInt):
+            count_mask = 0x3F if destination_size == 64 else 0x1F
+            effective_count = int(count) & count_mask
+            if mnemonic in {"RCL", "RCR"} and destination_size in {8, 16}:
+                effective_count %= destination_size + 1
+            elif mnemonic in {"ROL", "ROR"} and destination_size in {8, 16}:
+                effective_count %= destination_size
+        if effective_count == 0:
+            return
+
+        def make_unknown(register: str) -> None:
+            accessor = self.arch.get_reg_accessor(register)
+            if accessor is None:
+                raise SymbolicCompositionError(
+                    f"Missing accessor for undefined x86 flag {register}."
+                )
+            self.changed_regs[register] = _architectural_unknown(
+                register,
+                instruction.addr,
+                accessor.num_bits,
+            )
+
+        if effective_count != 1:
+            make_unknown("OF")
+        if mnemonic in shifts:
+            make_unknown("AF")
+            if effective_count is None or effective_count >= destination_size:
+                make_unknown("CF")
+
     def composed_with(self, other: SymbolicTransform) -> SymbolicTransform:
         """Return the sound sequential composition ``other(self(state))``."""
         return _compose_symbolic_transforms(self, other)
@@ -403,6 +488,7 @@ class SymbolicTransform:
         """Compatibility mutator implemented by the symbolic-state composer."""
         composed = self.composed_with(other)
         self.changed_regs = composed.changed_regs
+        self._validation_register_names = composed._validation_register_names
         self.memory_writes = list(composed.memory_writes)
         self.range = composed.range
         self.instructions = list(composed.instructions)
@@ -453,29 +539,27 @@ class SymbolicTransform:
         """Return only register ranges whose values this transform defines.
 
         Canonical base-register equations remain the composition contract, but
-        native cross-validation must not compare unchanged or undefined bits.
-        A write that architecturally zero-extends is validated through its base
-        register because those upper zero bits are part of the instruction's
-        output.
+        validation omits architecturally undefined outputs while retaining
+        independent defined slices. Architecturally zero-extending writes are
+        validated through their complete base register.
         """
         canonical_outputs = self.canonical_register_outputs()
-        zero_extended_bases: set[str] = set()
-        for regname in self.changed_regs:
+        outputs: dict[str, Expr] = {}
+        for regname in sorted(self._validation_register_names):
             accessor = self.arch.get_reg_accessor(regname)
             if accessor is None:
                 raise SymbolicCompositionError(
-                    f"Missing accessor for symbolic destination {regname}."
+                    f"Missing accessor for validation output {regname}."
                 )
-            if self.arch.register_write_zero_extends(regname):
-                zero_extended_bases.add(accessor.base_reg)
-
-        outputs: dict[str, Expr] = {
-            base_reg: canonical_outputs[base_reg] for base_reg in zero_extended_bases
-        }
-        for regname, expression in self.changed_regs.items():
-            accessor = self.arch.get_reg_accessor(regname)
-            assert accessor is not None
-            if accessor.base_reg not in zero_extended_bases:
+            base = canonical_outputs.get(accessor.base_reg)
+            if base is None:
+                continue
+            expression = (
+                base
+                if accessor.start == 0 and accessor.end == base.size
+                else expr_simp(ExprSlice(base, accessor.start, accessor.end))
+            )
+            if not _contains_architectural_unknown(expression):
                 outputs[regname] = expression
         return outputs
 
@@ -597,6 +681,8 @@ class SymbolicTransform:
         for inst in t.instructions:
             inst.addr = addr
             addr += inst.length
+        t.normalize_architectural_unknowns()
+        t._reset_validation_register_names()
 
         return t
 
@@ -621,6 +707,7 @@ class SymbolicTransform:
             "to_addr": self.range[1],
             "instructions": instrs,
             "regs": {name: repr(expr) for name, expr in self.changed_regs.items()},
+            "validation_registers": sorted(self._validation_register_names),
             "memory_writes": [
                 {"address": repr(write.address), "value": repr(write.value)}
                 for write in self.memory_writes
@@ -978,6 +1065,7 @@ class SymbolicTransformComposer:
         self._end = first.range[0]
         self._state = _SymbolicState.identity(first.arch)
         self._instructions: list[Instruction] = []
+        self._validation_register_names: set[str] = set()
         self._track_dependencies = track_dependencies
         self._dependency_registers: set[str] = set()
         self._dependency_memory: list[ExprMem] = []
@@ -998,6 +1086,26 @@ class SymbolicTransformComposer:
             raise SymbolicCompositionError(
                 f"Cannot compose discontinuous ranges {previous_range!r} and {transform.range!r}."
             )
+
+        for changed_name in transform.changed_regs:
+            changed_accessor = self._arch.get_reg_accessor(changed_name)
+            if changed_accessor is None:
+                raise SymbolicCompositionError(
+                    f"Missing accessor for symbolic destination {changed_name}."
+                )
+            self._validation_register_names = {
+                validation_name
+                for validation_name in self._validation_register_names
+                if (
+                    (validation_accessor := self._arch.get_reg_accessor(validation_name))
+                    is not None
+                    and (
+                        validation_accessor.base_reg != changed_accessor.base_reg
+                        or not validation_accessor.mask & changed_accessor.mask
+                    )
+                )
+            }
+        self._validation_register_names.update(transform._validation_register_names)
 
         if self._track_dependencies:
             expressions = [
@@ -1046,6 +1154,11 @@ class SymbolicTransformComposer:
             base_reg: expression
             for base_reg, expression in self._state.registers.items()
             if expression != identity.registers[base_reg]
+        }
+        result._validation_register_names = {
+            name
+            for name in self._validation_register_names
+            if name in result.arch.all_regnames
         }
         result.memory_writes = list(self._state.memory_writes)
         return result
