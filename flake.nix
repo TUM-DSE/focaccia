@@ -1978,6 +1978,18 @@
       ];
     };
 
+    terminalTraceReportingCheck = mkStaticUnitCheck {
+      name = "terminal-trace-reporting";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_report.py::test_structured_qemu_report_records_terminal_trace_evidence"
+      ];
+    };
+
     rrQemuRunManifestCheck = mkStaticUnitCheck {
       name = "rr-qemu-run-manifest";
       ruffTargets = [
@@ -2783,6 +2795,7 @@
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
       non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;
       bounded-diagnostic-rendering = boundedDiagnosticRenderingCheck;
+      terminal-trace-reporting = terminalTraceReportingCheck;
       rr-qemu-run-manifest = rrQemuRunManifestCheck;
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;

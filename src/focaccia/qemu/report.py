@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from focaccia.compare import ErrorTypes, ValidationReport
+from focaccia.match import MatchResult
 from focaccia.qemu.syscall import ReplayCoverageReport
 
 
@@ -46,9 +47,38 @@ def _transition_range(reference: object) -> list[int] | None:
     return None
 
 
+def _trace_document(result: MatchResult | None) -> dict[str, object]:
+    if result is None or result.trace is None:
+        return {
+            "available": False,
+            "complete": False,
+            "state_count": 0,
+            "transform_count": 0,
+            "terminal_pc": None,
+            "expected_terminal_pc": None,
+            "terminal_reached": False,
+        }
+    states = result.trace.state_boundaries
+    transforms = result.trace.transforms
+    terminal_pc = states[-1].read_pc() if states else None
+    expected_terminal_pc = result.trace.env.stop_address
+    return {
+        "available": True,
+        "complete": result.complete,
+        "state_count": len(states),
+        "transform_count": len(transforms),
+        "terminal_pc": terminal_pc,
+        "expected_terminal_pc": expected_terminal_pc,
+        "terminal_reached": (
+            expected_terminal_pc is not None and terminal_pc == expected_terminal_pc
+        ),
+    }
+
+
 def validation_report_document(
     report: ValidationReport,
     replay_coverage: ReplayCoverageReport | None,
+    match_result: MatchResult | None = None,
 ) -> dict[str, Any]:
     """Convert validation and replay results to the stable JSON schema."""
     severity_counts: Counter[str] = Counter()
@@ -92,6 +122,7 @@ def validation_report_document(
             "diagnostic_counts": dict(sorted(diagnostic_counts.items())),
         },
         "replay": replay,
+        "trace": _trace_document(match_result),
     }
 
 
@@ -181,6 +212,7 @@ def validation_failure_document(
             "diagnostic_counts": {},
         },
         "replay": replay,
+        "trace": _trace_document(None),
     }
 
 
@@ -199,9 +231,13 @@ def write_validation_report(
     path: str | Path,
     report: ValidationReport,
     replay_coverage: ReplayCoverageReport | None,
+    match_result: MatchResult | None = None,
 ) -> None:
-    """Atomically persist one structured validation report."""
-    _write_document(path, validation_report_document(report, replay_coverage))
+    """Atomically persist validation, replay, and terminal trace evidence."""
+    _write_document(
+        path,
+        validation_report_document(report, replay_coverage, match_result),
+    )
 
 
 def write_validation_failure_report(

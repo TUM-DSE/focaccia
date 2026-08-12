@@ -10,6 +10,7 @@ import pytest
 
 from focaccia.arch import x86
 from focaccia.compare import Error, ErrorTypes, ValidationReport
+from focaccia.match import MatchResult
 from focaccia.qemu.report import (
     QEMU_VALIDATION_REPORT_SCHEMA,
     validation_failure_document,
@@ -22,7 +23,12 @@ from focaccia.qemu.syscall import (
     ReplayStrategy,
 )
 from focaccia.snapshot import ProgramState
-from focaccia.trace import TraceDiagnostic, TraceEnvironment
+from focaccia.symbolic import SymbolicTransform
+from focaccia.trace import (
+    TraceDiagnostic,
+    TraceEnvironment,
+    TransitionTrace,
+)
 
 
 def load_qemu_tool(monkeypatch):
@@ -88,7 +94,7 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     monkeypatch.setattr(
         qemu_tool,
         "write_validation_report",
-        lambda path, report, coverage: writes.append((path, report, coverage)),
+        lambda path, report, coverage, matched: writes.append((path, report, coverage, matched)),
     )
 
     try:
@@ -98,7 +104,9 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
         sys.modules.pop("focaccia.qemu.target", None)
 
     assert "time" not in capsys.readouterr().out.lower()
-    assert writes == [(str(output), comparison, None)]
+    assert len(writes) == 1
+    assert writes[0][:3] == (str(output), comparison, None)
+    assert writes[0][3].trace is None
 
 
 def test_structured_qemu_report_preserves_validation_and_replay_coverage(tmp_path):
@@ -194,9 +202,14 @@ def test_gdb_validation_persists_artifacts_before_renderer_failure(
     state = ProgramState(x86.ArchX86())
     state.write_register("RIP", 0x401000)
     matched = SimpleNamespace(
-        trace=SimpleNamespace(state_boundaries=(state,)),
+        trace=SimpleNamespace(
+            state_boundaries=(state,),
+            transforms=(),
+            env=trace.env,
+        ),
         diagnostics=(),
         pending_transform=None,
+        complete=False,
     )
     server = SimpleNamespace(
         binary="/guest",
@@ -232,6 +245,42 @@ def test_gdb_validation_persists_artifacts_before_renderer_failure(
     assert Path(report_path).is_file()
     assert json.loads(report_path.read_text())["status"] == "accepted"
     assert states_path.is_file()
+
+
+def test_structured_qemu_report_records_terminal_trace_evidence():
+    arch = x86.ArchX86()
+    source = ProgramState(arch)
+    source.write_register("RIP", 0x401000)
+    destination = ProgramState(arch)
+    destination.write_register("RIP", 0x401010)
+    environment = TraceEnvironment(
+        None,
+        (),
+        (),
+        start_address=0x401000,
+        stop_address=0x401010,
+        binary_hash=None,
+        architecture=arch.key,
+    )
+    transform = SymbolicTransform(1, {}, [], arch, 0x401000, 0x401010)
+    trace = TransitionTrace((source, destination), (transform,), environment)
+    match_result = MatchResult(trace, ())
+
+    document = validation_report_document(
+        ValidationReport(),
+        None,
+        match_result,
+    )
+
+    assert document["trace"] == {
+        "available": True,
+        "complete": True,
+        "state_count": 2,
+        "transform_count": 1,
+        "terminal_pc": 0x401010,
+        "expected_terminal_pc": 0x401010,
+        "terminal_reached": True,
+    }
 
 
 def test_structured_qemu_failure_preserves_rejected_coverage():

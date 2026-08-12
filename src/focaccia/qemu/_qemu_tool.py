@@ -236,6 +236,7 @@ def main() -> None:
                 args.report,
                 validation_report,
                 replay_coverage,
+                matched,
             )
             report_written = True
 
