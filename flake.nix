@@ -2484,6 +2484,23 @@
       pytestTargets = [ "tests/test_symbolic_composition.py" ];
     };
 
+    linearSuccessorPlanningCheck = mkStaticUnitCheck {
+      name = "linear-successor-planning";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "tests/test_qemu_matching.py"
+        "-k"
+        "successor_planning_composes_each_candidate_transform_once or skip_mode_does_not_compose_candidate_dependencies"
+      ];
+    };
+
     boundedLongCutpointCompositionCheck = mkStaticUnitCheck {
       name = "bounded-long-cutpoint-composition";
       ruffTargets = [
@@ -2844,6 +2861,7 @@
       scheduler-quarantine = schedulerQuarantineCheck;
       shared-snapshot-planner = sharedSnapshotPlannerCheck;
       adaptive-successor-source-planning = adaptiveSuccessorSourcePlanningCheck;
+      linear-successor-planning = linearSuccessorPlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       x86-eflags-observation = x86EflagsObservationCheck;

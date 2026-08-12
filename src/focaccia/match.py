@@ -147,13 +147,17 @@ class TransitionMatcher:
             return ()
         assert self._current is not None
         assert self._current_index is not None
-        planned: list[SymbolicTraceItem] = []
-        previous: SymbolicTraceItem | None = None
-        for end_index in range(self._current_index, len(self.addresses)):
+        if isinstance(self._current, TraceGap):
+            return (self._current,)
+
+        planned: list[SymbolicTraceItem] = [self._current]
+        composer = SymbolicTransformComposer(self._current)
+        previous: SymbolicTraceItem = self._current
+        for end_index in range(self._current_index + 1, len(self.addresses)):
             transform = self._read_transform(end_index)
             if transform is None:
                 return tuple(planned)
-            if previous is not None and previous.range[1] != transform.range[0]:
+            if previous.range[1] != transform.range[0]:
                 self._fatal(
                     "symbolic-trace-discontinuous",
                     f"Candidate transform {end_index - 1} ends at "
@@ -162,13 +166,20 @@ class TransitionMatcher:
                     transform_index=end_index,
                 )
                 return tuple(planned)
-            candidate = self.plan_destination(transform.range[1])
-            if candidate is not None:
-                planned.append(candidate)
-            previous = transform
             if isinstance(transform, TraceGap):
                 break
-            if end_index > self._current_index and transform.instructions:
+            try:
+                composer.append(transform)
+            except Exception as error:
+                self._fatal(
+                    "symbolic-composition-failed",
+                    f"Unable to plan candidate transform {end_index}: {error}.",
+                    transform_index=end_index,
+                )
+                return tuple(planned)
+            planned.append(composer.finish())
+            previous = transform
+            if transform.instructions:
                 underlying = getattr(transform.instructions[-1], "instr", None)
                 if underlying is None or underlying.breakflow():
                     break

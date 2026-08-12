@@ -283,6 +283,33 @@ def test_large_terminal_cutpoint_uses_one_incremental_composer(monkeypatch):
     assert stream.exhausted
 
 
+def test_successor_planning_composes_each_candidate_transform_once(monkeypatch):
+    count = 100
+    transforms = tuple(
+        changing_transform(0x1000 + index, 0x1001 + index, "RAX", index) for index in range(count)
+    )
+    for index, item in enumerate(transforms):
+        instruction = "RET" if index == count - 1 else "NOP"
+        item.instructions = [Instruction.from_string(instruction, ARCH, item.range[0], 1)]
+    matcher = TransitionMatcher(symbolic_trace(*transforms))
+    assert matcher.observe(0x1000) is not None
+    append_calls = 0
+    original_append = SymbolicTransformComposer.append
+
+    def counted_append(self, item):
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(self, item)
+
+    monkeypatch.setattr(SymbolicTransformComposer, "append", counted_append)
+
+    planned = matcher.plan_successors()
+
+    assert len(planned) == count
+    assert append_calls == count
+    assert [item.range[1] for item in planned] == [transform.range[1] for transform in transforms]
+
+
 def test_legacy_trace_without_stop_address_still_matches_terminal_destination():
     transforms = (
         transform(0x1000, 0x1001),

@@ -115,6 +115,27 @@ def test_plugin_collector_propagates_opt_in_unmatched_skip():
     assert "unmatched-symbolic-transforms-skipped" in codes(result)
 
 
+def test_skip_mode_does_not_compose_candidate_dependencies(monkeypatch):
+    items = tuple(transform(0x1000 + index, 0x1001 + index) for index in range(100))
+    for index, item in enumerate(items):
+        instruction = "RET" if index == len(items) - 1 else "NOP"
+        item.instructions = [Instruction.from_string(instruction, ARCH, item.range[0], 1)]
+
+    def unexpected_plan(_self):
+        raise AssertionError("skip mode must not compose successor candidates")
+
+    monkeypatch.setattr("focaccia.match.TransitionMatcher.plan_successors", unexpected_plan)
+
+    result = collect_conc_trace(
+        iter([state(0x1000), state(0x1064)]),
+        trace(*items),
+        skip_unmatched=True,
+    )
+
+    assert result.trace is not None
+    assert isinstance(result.trace.transforms[0], TraceGap)
+
+
 def test_plugin_collector_captures_union_of_direct_successor_dependencies():
     branch = transform(0x1000, 0x1001)
     branch.instructions = [Instruction.from_string("JNZ 0x1002", ARCH, 0x1000, 2)]

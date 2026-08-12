@@ -190,7 +190,7 @@ def collect_conc_trace(
                 boundary.outgoing,
             )
         ]
-        if boundary.outgoing is not None:
+        if boundary.outgoing is not None and not skip_unmatched:
             plans.extend(
                 plan_minimal_snapshot(current_state, boundary.incoming, candidate)
                 for candidate in matcher.plan_successors()
