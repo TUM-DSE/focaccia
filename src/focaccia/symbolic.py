@@ -27,7 +27,16 @@ from miasm.expression.expression import (
 from .snapshot import ReadableProgramState
 from .arch import Arch, supported_architectures
 from .arch.arch import RegisterAccessor
-from .miasm_util import MiasmSymbolResolver, eval_expr, expr_simp, make_machine
+from .miasm_util import (
+    MiasmSymbolResolver,
+    eval_expr,
+    expr_simp,
+    expression_children,
+    expression_depth,
+    iter_expression_dag,
+    make_machine,
+    simplify_if_shallow,
+)
 
 
 class SymbolEvaluationError(ValueError):
@@ -404,85 +413,41 @@ class SymbolicTransform:
         return _canonical_register_outputs(self)
 
     def get_used_registers(self) -> list[str]:
-        """Find all registers used by the transformation as input.
-
-        :return: A list of register names.
-        """
-        accessed_regs = set[str]()
-
-        class RegisterCollector(MiasmSymbolResolver):
-            def __init__(self, arch: Arch):
-                self._arch = arch  # MiasmSymbolResolver needs this
-
-            def resolve_register(self, regname: str) -> int | None:
-                accessed_regs.add(self._miasm_to_regname(regname))
-                return None
-
-            def resolve_memory(self, addr: int, size: int):
-                pass
-
-            def resolve_location(self, loc):
-                assert False
-
-        resolver = RegisterCollector(self.arch)
-        for expr in self.canonical_register_outputs().values():
-            eval_expr(expr, resolver)
-        for write in self.memory_writes:
-            eval_expr(write.address, resolver)
-            eval_expr(write.value, resolver)
-
+        """Find all register inputs using an iterative DAG traversal."""
+        accessed_regs: set[str] = set()
+        expressions = [
+            *self.canonical_register_outputs().values(),
+            *(write.address for write in self.memory_writes),
+            *(write.value for write in self.memory_writes),
+        ]
+        for expression in expressions:
+            for node in iter_expression_dag(expression):
+                if not isinstance(node, ExprId) or not isinstance(node.name, str):
+                    continue
+                canonical = self.arch.to_regname(node.name)
+                if canonical is not None:
+                    accessed_regs.add(canonical)
         return list(accessed_regs)
 
     def get_used_memory_addresses(self) -> list[ExprMem]:
-        """Find all memory addresses used by the transformation as input.
-
-        :return: A list of memory access expressions.
-        """
-        from typing import Callable
-        from miasm.expression.expression import ExprLoc, ExprSlice, ExprCond, ExprOp, ExprCompose
-
-        accessed_mem = set[ExprMem]()
-
-        def _eval(expr: Expr):
-            def _eval_exprmem(expr: ExprMem):
-                accessed_mem.add(expr)  # <-- this is the only important line!
-                _eval(expr.ptr)
-
-            def _eval_exprcond(expr: ExprCond):
-                _eval(expr.cond)
-                _eval(expr.src1)
-                _eval(expr.src2)
-
-            def _eval_exprop(expr: ExprOp):
-                if expr.op == _DEFERRED_MEMORY_BYTE_OP and len(expr.args) == 2:
-                    accessed_mem.add(ExprMem(expr.args[0], 8))
-                for arg in expr.args:
-                    _eval(arg)
-
-            def _eval_exprcompose(expr: ExprCompose):
-                for arg in expr.args:
-                    _eval(arg)
-
-            expr_to_visitor: dict[type[Expr], Callable] = {
-                ExprInt: lambda e: e,
-                ExprId: lambda e: e,
-                ExprLoc: lambda e: e,
-                ExprMem: _eval_exprmem,
-                ExprSlice: lambda e: _eval(e.arg),
-                ExprCond: _eval_exprcond,
-                ExprOp: _eval_exprop,
-                ExprCompose: _eval_exprcompose,
-            }
-            visitor = expr_to_visitor[expr.__class__]
-            visitor(expr)
-
-        for expr in self.changed_regs.values():
-            _eval(expr)
-        for write in self.memory_writes:
-            _eval(write.address)
-            _eval(write.value)
-
-        return list(accessed_mem)
+        """Find all memory inputs using an iterative DAG traversal."""
+        accessed_mem: dict[tuple[int, int], ExprMem] = {}
+        expressions = [
+            *self.changed_regs.values(),
+            *(write.address for write in self.memory_writes),
+            *(write.value for write in self.memory_writes),
+        ]
+        for expression in expressions:
+            for node in iter_expression_dag(expression):
+                if isinstance(node, ExprMem):
+                    accessed_mem[(id(node.ptr), node.size)] = node
+                elif (
+                    isinstance(node, ExprOp)
+                    and node.op == _DEFERRED_MEMORY_BYTE_OP
+                    and len(node.args) == 2
+                ):
+                    accessed_mem[(id(node.args[0]), 8)] = ExprMem(node.args[0], 8)
+        return list(accessed_mem.values())
 
     def validation_register_outputs(self) -> dict[str, Expr]:
         """Return only register ranges whose values this transform defines.
@@ -775,43 +740,65 @@ def _read_symbolic_register(identifier: ExprId, state: _SymbolicState) -> Expr:
         )
     if accessor.start == 0 and accessor.end == base.size:
         return base
-    return expr_simp(ExprSlice(base, accessor.start, accessor.end))
+    return simplify_if_shallow(ExprSlice(base, accessor.start, accessor.end))
 
 
 def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Expr:
-    if isinstance(expression, (ExprInt, ExprLoc)):
-        return expression
-    if isinstance(expression, ExprId):
-        return _read_symbolic_register(expression, state)
-    if isinstance(expression, ExprMem):
-        address = _rewrite_symbolic_expression(expression.ptr, state)
-        return _read_symbolic_memory(address, expression.size, state)
-    if isinstance(expression, ExprSlice):
-        value = _rewrite_symbolic_expression(expression.arg, state)
-        return expr_simp(ExprSlice(value, expression.start, expression.stop))
-    if isinstance(expression, ExprCond):
-        return expr_simp(
-            ExprCond(
-                _rewrite_symbolic_expression(expression.cond, state),
-                _rewrite_symbolic_expression(expression.src1, state),
-                _rewrite_symbolic_expression(expression.src2, state),
+    """Rewrite an expression DAG iteratively and memoize shared subexpressions."""
+    results: dict[int, Expr] = {}
+    depths: dict[int, int] = {}
+    pending: list[tuple[Expr, bool]] = [(expression, False)]
+    while pending:
+        current, expanded = pending.pop()
+        key = id(current)
+        if key in results:
+            continue
+        children = expression_children(current)
+        if not expanded:
+            pending.append((current, True))
+            pending.extend(
+                (child, False) for child in reversed(children) if id(child) not in results
             )
-        )
-    if isinstance(expression, ExprOp):
-        args = tuple(_rewrite_symbolic_expression(arg, state) for arg in expression.args)
-        if expression.op == _DEFERRED_MEMORY_BYTE_OP:
-            if len(args) != 2 or not isinstance(args[1], ExprInt):
-                raise SymbolicCompositionError("Malformed deferred memory read.")
-            prefix = int(args[1]) + len(state.memory_writes)
-            args = (args[0], ExprInt(prefix, args[1].size))
-        return expr_simp(ExprOp(expression.op, *args))
-    if isinstance(expression, ExprCompose):
-        return expr_simp(
-            ExprCompose(*(_rewrite_symbolic_expression(arg, state) for arg in expression.args))
-        )
-    raise SymbolicCompositionError(
-        f"Unsupported symbolic expression class {type(expression).__name__}."
-    )
+            continue
+
+        if isinstance(current, (ExprInt, ExprLoc)):
+            rewritten = current
+        elif isinstance(current, ExprId):
+            rewritten = _read_symbolic_register(current, state)
+        elif isinstance(current, ExprMem):
+            rewritten = _read_symbolic_memory(results[id(current.ptr)], current.size, state)
+        elif isinstance(current, ExprSlice):
+            rewritten = ExprSlice(results[id(current.arg)], current.start, current.stop)
+        elif isinstance(current, ExprCond):
+            rewritten = ExprCond(
+                results[id(current.cond)],
+                results[id(current.src1)],
+                results[id(current.src2)],
+            )
+        elif isinstance(current, ExprOp):
+            arguments = tuple(results[id(argument)] for argument in current.args)
+            if current.op == _DEFERRED_MEMORY_BYTE_OP:
+                if len(arguments) != 2 or not isinstance(arguments[1], ExprInt):
+                    raise SymbolicCompositionError("Malformed deferred memory read.")
+                prefix = int(arguments[1]) + len(state.memory_writes)
+                arguments = (arguments[0], ExprInt(prefix, arguments[1].size))
+            rewritten = ExprOp(current.op, *arguments)
+        elif isinstance(current, ExprCompose):
+            rewritten = ExprCompose(*(results[id(argument)] for argument in current.args))
+        else:
+            raise SymbolicCompositionError(
+                f"Unsupported symbolic expression class {type(current).__name__}."
+            )
+        if isinstance(current, ExprId) and rewritten is not current:
+            depth = expression_depth(rewritten)
+        elif isinstance(current, ExprMem):
+            depth = expression_depth(rewritten)
+        else:
+            depth = 1 + max((depths[id(child)] for child in children), default=-1)
+        result = simplify_if_shallow(rewritten, depth)
+        results[key] = result
+        depths[key] = depth if result is rewritten else expression_depth(result)
+    return results[id(expression)]
 
 
 def _write_symbolic_register(
@@ -837,7 +824,7 @@ def _write_symbolic_register(
             parts.append(ExprInt(0, current.size - accessor.end))
         else:
             parts.append(ExprSlice(current, accessor.end, current.size))
-    return expr_simp(parts[0] if len(parts) == 1 else ExprCompose(*parts))
+    return simplify_if_shallow(parts[0] if len(parts) == 1 else ExprCompose(*parts))
 
 
 def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransform) -> None:

@@ -2402,6 +2402,18 @@
       pytestTargets = [ "tests/test_symbolic_composition.py" ];
     };
 
+    iterativeSymbolicDagProcessingCheck = mkStaticUnitCheck {
+      name = "iterative-symbolic-dag-processing";
+      ruffTargets = [
+        "src/focaccia/miasm_util.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_symbolic_composition.py::test_deep_expression_composition_evaluation_and_dependencies_are_iterative"
+      ];
+    };
+
     fp32ToFp64Check = mkStaticUnitCheck {
       name = "fp32-to-fp64";
       ruffTargets = [
@@ -2764,6 +2776,7 @@
       defined-register-output-validation = definedRegisterOutputValidationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
       symbolic-composition = symbolicCompositionCheck;
+      iterative-symbolic-dag-processing = iterativeSymbolicDagProcessingCheck;
       fp32-to-fp64 = fp32ToFp64Check;
       explicit-trace-gaps = explicitTraceGapsCheck;
       target-environment-symbols = targetEnvironmentSymbolsCheck;

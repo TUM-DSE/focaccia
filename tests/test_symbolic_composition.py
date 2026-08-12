@@ -3,7 +3,7 @@ from miasm.core.locationdb import LocationDB
 from miasm.expression.expression import ExprCompose, ExprId, ExprInt, ExprMem, ExprOp
 
 from focaccia.arch import aarch64, x86
-from focaccia.miasm_util import MiasmSymbolResolver, eval_expr
+from focaccia.miasm_util import MiasmSymbolResolver, eval_expr, expression_depth
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import (
     _TransformEvaluator,
@@ -38,6 +38,47 @@ def zero_extend(expression, width: int):
     if expression.size == width:
         return expression
     return ExprCompose(expression, ExprInt(0, width - expression.size))
+
+
+def test_deep_expression_composition_evaluation_and_dependencies_are_iterative(
+    monkeypatch,
+):
+    depth = 1_100
+    expression = ExprId("RAX", 64)
+    for _ in range(depth):
+        expression = ExprOp("deep_identity", expression)
+    deep = transform(
+        X86,
+        0x1000,
+        0x1001,
+        {ExprId("RBX", 64): expression},
+    )
+    consume = transform(
+        X86,
+        0x1001,
+        0x1002,
+        {ExprId("RCX", 64): ExprId("RBX", 64)},
+    )
+    original_resolver = _TransformEvaluator.resolve_environment_operation
+
+    def resolve_deep_identity(self, operation, arguments):
+        if operation == "deep_identity":
+            return arguments[0]
+        return original_resolver(self, operation, arguments)
+
+    monkeypatch.setattr(
+        _TransformEvaluator,
+        "resolve_environment_operation",
+        resolve_deep_identity,
+    )
+
+    composed = deep.composed_with(consume)
+    concrete = state(X86, RAX=7, RBX=0, RCX=0)
+
+    assert expression_depth(composed.changed_regs["RBX"]) > 1_000
+    assert composed.eval_register_transforms(concrete)["RBX"] == 7
+    assert composed.eval_register_transforms(concrete)["RCX"] == 7
+    assert composed.get_used_registers() == ["RAX"]
 
 
 def test_unknown_symbolic_destinations_fail_closed_while_irdst_is_internal():
