@@ -606,7 +606,7 @@ class _RecordedMemoryImage:
             if remaining == 0:
                 return bytes(result)
         raise ReplayEventError(
-            f"Recorded signal frame does not contain [{address:#x}, " f"{address + size:#x})."
+            f"Recorded signal frame does not contain [{address:#x}, {address + size:#x})."
         )
 
     @property
@@ -689,6 +689,8 @@ class X86RecordedSignalFrame:
         pre_event: SignalEvent,
         post_event: SignalEvent,
         writes: Sequence[MaterializedMemoryWrite],
+        *,
+        action_uses_siginfo: bool,
     ) -> X86RecordedSignalFrame:
         if pre_event.arch.archname != "x86_64" or post_event.arch.archname != "x86_64":
             raise ReplayEventError("x86 signal replay received a non-x86-64 event.")
@@ -723,7 +725,7 @@ class X86RecordedSignalFrame:
         image = _RecordedMemoryImage(writes)
         if image.start != frame_address:
             raise ReplayEventError(
-                f"Recorded signal writes start at {image.start!r}, expected " f"{frame_address:#x}."
+                f"Recorded signal writes start at {image.start!r}, expected {frame_address:#x}."
             )
         image_end = image.end
         if image_end is None or image_end - frame_address > MAX_X86_SIGNAL_FRAME_SIZE:
@@ -731,11 +733,13 @@ class X86RecordedSignalFrame:
 
         restorer_address = int.from_bytes(image.read(frame_address, 8), "little")
         recorded_siginfo = image.read(siginfo_address, X86_64_SIGINFO_SIZE)
-        if recorded_siginfo != pre_event.descriptor.siginfo:
-            raise ReplayEventError("Signal-frame siginfo differs from the RR signal action.")
-        signal_number = int.from_bytes(recorded_siginfo[:4], "little", signed=True)
-        if signal_number != pre_event.descriptor.signal_number:
-            raise ReplayEventError("Signal-frame signal number differs from the RR event.")
+        signal_number = pre_event.descriptor.signal_number
+        if action_uses_siginfo:
+            if recorded_siginfo != pre_event.descriptor.siginfo:
+                raise ReplayEventError("Signal-frame siginfo differs from the RR signal action.")
+            frame_signal_number = int.from_bytes(recorded_siginfo[:4], "little", signed=True)
+            if frame_signal_number != signal_number:
+                raise ReplayEventError("Signal-frame signal number differs from the RR event.")
         try:
             handler_argument = post_event.registers["rdi"]
         except KeyError as error:

@@ -359,7 +359,7 @@ def test_recorded_signal_frame_preserves_number_mask_context_restorer_and_fpstat
     pre, post, saved = make_signal_pair()
     materialized = tuple(MaterializedMemoryWrite.from_recorded(write) for write in post.mem_writes)
 
-    frame = X86RecordedSignalFrame.from_events(pre, post, materialized)
+    frame = X86RecordedSignalFrame.from_events(pre, post, materialized, action_uses_siginfo=True)
 
     assert frame.signal_number == SIGNAL
     assert frame.signal_mask == SAVED_MASK
@@ -450,7 +450,7 @@ def test_signal_frame_validates_and_preserves_variable_xstate_tail():
     _unused, post, _saved = make_signal_pair(frame=bytes(frame))
     materialized = tuple(MaterializedMemoryWrite.from_recorded(write) for write in post.mem_writes)
 
-    parsed = X86RecordedSignalFrame.from_events(pre, post, materialized)
+    parsed = X86RecordedSignalFrame.from_events(pre, post, materialized, action_uses_siginfo=True)
 
     assert parsed.fpstate_size == extended_size
     assert materialized[0].data[-4:] == X86_64_FP_XSTATE_MAGIC2.to_bytes(4, "little")
@@ -480,6 +480,47 @@ def test_signal_delivery_replays_exact_frame_and_abi_registers_without_hardcodin
     assert snapshot.signal_mask & (1 << (SIGNAL - 1))
     assert snapshot.signal_mask & (1 << 11)
     assert engine.coverage_report().records[-1].outcome is CoverageOutcome.HANDLED
+
+
+def test_non_siginfo_signal_replays_opaque_frame_slot_from_recorded_bytes():
+    _pre, _post, saved = make_signal_pair()
+    frame = bytearray(build_frame(saved))
+    siginfo_offset = SIGINFO_ADDRESS - FRAME_ADDRESS
+    frame[siginfo_offset : siginfo_offset + X86_64_SIGINFO_SIZE] = bytes(X86_64_SIGINFO_SIZE)
+    pre, post, _saved = make_signal_pair(frame=bytes(frame))
+    target = FakeSignalTarget(saved)
+    engine = X86ReplayEngine(target.arch)
+    engine.state.signal_actions[SIGNAL] = X86KernelSigaction(
+        HANDLER_PC,
+        X86KernelSigaction.SA_RESTORER,
+        RESTORER_PC,
+        1 << 11,
+    )
+    engine.state.signal_mask = SAVED_MASK
+
+    state = engine.replay_signal(target, pre, post)
+
+    assert state is not None
+    assert state.read_pc() == HANDLER_PC
+    assert state.read_register("rdi") == SIGNAL
+    assert state.read_memory(SIGINFO_ADDRESS, X86_64_SIGINFO_SIZE) == bytes(X86_64_SIGINFO_SIZE)
+    assert engine.coverage_report().records[-1].outcome is CoverageOutcome.HANDLED
+
+
+def test_siginfo_signal_rejects_frame_descriptor_mismatch():
+    _pre, _post, saved = make_signal_pair()
+    frame = bytearray(build_frame(saved))
+    siginfo_offset = SIGINFO_ADDRESS - FRAME_ADDRESS
+    frame[siginfo_offset : siginfo_offset + X86_64_SIGINFO_SIZE] = bytes(X86_64_SIGINFO_SIZE)
+    pre, post, _saved = make_signal_pair(frame=bytes(frame))
+    target = FakeSignalTarget(saved)
+    engine = X86ReplayEngine(target.arch)
+    configure_action(engine)
+
+    with pytest.raises(ReplayEventError, match="siginfo differs"):
+        engine.replay_signal(target, pre, post)
+
+    assert target.mutations == []
 
 
 def test_x86_signal_requires_recorded_handler_xsave_before_frame_write():

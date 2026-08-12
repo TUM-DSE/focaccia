@@ -578,7 +578,12 @@ class X86ReplayEngine:
                 event_count=pre_event.event_count,
             )
         writes = self._materialize_writes(post_event)
-        frame = X86RecordedSignalFrame.from_events(pre_event, post_event, writes)
+        frame = X86RecordedSignalFrame.from_events(
+            pre_event,
+            post_event,
+            writes,
+            action_uses_siginfo=bool(action.flags & X86KernelSigaction.SA_SIGINFO),
+        )
         if target_state.read_register("rsp") != self._event_register(pre_event, "rsp"):
             raise ReplayReconciliationError(
                 "Signal-frame replay currently requires the target and RR stack addresses "
