@@ -2214,6 +2214,20 @@
       ];
     };
 
+    deferredMemoryAliasCheck = mkStaticUnitCheck {
+      name = "deferred-memory-alias-resolution";
+      ruffTargets = [
+        "src/focaccia/miasm_util.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_symbolic_composition.py"
+        "-k"
+        "deferred_memory_reads or store or memory_aliases or overlapping"
+      ];
+    };
+
     linearCutpointCompositionCheck = mkStaticUnitCheck {
       name = "linear-cutpoint-composition";
       ruffTargets = [
@@ -2674,6 +2688,7 @@
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;
+      deferred-memory-alias-resolution = deferredMemoryAliasCheck;
       linear-cutpoint-composition = linearCutpointCompositionCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;

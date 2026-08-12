@@ -1,9 +1,12 @@
 import pytest
-from miasm.expression.expression import ExprCompose, ExprId, ExprInt, ExprMem
+from miasm.core.locationdb import LocationDB
+from miasm.expression.expression import ExprCompose, ExprId, ExprInt, ExprMem, ExprOp
 
 from focaccia.arch import aarch64, x86
+from focaccia.miasm_util import MiasmSymbolResolver, eval_expr
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import (
+    _TransformEvaluator,
     SymbolicCompositionError,
     SymbolicTransform,
     SymbolicTransformComposer,
@@ -319,6 +322,132 @@ def test_symbolic_memory_aliases_are_forwarded_conditionally():
 
     assert composed.eval_register_transforms(aliased)["RBX"] == 0x42
     assert composed.eval_register_transforms(distinct)["RBX"] == 0x99
+
+
+def test_deferred_memory_reads_remain_compact_over_growing_write_history():
+    pointer = ExprId("RSP", 64)
+    transforms = [
+        transform(
+            X86,
+            0x1000 + index,
+            0x1001 + index,
+            {ExprMem(pointer + ExprInt(index, 64), 8): ExprInt(index & 0xFF, 8)},
+        )
+        for index in range(2_000)
+    ]
+    transforms.append(
+        transform(
+            X86,
+            0x1000 + len(transforms),
+            0x1001 + len(transforms),
+            {ExprId("RAX", 64): zero_extend(ExprMem(pointer + ExprInt(1_999, 64), 8), 64)},
+        )
+    )
+    composed = SymbolicTransformComposer(transforms[0])
+    for item in transforms[1:]:
+        composed.append(item)
+    result = composed.finish()
+    expression = result.canonical_register_outputs()["RAX"]
+    concrete = state(X86, RSP=0x2000, RAX=0)
+
+    assert "focaccia_memory_byte" in repr(expression)
+    assert "ExprCond" not in repr(expression)
+    assert len(repr(expression)) < 500
+    assert result.eval_register_transforms(concrete)["RAX"] == 1_999 & 0xFF
+
+
+def test_deferred_memory_reads_fail_closed_on_missing_source_bytes():
+    pointer = ExprId("RSP", 64)
+    first = transform(
+        X86,
+        0x1000,
+        0x1001,
+        {ExprId("RAX", 64): zero_extend(ExprMem(pointer, 8), 64)},
+    )
+    concrete = state(X86, RSP=0x2000, RAX=0)
+
+    with pytest.raises(Exception, match="unknown in sparse memory"):
+        first.eval_register_transforms(concrete)
+
+
+def test_deferred_memory_reads_honor_ordered_write_prefixes():
+    pointer = ExprId("RSP", 64)
+    first = transform(
+        X86,
+        0x1000,
+        0x1001,
+        {ExprMem(pointer, 8): ExprInt(0x11, 8)},
+    )
+    load = transform(
+        X86,
+        0x1001,
+        0x1002,
+        {ExprId("AL", 8): ExprMem(pointer, 8)},
+    )
+    overwrite = transform(
+        X86,
+        0x1002,
+        0x1003,
+        {ExprMem(pointer, 8): ExprInt(0x22, 8)},
+    )
+    concrete = state(X86, RSP=0x2000, RAX=0)
+    concrete.write_memory(0x2000, b"\x00")
+
+    result = first.composed_with(load).composed_with(overwrite)
+
+    assert result.eval_register_transforms(concrete)["RAX"] == 0x11
+    assert result.eval_memory_transforms(concrete) == {0x2000: b"\x22"}
+
+
+def test_deferred_memory_evaluator_rejects_malformed_and_unknown_operations():
+    concrete = state(X86, RAX=0)
+    evaluator = _TransformEvaluator(concrete, [])
+
+    assert evaluator.resolve_environment_operation("unknown", ()) is None
+    assert evaluator.resolve_environment_operation("focaccia_memory_byte", ()) is None
+    assert (
+        evaluator.resolve_environment_operation(
+            "focaccia_memory_byte",
+            (ExprId("RAX", 64), ExprInt(0, 64)),
+        )
+        is None
+    )
+    unresolved = ExprOp(
+        "focaccia_memory_byte",
+        ExprId("RAX", 64),
+        ExprInt(0, 64),
+    )
+    with pytest.raises(Exception, match="unknown in sparse memory"):
+        evaluator.evaluate(unresolved)
+
+
+def test_unresolved_custom_operation_and_memory_remain_symbolic():
+    concrete = state(X86, RAX=0)
+
+    class UnknownResolver(MiasmSymbolResolver):
+        def __init__(self):
+            super().__init__(concrete, LocationDB())
+
+        def resolve_register(self, regname):
+            del regname
+            return None
+
+        def resolve_memory(self, addr, size):
+            del addr, size
+            return None
+
+    resolver = UnknownResolver()
+    operation = ExprOp(
+        "focaccia_memory_byte",
+        ExprId("RAX", 64),
+        ExprInt(0, 64),
+    )
+    symbolic_address = ExprMem(ExprId("RAX", 64), 8)
+    missing_memory = ExprMem(ExprInt(0x2000, 64), 8)
+
+    assert eval_expr(operation, resolver) == operation
+    assert eval_expr(symbolic_address, resolver) == symbolic_address
+    assert eval_expr(missing_memory, resolver) == missing_memory
 
 
 def test_symbolic_state_composition_is_associative_for_register_and_memory_dependencies():

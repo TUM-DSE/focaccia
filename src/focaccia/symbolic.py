@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Literal
 
@@ -39,6 +40,9 @@ class SymbolicCompositionError(ValueError):
 
 class UnsupportedInstructionError(NotImplementedError):
     """Raised when Miasm cannot lift an instruction."""
+
+
+_DEFERRED_MEMORY_BYTE_OP = "focaccia_memory_byte"
 
 
 def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
@@ -165,6 +169,76 @@ class MemoryWrite:
     @property
     def destination(self) -> ExprMem:
         return ExprMem(self.address, self.value.size)
+
+
+class _TransformEvaluator(MiasmSymbolResolver):
+    """Evaluate a transform with an indexed concrete ordered-write history."""
+
+    def __init__(
+        self,
+        state: ReadableProgramState,
+        writes: list[MemoryWrite],
+    ):
+        super().__init__(state, LocationDB())
+        self._writes = writes
+        self._versions: dict[int, list[tuple[int, int]]] = {}
+        self._concrete_writes: list[tuple[int, bytes]] = []
+        self._indexed_write_count = 0
+        self._building_index = False
+
+    def _ensure_write_index(self) -> None:
+        if self._indexed_write_count == len(self._writes) or self._building_index:
+            return
+        self._building_index = True
+        try:
+            for index in range(self._indexed_write_count, len(self._writes)):
+                write = self._writes[index]
+                address = self.evaluate(write.address)
+                value = self.evaluate(write.value)
+                data = value.to_bytes(write.size_bytes, byteorder=self.endianness)
+                self._concrete_writes.append((address, data))
+                version = index + 1
+                for offset, byte in enumerate(data):
+                    self._versions.setdefault(address + offset, []).append((version, byte))
+                self._indexed_write_count = version
+        finally:
+            self._building_index = False
+
+    def resolve_memory(self, addr: int, size: int) -> bytes:
+        return self._state.read_memory(addr, size)
+
+    def resolve_environment_operation(
+        self,
+        operation: str,
+        args: tuple[Expr, ...],
+    ) -> Expr | None:
+        if operation != _DEFERRED_MEMORY_BYTE_OP:
+            return super().resolve_environment_operation(operation, args)
+        if len(args) != 2 or not all(isinstance(arg, ExprInt) for arg in args):
+            return None
+        address, prefix = map(int, args)
+        self._ensure_write_index()
+        versions = self._versions.get(address, ())
+        offset = bisect_right(versions, (prefix, 0xFF))
+        if offset:
+            return ExprInt(versions[offset - 1][1], args[0].size)
+        data = self.resolve_memory(address, 1)
+        if data is None or len(data) != 1:
+            return None
+        return ExprInt(data[0], args[0].size)
+
+    def evaluate(self, expression: Expr) -> int:
+        result = eval_expr(expression, self)
+        if not isinstance(result, ExprInt):
+            raise SymbolEvaluationError(
+                f"Expression {expression} remains unresolved as {result}; "
+                "a concrete value is required."
+            )
+        return int(result)
+
+    def concrete_writes(self) -> tuple[tuple[int, bytes], ...]:
+        self._ensure_write_index()
+        return tuple(self._concrete_writes)
 
 
 GapReason = Literal[
@@ -441,11 +515,12 @@ class SymbolicTransform:
         conc_state: ReadableProgramState,
     ) -> dict[str, int]:
         """Evaluate register slices defined by this transform for validation."""
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         result: dict[str, int] = {}
         for regname, expression in self.validation_register_outputs().items():
             if not conc_state.strict and regname.upper() in self.arch.ignored_regs:
                 continue
-            result[regname] = eval_symbol(expression, conc_state)
+            result[regname] = evaluator.evaluate(expression)
         return result
 
     def eval_register_transforms(self, conc_state: ReadableProgramState) -> dict[str, int]:
@@ -459,11 +534,12 @@ class SymbolicTransform:
         :raise MemoryError:
         :raise ValueError:
         """
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         res = {}
         for regname, expr in self.canonical_register_outputs().items():
             if not conc_state.strict and regname.upper() in self.arch.ignored_regs:
                 continue
-            res[regname] = eval_symbol(expr, conc_state)
+            res[regname] = evaluator.evaluate(expr)
         return res
 
     def eval_memory_transforms(self, conc_state: ReadableProgramState) -> dict[int, bytes]:
@@ -477,11 +553,9 @@ class SymbolicTransform:
         :raise MemoryError:
         :raise ValueError:
         """
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         final_bytes: dict[int, int] = {}
-        for write in self.memory_writes:
-            address = eval_symbol(write.address, conc_state)
-            value = eval_symbol(write.value, conc_state)
-            data = value.to_bytes(write.size_bytes, byteorder=self.arch.endianness)
+        for address, data in evaluator.concrete_writes():
             for offset, byte in enumerate(data):
                 final_bytes[address + offset] = byte
 
@@ -661,23 +735,12 @@ def _read_symbolic_memory(
     if size_bits <= 0 or size_bits % 8 != 0:
         raise SymbolicCompositionError(f"Symbolic memory read has non-byte width {size_bits}.")
 
+    prefix = ExprInt(len(state.memory_writes), state.arch.ptr_size)
     values: list[Expr] = []
     for load_offset in range(size_bits // 8):
         load_address = _pointer_with_offset(address, load_offset)
-        value: Expr = ExprMem(load_address, 8)
-        for write in state.memory_writes:
-            delta = _constant_address_delta(load_address, write.address)
-            if delta is not None:
-                if 0 <= delta < write.size_bytes:
-                    value = _memory_value_byte(write, delta, state.arch.endianness)
-                continue
-
-            for write_offset in range(write.size_bytes):
-                write_address = _pointer_with_offset(write.address, write_offset)
-                condition = ExprOp("==", load_address, write_address)
-                forwarded = _memory_value_byte(write, write_offset, state.arch.endianness)
-                value = expr_simp(ExprCond(condition, forwarded, value))
-        values.append(value)
+        deferred = ExprOp(_DEFERRED_MEMORY_BYTE_OP, load_address, prefix)
+        values.append(ExprSlice(deferred, 0, 8))
     return _assemble_memory_bytes(values, state.arch.endianness)
 
 
@@ -731,12 +794,13 @@ def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Exp
             )
         )
     if isinstance(expression, ExprOp):
-        return expr_simp(
-            ExprOp(
-                expression.op,
-                *(_rewrite_symbolic_expression(arg, state) for arg in expression.args),
-            )
-        )
+        args = tuple(_rewrite_symbolic_expression(arg, state) for arg in expression.args)
+        if expression.op == _DEFERRED_MEMORY_BYTE_OP:
+            if len(args) != 2 or not isinstance(args[1], ExprInt):
+                raise SymbolicCompositionError("Malformed deferred memory read.")
+            prefix = int(args[1]) + len(state.memory_writes)
+            args = (args[0], ExprInt(prefix, args[1].size))
+        return expr_simp(ExprOp(expression.op, *args))
     if isinstance(expression, ExprCompose):
         return expr_simp(
             ExprCompose(*(_rewrite_symbolic_expression(arg, state) for arg in expression.args))

@@ -269,7 +269,7 @@ def _eval_exprop(expr, state: MiasmSymbolResolver):
     """Evaluate an ExprOp using the current state"""
     args = [eval_expr(arg, state) for arg in expr.args]
 
-    if expr.op == 'x86_cpuid':
+    if expr.op in ('x86_cpuid', 'focaccia_memory_byte'):
         resolved = state.resolve_environment_operation(expr.op, tuple(args))
         if resolved is not None:
             return resolved
