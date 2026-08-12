@@ -5,6 +5,7 @@ from miasm.expression.expression import ExprId, ExprInt, ExprMem, ExprOp
 
 from focaccia.arch import aarch64, x86
 from focaccia.compare import (
+    Error,
     ErrorTypes,
     ValidationReport,
     _calc_transformation,
@@ -69,12 +70,7 @@ def assert_diagnostic(
 
 
 def errors_with_severity(report: ValidationReport, severity) -> list:
-    return [
-        error
-        for entry in report
-        for error in entry["errors"]
-        if error.severity == severity
-    ]
+    return [error for entry in report for error in entry["errors"] if error.severity == severity]
 
 
 class InstructionStub:
@@ -261,6 +257,39 @@ def test_result_renderer_does_not_report_shape_failure_as_clean(capsys):
     assert "Found 1 trace diagnostics." in output
 
 
+def test_result_renderer_bounds_entries_diagnostics_and_transform_text(capsys):
+    class HugeTransform:
+        def __str__(self):
+            return "x" * 10_000
+
+    report = ValidationReport(
+        [
+            {
+                "pc": 0x1000 + index,
+                "errors": [Error(ErrorTypes.CONFIRMED, "different")],
+                "ref": HugeTransform(),
+                "txl": HugeTransform(),
+            }
+            for index in range(3)
+        ],
+        [TraceDiagnostic("info", "large", "y" * 10_000) for _ in range(3)],
+    )
+
+    print_result(
+        report,
+        ErrorTypes.INFO,
+        max_diagnostics=1,
+        max_entries=1,
+        max_rendered_chars=32,
+    )
+    output = capsys.readouterr().out
+
+    assert "sha256=" in output
+    assert "Omitted 2 additional diagnostics" in output
+    assert "Omitted 2 additional result entries" in output
+    assert len(output) < 2_000
+
+
 def test_compare_simple_reports_initial_and_later_unavailable_pcs():
     missing_initial = ProgramState(ARCH)
     initial_report = compare_simple([missing_initial], [state(0x1000)])
@@ -415,7 +444,9 @@ def test_symbolic_register_validation_distinguishes_missing_inputs_and_outputs()
         )
     )
     assert len(errors_with_severity(memory_report, ErrorTypes.POSSIBLE)) == 1
-    assert "not entirely present in the tested source state" in memory_report[0]["errors"][0].error_msg
+    assert (
+        "not entirely present in the tested source state" in memory_report[0]["errors"][0].error_msg
+    )
 
     missing_register = SymbolicTransform(
         1,
@@ -465,9 +496,7 @@ def test_symbolic_comparison_uses_only_defined_register_output_slices():
         0x1001,
     )
 
-    report = compare_symbolic(
-        TransitionTrace([source, destination], [transform], ENV)
-    )
+    report = compare_symbolic(TransitionTrace([source, destination], [transform], ENV))
 
     confirmed = errors_with_severity(report, ErrorTypes.CONFIRMED)
     assert len(confirmed) == 1
@@ -540,9 +569,7 @@ def test_symbolic_register_validation_checks_outputs_after_an_equal_register():
     destination = state(0x1001, 1)
     destination.write_register("RBX", 3)
 
-    report = compare_symbolic(
-        TransitionTrace([state(0x1000), destination], [transform], ENV)
-    )
+    report = compare_symbolic(TransitionTrace([state(0x1000), destination], [transform], ENV))
 
     assert len(report[0]["errors"]) == 1
     assert report[0]["errors"][0].severity == ErrorTypes.CONFIRMED
@@ -565,9 +592,7 @@ def test_symbolic_register_validation_checks_every_output_after_an_unavailable_r
     destination.write_register("PC", 0x1001)
     destination.write_register("RBX", 3)
 
-    report = compare_symbolic(
-        TransitionTrace([state(0x1000), destination], [transform], ENV)
-    )
+    report = compare_symbolic(TransitionTrace([state(0x1000), destination], [transform], ENV))
 
     assert [error.severity for error in report[0]["errors"]] == [
         ErrorTypes.INCOMPLETE,
@@ -623,9 +648,7 @@ def test_symbolic_memory_validation_checks_every_output_after_an_unavailable_ran
     destination = state(0x1001)
     destination.write_memory(0x3000, b"\x00")
 
-    report = compare_symbolic(
-        TransitionTrace([state(0x1000), destination], [transform], ENV)
-    )
+    report = compare_symbolic(TransitionTrace([state(0x1000), destination], [transform], ENV))
 
     assert [error.severity for error in report[0]["errors"]] == [
         ErrorTypes.POSSIBLE,
@@ -647,7 +670,9 @@ def test_symbolic_memory_validation_fails_closed_on_unavailable_dependencies():
         TransitionTrace([state(0x1000), state(0x1001)], [missing_memory], ENV)
     )
     assert len(errors_with_severity(memory_report, ErrorTypes.INCOMPLETE)) == 1
-    assert "not entirely present in the tested source state" in memory_report[0]["errors"][0].error_msg
+    assert (
+        "not entirely present in the tested source state" in memory_report[0]["errors"][0].error_msg
+    )
 
     missing_register = memory_write(
         0x1000,

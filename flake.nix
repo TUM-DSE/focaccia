@@ -1967,6 +1967,17 @@
       ];
     };
 
+    boundedDiagnosticRenderingCheck = mkStaticUnitCheck {
+      name = "bounded-diagnostic-rendering";
+      ruffTargets = [
+        "src/focaccia/utils.py"
+        "tests/test_compare.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py::test_result_renderer_bounds_entries_diagnostics_and_transform_text"
+      ];
+    };
+
     rrQemuRunManifestCheck = mkStaticUnitCheck {
       name = "rr-qemu-run-manifest";
       ruffTargets = [
@@ -2771,6 +2782,7 @@
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
       non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;
+      bounded-diagnostic-rendering = boundedDiagnosticRenderingCheck;
       rr-qemu-run-manifest = rrQemuRunManifestCheck;
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
       scheduler-quarantine = schedulerQuarantineCheck;
