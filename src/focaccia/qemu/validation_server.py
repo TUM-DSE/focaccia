@@ -60,6 +60,22 @@ class PluginProgramState(CachedBackendProgramState):
     ) -> RegisterObservation:
         requested = self.arch.get_reg_accessor(requested_reg) if requested_reg else None
         use_narrow_alias = requested is not None and requested.num_bits >= 128
+        if self.arch.archname == self.x86.archname and base_reg.startswith("MM"):
+            fstat = self.transport.read_register("fstat")
+            if fstat.num_bits != 32:
+                raise RegisterAccessError(
+                    base_reg,
+                    f"QEMU plugin returned {fstat.num_bits}-bit FSTAT.",
+                )
+            wire_name = self.x86.mmx_logical_st_name(base_reg, fstat.value)
+            backing = self.transport.read_register(wire_name)
+            if backing.num_bits != 80:
+                raise RegisterAccessError(
+                    base_reg,
+                    f"QEMU plugin returned {backing.num_bits}-bit {wire_name}.",
+                )
+            return RegisterObservation(base_reg, backing.value & ((1 << 64) - 1), 64)
+
         wire_name = (
             self.flag_backend_names[self.arch.archname]
             if self._flags_base is not None and base_reg == self._flags_base

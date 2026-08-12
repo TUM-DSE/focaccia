@@ -130,6 +130,15 @@ class GDBProgramState(CachedBackendProgramState):
             result |= component << (index * 64)
         return result
 
+    @staticmethod
+    def _read_raw_register(value: gdb.Value, size: int) -> int:
+        raw = bytes(value.bytes)
+        if len(raw) != size // 8:
+            raise ValueError(
+                f"GDB returned {len(raw)} bytes for a {size}-bit register."
+            )
+        return int.from_bytes(raw, "little")
+
     read_vector_reg = {
         aarch64.archname: _read_vector_reg_aarch64,
         x86.archname: _read_vector_reg_x86,
@@ -142,18 +151,33 @@ class GDBProgramState(CachedBackendProgramState):
     ) -> RegisterObservation:
         requested = self.arch.get_reg_accessor(requested_reg) if requested_reg else None
         use_narrow_alias = requested is not None and requested.num_bits >= 128
+        observation_name = requested_reg if use_narrow_alias else base_reg
         wire_name = (
             self.flag_backend_names[self.arch.archname]
             if self._flags_base is not None and base_reg == self._flags_base
-            else (requested_reg if use_narrow_alias else base_reg).lower()
+            else observation_name.lower()
         )
-        canonical = self.arch.to_regname(wire_name)
-        if canonical is None:
-            raise RegisterAccessError(
-                base_reg,
-                f"GDB register {wire_name!r} is not in the guest architecture.",
-            )
         try:
+            if self.arch.archname == self.x86.archname and base_reg.startswith("MM"):
+                fstat = int(
+                    self._frame.read_register("fstat").cast(
+                        gdb.lookup_type("unsigned int")
+                    )
+                )
+                wire_name = self.x86.mmx_logical_st_name(base_reg, fstat)
+                value = self._frame.read_register(wire_name)
+                size = value.type.sizeof * 8
+                if size != 80:
+                    raise ValueError(f"MMX backing register {wire_name} has width {size}.")
+                numeric = self._read_raw_register(value, size) & ((1 << 64) - 1)
+                return RegisterObservation(base_reg, numeric, 64)
+
+            canonical = self.arch.to_regname(wire_name)
+            if canonical is None:
+                raise RegisterAccessError(
+                    base_reg,
+                    f"GDB register {wire_name!r} is not in the guest architecture.",
+                )
             value = self._frame.read_register(wire_name)
             size = value.type.sizeof * 8
             if size >= 128:

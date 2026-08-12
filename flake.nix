@@ -1481,6 +1481,27 @@
       ];
     };
 
+    qemuMmxObservationCheck = mkStaticUnitCheck {
+      name = "qemu-mmx-observation";
+      ruffTargets = [
+        "src/focaccia/arch/x86.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/validation_server.py"
+        "tests/test_architecture.py"
+        "tests/test_compare.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_plugin_state_validity.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_architecture.py::test_x86_mmx_registers_do_not_alias_simd_registers"
+        "tests/test_compare.py::test_mmx_source_detects_the_rex_movq_mismatch_without_zmm_state"
+        "tests/test_gdb_program_state.py::test_gdb_reads_physical_mmx_value_from_logical_x87_stack"
+        "tests/test_plugin_state_validity.py::test_plugin_reads_physical_mmx_value_from_logical_x87_stack"
+        "tests/test_qemu_snapshot.py::test_mmx_source_planning_does_not_request_simd_state"
+      ];
+    };
+
     gdbWideRegisterCheck = mkStaticUnitCheck {
       name = "gdb-wide-registers";
       ruffTargets = [
@@ -2911,6 +2932,7 @@
       bounded-no-skip-collector-planning = boundedNoSkipCollectorPlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
+      qemu-mmx-observation = qemuMmxObservationCheck;
       x86-eflags-observation = x86EflagsObservationCheck;
       code-naming-policy = codeNamingPolicyCheck;
       flake-source-boundary = flakeSourceBoundaryCheck;

@@ -111,6 +111,23 @@ def test_unavailable_snapshot_values_remain_unknown_with_diagnostics():
         collection.state.read_memory(0x3000, 8)
 
 
+def test_mmx_source_planning_does_not_request_simd_state():
+    current = state(0x1000)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("R8", 64): ExprId("MM0", 64)},
+        [],
+        ARCH,
+        0x1000,
+        0x1004,
+    )
+
+    plan = plan_minimal_snapshot(current, None, transform)
+
+    assert set(plan.registers) == {"MM0"}
+    assert "ZMM0" not in plan.registers
+
+
 def test_terminal_snapshot_collects_incoming_outputs_without_outgoing_transform():
     previous = state(0x1000, RDI=0x2000)
     current = state(0x1001, RAX=9)

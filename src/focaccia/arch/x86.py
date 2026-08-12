@@ -68,15 +68,25 @@ registers = [
     _Reg(('ST6', 0, 80)),
     _Reg(('ST7', 0, 80)),
 
+    # MMX registers alias the physical x87 register file, not the SIMD file.
+    _Reg(('MM0', 0, 64)),
+    _Reg(('MM1', 0, 64)),
+    _Reg(('MM2', 0, 64)),
+    _Reg(('MM3', 0, 64)),
+    _Reg(('MM4', 0, 64)),
+    _Reg(('MM5', 0, 64)),
+    _Reg(('MM6', 0, 64)),
+    _Reg(('MM7', 0, 64)),
+
     # Vector registers
-    _Reg(('ZMM0',  0, 512), ('YMM0',  0, 256), ('XMM0',  0, 128), ('MM0', 0, 64)),
-    _Reg(('ZMM1',  0, 512), ('YMM1',  0, 256), ('XMM1',  0, 128), ('MM1', 0, 64)),
-    _Reg(('ZMM2',  0, 512), ('YMM2',  0, 256), ('XMM2',  0, 128), ('MM2', 0, 64)),
-    _Reg(('ZMM3',  0, 512), ('YMM3',  0, 256), ('XMM3',  0, 128), ('MM3', 0, 64)),
-    _Reg(('ZMM4',  0, 512), ('YMM4',  0, 256), ('XMM4',  0, 128), ('MM4', 0, 64)),
-    _Reg(('ZMM5',  0, 512), ('YMM5',  0, 256), ('XMM5',  0, 128), ('MM5', 0, 64)),
-    _Reg(('ZMM6',  0, 512), ('YMM6',  0, 256), ('XMM6',  0, 128), ('MM6', 0, 64)),
-    _Reg(('ZMM7',  0, 512), ('YMM7',  0, 256), ('XMM7',  0, 128), ('MM7', 0, 64)),
+    _Reg(('ZMM0',  0, 512), ('YMM0',  0, 256), ('XMM0',  0, 128)),
+    _Reg(('ZMM1',  0, 512), ('YMM1',  0, 256), ('XMM1',  0, 128)),
+    _Reg(('ZMM2',  0, 512), ('YMM2',  0, 256), ('XMM2',  0, 128)),
+    _Reg(('ZMM3',  0, 512), ('YMM3',  0, 256), ('XMM3',  0, 128)),
+    _Reg(('ZMM4',  0, 512), ('YMM4',  0, 256), ('XMM4',  0, 128)),
+    _Reg(('ZMM5',  0, 512), ('YMM5',  0, 256), ('XMM5',  0, 128)),
+    _Reg(('ZMM6',  0, 512), ('YMM6',  0, 256), ('XMM6',  0, 128)),
+    _Reg(('ZMM7',  0, 512), ('YMM7',  0, 256), ('XMM7',  0, 128)),
     _Reg(('ZMM8',  0, 512), ('YMM8',  0, 256), ('XMM8',  0, 128)),
     _Reg(('ZMM9',  0, 512), ('YMM9',  0, 256), ('XMM9',  0, 128)),
     _Reg(('ZMM10', 0, 512), ('YMM10', 0, 256), ('XMM10', 0, 128)),
@@ -129,6 +139,19 @@ def compose_rflags(rflags: dict[str, int]) -> int:
     """Compose RFLAGS fields using their declared bit widths."""
     fields = {name: rflags.get(name, 0) for name in rflag_names}
     return ArchX86().compose_register('RFLAGS', fields)
+
+
+def mmx_logical_st_name(regname: str, fstat: int) -> str:
+    """Map a physical MMX register to QEMU/GDB's logical x87 stack name."""
+    normalized = regname.upper()
+    if len(normalized) != 3 or not normalized.startswith("MM") or not normalized[2].isdigit():
+        raise ValueError(f"Not an MMX register name: {regname!r}.")
+    index = int(normalized[2])
+    if index >= 8:
+        raise ValueError(f"Not an MMX register name: {regname!r}.")
+    top = fstat >> 11 & 0x7
+    return f"st{(index - top) & 0x7}"
+
 
 class ArchX86(Arch):
     def __init__(self):

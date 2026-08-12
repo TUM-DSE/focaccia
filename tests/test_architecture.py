@@ -62,6 +62,19 @@ def test_aarch64_multibit_status_fields_round_trip():
         aarch64.compose_cpsr({"GE": 16})
 
 
+def test_x86_mmx_registers_do_not_alias_simd_registers():
+    arch = x86.ArchX86()
+
+    mm0 = arch.get_reg_accessor("MM0")
+    xmm0 = arch.get_reg_accessor("XMM0")
+    assert mm0 is not None
+    assert xmm0 is not None
+    assert mm0.base_reg == "MM0"
+    assert xmm0.base_reg == "ZMM0"
+    assert mm0.base_reg != xmm0.base_reg
+    assert x86.mmx_logical_st_name("MM5", 3 << 11) == "st2"
+
+
 def test_aarch64_zero_registers_are_constants():
     arch = aarch64.ArchAArch64("little")
     state = ProgramState(arch)

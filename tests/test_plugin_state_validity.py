@@ -109,6 +109,24 @@ def test_plugin_aarch64_status_fields_share_one_cpsr_observation():
     assert transport.register_reads == ["cpsr"]
 
 
+def test_plugin_reads_physical_mmx_value_from_logical_x87_stack():
+    value = 0xFFEEDDCCBBAA9988
+    transport = FakeTransport()
+    # TOP=6 means physical MM1 is exposed as logical ST3.
+    transport.registers["fstat"] = RegisterObservation("fstat", 6 << 11, 32)
+    transport.registers["st3"] = RegisterObservation(
+        "st3",
+        value | (0xFFFF << 64),
+        80,
+    )
+    state = plugin_state(x86.ArchX86(), transport)
+
+    assert state.read_register("MM1") == value
+    assert transport.register_reads == ["fstat", "st3"]
+    with pytest.raises(RegisterAccessError):
+        ProgramState.read_register(state, "XMM1")
+
+
 def test_plugin_fetches_full_range_when_only_first_byte_is_cached():
     address = 0x1000
     data = b"ABC"

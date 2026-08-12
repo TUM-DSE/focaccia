@@ -504,6 +504,32 @@ def test_symbolic_comparison_uses_only_defined_register_output_slices():
     assert errors_with_severity(report, ErrorTypes.INCOMPLETE) == []
 
 
+def test_mmx_source_detects_the_rex_movq_mismatch_without_zmm_state():
+    source = ProgramState(ARCH)
+    source.write_register("PC", 0x40250E)
+    source.write_register("MM0", 0xFFFFFFFFFFFFFFFF)
+    destination = ProgramState(ARCH)
+    destination.write_register("PC", 0x402512)
+    destination.write_register("R8", 0)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("R8", 64): ExprId("MM0", 64)},
+        [],
+        ARCH,
+        0x40250E,
+        0x402512,
+    )
+
+    report = compare_symbolic(
+        TransitionTrace([source, destination], [transform], ENV)
+    )
+
+    confirmed = errors_with_severity(report, ErrorTypes.CONFIRMED)
+    assert len(confirmed) == 1
+    assert confirmed[0].subject == "R8"
+    assert "unavailable register ZMM0" not in confirmed[0].error_msg
+
+
 def test_microarchitecture_dependent_register_mismatch_is_not_confirmed():
     arch = x86.ArchX86()
     source = ProgramState(arch)

@@ -54,6 +54,12 @@ class FakeVectorValue:
         )
 
 
+class FakeRawValue:
+    def __init__(self, data: bytes):
+        self.bytes = data
+        self.type = SimpleNamespace(sizeof=len(data))
+
+
 class FakeValue:
     def __init__(self, value: int, size: int):
         self.value = value
@@ -67,11 +73,11 @@ class FakeValue:
 
 
 class FakeFrame:
-    def __init__(self, registers: dict[str, FakeValue | FakeVectorValue]):
+    def __init__(self, registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue]):
         self.registers = registers
         self.reads: list[str] = []
 
-    def read_register(self, name: str) -> FakeValue | FakeVectorValue:
+    def read_register(self, name: str) -> FakeRawValue | FakeValue | FakeVectorValue:
         self.reads.append(name)
         try:
             return self.registers[name]
@@ -154,6 +160,26 @@ def test_gdb_reads_narrow_vector_alias_without_requiring_zmm(monkeypatch):
         ProgramState.read_register(state, "YMM2")
     with pytest.raises(RegisterAccessError):
         ProgramState.read_register(state, "ZMM2")
+
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_gdb_reads_physical_mmx_value_from_logical_x87_stack(monkeypatch):
+    target = load_target_module(monkeypatch)
+    value = 0xFFEEDDCCBBAA9988
+    # TOP=3 means physical MM5 is exposed as logical ST2.
+    frame = FakeFrame(
+        {
+            "fstat": FakeValue(3 << 11, 4),
+            "st2": FakeRawValue(value.to_bytes(8, "little") + b"\xff\xff"),
+        }
+    )
+    state = target.GDBProgramState(FakeInferior({}), frame, x86.ArchX86())
+
+    assert state.read_register("MM5") == value
+    assert frame.reads == ["fstat", "st2"]
+    with pytest.raises(RegisterAccessError):
+        ProgramState.read_register(state, "XMM5")
 
     sys.modules.pop("focaccia.qemu.target", None)
 
