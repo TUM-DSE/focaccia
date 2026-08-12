@@ -10,6 +10,7 @@ from focaccia.deterministic import (
     Event,
     ExtraRegisterState,
     KnownMemoryRange,
+    MemoryMapping,
     MemoryWrite,
     OpenedFileDescriptor,
     SyscallEvent,
@@ -18,7 +19,7 @@ from focaccia.deterministic import (
     UnknownMemoryRangeError,
 )
 from focaccia.qemu.concurrency import UnsupportedConcurrencyError
-from focaccia.qemu.replay import X86ReplayEngine
+from focaccia.qemu.replay import X86InitialStackImage, X86ReplayEngine
 from focaccia.qemu.syscall import (
     CoverageOutcome,
     DirectMemoryOutputs,
@@ -61,6 +62,7 @@ class FakeReplayTarget:
         self.steps = 0
         self.expected_execution_pcs: list[int | None] = []
         self.mutations: list[tuple[str, int, bytes | int]] = []
+        self.mappings: list[tuple[int, int, int, int]] = []
         self.exited = False
 
     def current_state(self) -> ReadableProgramState:
@@ -77,6 +79,16 @@ class FakeReplayTarget:
     def write_target_memory(self, address: int, data: bytes) -> None:
         self.mutations.append(("memory", address, bytes(data)))
         self.state.write_memory(address, data)
+
+    def map_target_memory(
+        self,
+        address: int,
+        length: int,
+        protection: int,
+        flags: int,
+    ) -> None:
+        self.mappings.append((address, length, protection, flags))
+        self.state.write_memory(address, bytes(length))
 
     def write_signal_handler_extra_registers(
         self,
@@ -100,6 +112,53 @@ class FakeReplayTarget:
 def full_write(tid: int, address: int, data: bytes) -> MemoryWrite:
     ranges = (KnownMemoryRange(0, data),) if data else ()
     return MemoryWrite(tid, address, len(data), ranges, ())
+
+
+def initial_stack_bytes(
+    stack_pointer: int,
+    *,
+    executable: bytes,
+    argument: bytes = b"workload.lua",
+    environment: bytes = b"MODE=recorded",
+    vdso: int = 0x700000,
+    random_bytes: bytes = bytes(range(16)),
+) -> bytes:
+    data = bytearray(0x1000)
+    executable_address = stack_pointer + 0x300
+    argument_address = stack_pointer + 0x380
+    environment_address = stack_pointer + 0x3C0
+    random_address = stack_pointer + 0x400
+    platform_address = stack_pointer + 0x420
+    words = [
+        2,
+        executable_address,
+        argument_address,
+        0,
+        environment_address,
+        0,
+        33,
+        vdso,
+        25,
+        random_address,
+        31,
+        executable_address,
+        15,
+        platform_address,
+        0,
+        0,
+    ]
+    for index, value in enumerate(words):
+        data[index * 8 : index * 8 + 8] = value.to_bytes(8, "little")
+    for address, value in (
+        (executable_address, executable + b"\0"),
+        (argument_address, argument + b"\0"),
+        (environment_address, environment + b"\0"),
+        (random_address, random_bytes),
+        (platform_address, b"x86_64\0"),
+    ):
+        offset = address - stack_pointer
+        data[offset : offset + len(value)] = value
+    return bytes(data)
 
 
 def make_syscall_pair(
@@ -181,6 +240,176 @@ def install_post_state(target: FakeReplayTarget, post: SyscallEvent) -> Readable
     for register in ("rip", "rax", "rcx", "r11"):
         target.state.write_register(register, post.registers[register])
     return target.state
+
+
+def test_initial_stack_parser_relocates_internal_pointers_and_random_bytes():
+    source_rsp = 0x8000
+    source = initial_stack_bytes(source_rsp, executable=b"/qemu/app")
+    image = X86InitialStackImage.read(
+        source_rsp,
+        lambda address, size: source[address - source_rsp : address - source_rsp + size],
+    )
+
+    relocated = image.relocate(0x4000, b"R" * 16)
+    relocated_image = X86InitialStackImage.read(
+        0x4000,
+        lambda address, size: relocated[address - 0x4000 : address - 0x4000 + size],
+    )
+
+    assert relocated_image.arguments == (b"/qemu/app", b"workload.lua")
+    assert relocated_image.random_bytes == b"R" * 16
+    assert relocated_image.auxiliary_value(33) == 0x700000
+
+
+def test_initial_exec_establishes_recorded_stack_with_live_vdso():
+    arch = x86.ArchX86()
+    source_rsp = 0x8000
+    recorded_rsp = 0x4000
+    source_stack = initial_stack_bytes(
+        source_rsp,
+        executable=b"/qemu/app",
+        environment=b"MODE=qemu",
+        vdso=0x900000,
+        random_bytes=b"Q" * 16,
+    )
+    recorded_mapping = bytearray(0x2000)
+    recorded_mapping[0x20] = 0xA5
+    recorded_stack = initial_stack_bytes(
+        recorded_rsp,
+        executable=b"/rr/app",
+        environment=b"MODE=recorded",
+        vdso=0x700000,
+        random_bytes=b"R" * 16,
+    )
+    recorded_mapping[0x1000:] = recorded_stack
+    post_registers = {
+        name: 0
+        for name in (
+            "r15",
+            "r14",
+            "r13",
+            "r12",
+            "rbp",
+            "rbx",
+            "r11",
+            "r10",
+            "r9",
+            "r8",
+            "rax",
+            "rcx",
+            "rdx",
+            "rsi",
+            "rdi",
+        )
+    }
+    post_registers.update(
+        {
+            "rip": 0x401000,
+            "rsp": recorded_rsp,
+            "rflags": 0x246,
+            "fs_base": 0x12340000,
+            "gs_base": 0,
+        }
+    )
+    pre = SyscallEvent(
+        0xDEAD,
+        1,
+        arch,
+        {"rip": 0xDEAD, "rax": 59},
+        (),
+        arch,
+        59,
+        "entering",
+        False,
+        event_count=13,
+    )
+    post = SyscallEvent(
+        0x401000,
+        1,
+        arch,
+        post_registers,
+        (full_write(1, 0x3000, bytes(recorded_mapping)),),
+        arch,
+        59,
+        "exiting",
+        False,
+        event_count=14,
+    )
+    mapping = MemoryMapping(14, 0x3000, 0x5000, "trace", 0, 3, 258, b"[stack]")
+    target = FakeReplayTarget({"rip": 0x401000, "rsp": source_rsp, "rflags": 0x202})
+    target.state.write_memory(source_rsp, source_stack)
+
+    state = X86ReplayEngine(arch).replay_initial_exec(target, pre, post, (mapping,))
+    established = X86InitialStackImage.read(recorded_rsp, state.read_memory)
+
+    assert target.mappings == [(0x3000, 0x2000, 3, 0x100122)]
+    assert state.read_register("rsp") == recorded_rsp
+    assert state.read_register("fs_base") == 0x12340000
+    assert state.read_memory(0x3020, 1) == b"\xa5"
+    assert established.arguments == (b"/rr/app", b"workload.lua")
+    assert established.random_bytes == b"R" * 16
+    assert established.auxiliary_value(33) == 0x900000
+    assert b"MODE=recorded\0" in established.data
+    assert b"MODE=qemu\0" not in established.data
+
+
+def test_initial_exec_rejects_different_workload_arguments_before_mapping():
+    arch = x86.ArchX86()
+    source_rsp = 0x8000
+    target = FakeReplayTarget({"rip": 0x401000, "rsp": source_rsp})
+    target.state.write_memory(
+        source_rsp,
+        initial_stack_bytes(source_rsp, executable=b"/qemu/app", argument=b"other.lua"),
+    )
+    recorded = bytearray(0x2000)
+    recorded[0x1000:] = initial_stack_bytes(0x4000, executable=b"/rr/app")
+    registers = {
+        **{
+            name: 0
+            for name in (
+                "r15",
+                "r14",
+                "r13",
+                "r12",
+                "rbp",
+                "rbx",
+                "r11",
+                "r10",
+                "r9",
+                "r8",
+                "rax",
+                "rcx",
+                "rdx",
+                "rsi",
+                "rdi",
+            )
+        },
+        "rip": 0x401000,
+        "rsp": 0x4000,
+        "fs_base": 0,
+        "gs_base": 0,
+    }
+    pre = SyscallEvent(
+        0xDEAD, 1, arch, {"rip": 0xDEAD, "rax": 59}, (), arch, 59, "entering", False, event_count=13
+    )
+    post = SyscallEvent(
+        0x401000,
+        1,
+        arch,
+        registers,
+        (full_write(1, 0x3000, bytes(recorded)),),
+        arch,
+        59,
+        "exiting",
+        False,
+        event_count=14,
+    )
+    mapping = MemoryMapping(14, 0x3000, 0x5000, "trace", 0, 3, 258, b"[stack]")
+
+    with pytest.raises(ReplayEventError, match="arguments differ"):
+        X86ReplayEngine(arch).replay_initial_exec(target, pre, post, (mapping,))
+
+    assert target.mappings == []
 
 
 def test_replay_coverage_for_recorded_read_translates_output_without_live_execution():

@@ -282,6 +282,86 @@ def test_qemu_iterator_accepts_explicit_empty_event_log(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
+def test_initial_exec_discovery_preserves_repeated_event_identity(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+    prefix = Event(0x9000, 7, arch, {"rip": 0x9000}, (), "sched", 1)
+    pre = SyscallEvent(
+        0xDEAD,
+        7,
+        arch,
+        {"rip": 0xDEAD, "rax": 59},
+        (),
+        arch,
+        59,
+        "entering",
+        False,
+        event_count=13,
+    )
+    post = SyscallEvent(
+        0x401000,
+        7,
+        arch,
+        {"rip": 0x401000, "rax": 0},
+        (),
+        arch,
+        59,
+        "exiting",
+        False,
+        event_count=14,
+    )
+    later_same_pc = Event(
+        0x401000,
+        7,
+        arch,
+        {"rip": 0x401000},
+        (),
+        "sched",
+        20,
+    )
+
+    match = target._matching_initial_x86_exec((prefix, pre, post, later_same_pc), 0x401000)
+
+    assert match == (1, pre, post)
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_initial_exec_discovery_rejects_ambiguous_matching_pairs(monkeypatch):
+    target = load_target_module(monkeypatch)
+    arch = x86.ArchX86()
+
+    def pair(count: int) -> tuple[SyscallEvent, SyscallEvent]:
+        pre = SyscallEvent(
+            0xDEAD,
+            7,
+            arch,
+            {"rip": 0xDEAD, "rax": 59},
+            (),
+            arch,
+            59,
+            "entering",
+            False,
+            event_count=count,
+        )
+        post = SyscallEvent(
+            0x401000,
+            7,
+            arch,
+            {"rip": 0x401000, "rax": 0},
+            (),
+            arch,
+            59,
+            "exiting",
+            False,
+            event_count=count + 1,
+        )
+        return pre, post
+
+    with pytest.raises(EventSynchronizationError, match="multiple execve"):
+        target._matching_initial_x86_exec((*pair(1), *pair(3)), 0x401000)
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
 def test_qemu_iterator_can_start_before_first_rr_event(monkeypatch):
     target = load_target_module(monkeypatch)
     arch = x86.ArchX86()

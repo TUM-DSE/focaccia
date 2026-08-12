@@ -57,6 +57,26 @@ def match_event(event: Event, target: ReadableProgramState) -> bool:
     return False
 
 
+def _matching_initial_x86_exec(
+    events: tuple[Event, ...], entry_pc: int
+) -> tuple[int, SyscallEvent, SyscallEvent] | None:
+    matches = tuple(
+        (position, pre_event, post_event)
+        for position, pre_event in enumerate(events[:-1])
+        if isinstance(pre_event, SyscallEvent)
+        and isinstance((post_event := events[position + 1]), SyscallEvent)
+        and pre_event.syscall_number == 59
+        and post_event.syscall_number == 59
+        and post_event.syscall_state == "exiting"
+        and post_event.pc == entry_pc
+    )
+    if len(matches) > 1:
+        raise EventSynchronizationError(
+            "RR log has multiple execve boundaries matching the QEMU ELF entry."
+        )
+    return matches[0] if matches else None
+
+
 def require_event_pc(event: Event) -> int:
     if event.pc is None:
         raise EventSynchronizationError(
@@ -193,6 +213,59 @@ class GDBServerConnector:
     def write_target_memory(self, address: int, data: bytes) -> None:
         self._process.write_memory(address, data)
 
+    def map_target_memory(
+        self,
+        address: int,
+        length: int,
+        protection: int,
+        flags: int,
+    ) -> None:
+        if self.arch.archname != "x86_64":
+            raise UnsupportedReplayEffect(
+                "Initial target-memory setup is implemented only for x86-64."
+            )
+        if address < 0 or length <= 0 or address & 0xFFF or length & 0xFFF:
+            raise UnsupportedReplayEffect("Initial target mapping is not page aligned.")
+        if protection & ~0x7 or flags not in (0x100022, 0x100122):
+            raise UnsupportedReplayEffect("Initial target mapping has unsupported flags.")
+
+        state = self.current_state()
+        entry = state.read_pc()
+        original = state.read_memory(entry, 4)
+        # Execute one isolated syscall followed by INT3. The original entry bytes,
+        # complete register state, and PC are restored by startup replay before any
+        # program instruction executes.
+        self.write_target_memory(entry, b"\x0f\x05\xcc\xcc")
+        inputs = {
+            "rax": 9,
+            "rdi": address,
+            "rsi": length,
+            "rdx": protection,
+            "r10": flags,
+            "r8": (1 << 64) - 1,
+            "r9": 0,
+        }
+        try:
+            for register, value in inputs.items():
+                self.write_target_register(register, value)
+            gdb.execute("continue", to_string=True)
+            stopped_pc = int(gdb.selected_frame().read_register("pc"))
+            if stopped_pc != entry + 3:
+                raise UnsupportedReplayEffect(
+                    f"Initial mmap stopped at {stopped_pc:#x}, expected setup trap "
+                    f"{entry + 3:#x}."
+                )
+            result = int(gdb.selected_frame().read_register("rax")) & ((1 << 64) - 1)
+            if result != address:
+                raise UnsupportedReplayEffect(
+                    f"Initial fixed mmap returned {result:#x}, expected {address:#x}."
+                )
+        finally:
+            self.write_target_memory(entry, original)
+            self.skip(entry)
+        if self.current_state().read_memory(entry, len(original)) != original:
+            raise UnsupportedReplayEffect("Initial setup did not restore ELF entry bytes.")
+
     def write_signal_handler_extra_registers(
         self,
         extra_registers: ExtraRegisterState,
@@ -324,15 +397,28 @@ class GDBServerStateIterator(GDBServerConnector):
         self._replay = make_replay_engine(self.arch) if events else None
 
         first_state = self.current_state()
-        self._events = DeterministicCursor(events, match_event)
-        event = self._events.synchronize(first_state)
-        self._replay_tid = event.tid if event is not None else None
+        initial_position = 0
+        self._replay_tid = None
+        if isinstance(self._replay, X86ReplayEngine):
+            initial_exec = _matching_initial_x86_exec(events, first_state.read_pc())
+            if initial_exec is not None:
+                position, pre_event, post_event = initial_exec
+                first_state = self._replay.replay_initial_exec(
+                    self,
+                    pre_event,
+                    post_event,
+                    self._deterministic_log.mmaps(),
+                )
+                initial_position = position + 2
+                self._replay_tid = pre_event.tid
 
-        # TODO: handle AT_RANDOM correctly
-        # at_random = bytes([0xd1, 0x8f, 0x3a, 0x37, 0xb8, 0xba, 0x05, 0x54, 0x70, 0xdf, 0x3f, 0x89, 0x93, 0x64, 0xc2, 0x3c])
-        # self._process.write_memory(0x7ffff6165d20, at_random)
-        # actual_at_random = self._process.read_memory(0x7ffff6165d20, 16).tobytes()
-        # assert(at_random == actual_at_random)
+        # The setup transaction consumes the leading execve pair before the
+        # first ordinary event-PC synchronization point. RR events carry their
+        # original explicit counts, so slicing does not alter diagnostics.
+        self._events = DeterministicCursor(events[initial_position:], match_event)
+        event = self._events.synchronize(first_state)
+        if event is not None:
+            self._replay_tid = event.tid if self._replay_tid is None else self._replay_tid
 
         if event is not None:
             require_event_pc(event)

@@ -18,6 +18,7 @@ from focaccia.deterministic import (
     DeterministicLogError,
     Event,
     ExtraRegisterState,
+    MemoryMapping,
     SignalEvent,
     SyscallEvent,
 )
@@ -97,8 +98,16 @@ _X86_GPRS = (
     "rip",
     "rsp",
 )
+_X86_INITIAL_REGISTERS = (*_X86_GPRS, "fs_base", "gs_base", "rflags")
+_MAP_PRIVATE = 0x2
 _MAP_ANONYMOUS = 0x20
+_MAP_GROWSDOWN = 0x100
 _MAP_FIXED_NOREPLACE = 0x100000
+_X86_STACK_POINTER_AUXV_TYPES = frozenset((15, 24, 25, 31))
+_X86_AT_RANDOM = 25
+_X86_INITIAL_STACK_MAX_SIZE = 1 << 20
+_X86_INITIAL_STACK_MAX_ENTRIES = 1 << 14
+_X86_INITIAL_STACK_MAX_STRING = 1 << 16
 _SA_RESTART = 0x10000000
 _SA_NODEFER = 0x40000000
 _SA_RESETHAND = 0x80000000
@@ -106,6 +115,188 @@ _SIG_BLOCK = 0
 _SIG_UNBLOCK = 1
 _SIG_SETMASK = 2
 _BLOCKABLE_SIGNAL_MASK = ((1 << 64) - 1) & ~((1 << (9 - 1)) | (1 << (19 - 1)))
+
+
+@dataclass(frozen=True, slots=True)
+class X86InitialStackImage:
+    """One bounded Linux x86-64 initial stack and its relocatable pointers."""
+
+    stack_pointer: int
+    end_address: int
+    data: bytes
+    pointer_offsets: tuple[int, ...]
+    arguments: tuple[bytes, ...]
+    auxiliary_values: tuple[tuple[int, int, int], ...]
+    random_bytes: bytes
+
+    @classmethod
+    def read(
+        cls,
+        stack_pointer: int,
+        read_memory,
+        *,
+        maximum_end: int | None = None,
+    ) -> X86InitialStackImage:
+        if stack_pointer < 0 or stack_pointer % 16:
+            raise ReplayEventError(
+                f"x86-64 initial stack pointer {stack_pointer:#x} is not 16-byte aligned."
+            )
+
+        cached_bytes: dict[int, int] = {}
+
+        def read_exact(address: int, size: int) -> bytes:
+            if size < 0 or address < stack_pointer:
+                raise ReplayEventError("Initial-stack read is outside the stack image.")
+            end = address + size
+            limit = maximum_end or stack_pointer + _X86_INITIAL_STACK_MAX_SIZE
+            if end < address or end > limit or end - stack_pointer > _X86_INITIAL_STACK_MAX_SIZE:
+                raise ReplayEventError("Initial stack exceeds the bounded image size.")
+            if all(position in cached_bytes for position in range(address, end)):
+                return bytes(cached_bytes[position] for position in range(address, end))
+
+            fetch_size = min(max(size, 4096), limit - address)
+            while True:
+                try:
+                    data = bytes(read_memory(address, fetch_size))
+                    break
+                except (MemoryAccessError, ValueError) as error:
+                    if fetch_size == size:
+                        raise ReplayEventError(
+                            f"Initial stack is unreadable at [{address:#x}, {end:#x})."
+                        ) from error
+                    fetch_size = max(size, fetch_size // 2)
+            if len(data) < size or len(data) > fetch_size:
+                raise ReplayEventError("Initial-stack backend returned an invalid read size.")
+            cached_bytes.update((address + offset, byte) for offset, byte in enumerate(data))
+            return bytes(cached_bytes[position] for position in range(address, end))
+
+        def read_u64(address: int) -> int:
+            return int.from_bytes(read_exact(address, 8), "little")
+
+        def read_string(address: int) -> tuple[bytes, int]:
+            if address < stack_pointer:
+                raise ReplayEventError(f"Initial-stack string pointer {address:#x} is below RSP.")
+            value = bytearray()
+            for offset in range(_X86_INITIAL_STACK_MAX_STRING):
+                byte = read_exact(address + offset, 1)[0]
+                if byte == 0:
+                    return bytes(value), address + offset + 1
+                value.append(byte)
+            raise ReplayEventError("Initial-stack string exceeds the bounded size.")
+
+        cursor = stack_pointer
+        argc = read_u64(cursor)
+        cursor += 8
+        if argc > _X86_INITIAL_STACK_MAX_ENTRIES:
+            raise ReplayEventError(f"Initial stack has implausible argc {argc}.")
+
+        pointer_words: list[int] = []
+        arguments: list[bytes] = []
+        referenced_end = cursor
+        for _ in range(argc):
+            pointer_words.append(cursor)
+            address = read_u64(cursor)
+            cursor += 8
+            argument, end = read_string(address)
+            arguments.append(argument)
+            referenced_end = max(referenced_end, end)
+        if read_u64(cursor) != 0:
+            raise ReplayEventError("Initial stack has no null argv terminator.")
+        cursor += 8
+
+        for _ in range(_X86_INITIAL_STACK_MAX_ENTRIES):
+            address = read_u64(cursor)
+            if address == 0:
+                cursor += 8
+                break
+            pointer_words.append(cursor)
+            cursor += 8
+            _environment, end = read_string(address)
+            referenced_end = max(referenced_end, end)
+        else:
+            raise ReplayEventError("Initial stack has no bounded environment terminator.")
+
+        random_address: int | None = None
+        auxiliary_values: list[tuple[int, int, int]] = []
+        for _ in range(256):
+            aux_type = read_u64(cursor)
+            aux_value_word = cursor + 8
+            aux_value = read_u64(aux_value_word)
+            cursor += 16
+            if aux_type == 0:
+                break
+            auxiliary_values.append((aux_type, aux_value_word - stack_pointer, aux_value))
+            if aux_type in _X86_STACK_POINTER_AUXV_TYPES:
+                pointer_words.append(aux_value_word)
+                if aux_type == _X86_AT_RANDOM:
+                    random_address = aux_value
+                    referenced_end = max(referenced_end, aux_value + 16)
+                else:
+                    _value, end = read_string(aux_value)
+                    referenced_end = max(referenced_end, end)
+        else:
+            raise ReplayEventError("Initial stack has no bounded auxiliary-vector terminator.")
+
+        if random_address is None:
+            raise ReplayEventError("Initial stack has no AT_RANDOM entry.")
+        image_end = max(cursor, referenced_end)
+        data = read_exact(stack_pointer, image_end - stack_pointer)
+        random_offset = random_address - stack_pointer
+        random_bytes = data[random_offset : random_offset + 16]
+        if len(random_bytes) != 16:
+            raise ReplayEventError("Initial stack has a truncated AT_RANDOM payload.")
+        return cls(
+            stack_pointer,
+            image_end,
+            data,
+            tuple(address - stack_pointer for address in pointer_words),
+            tuple(arguments),
+            tuple(auxiliary_values),
+            random_bytes,
+        )
+
+    def auxiliary_value(self, aux_type: int) -> int:
+        matches = tuple(value for kind, _offset, value in self.auxiliary_values if kind == aux_type)
+        if len(matches) != 1:
+            raise ReplayEventError(
+                f"Initial stack has {len(matches)} auxiliary entries of type {aux_type}."
+            )
+        return matches[0]
+
+    def replace_auxiliary_value(self, aux_type: int, value: int) -> bytes:
+        matches = tuple(
+            offset for kind, offset, _previous in self.auxiliary_values if kind == aux_type
+        )
+        if len(matches) != 1:
+            raise ReplayEventError(
+                f"Initial stack has {len(matches)} auxiliary entries of type {aux_type}."
+            )
+        if value < 0 or value >= 1 << 64:
+            raise ReplayEventError("Initial-stack auxiliary value does not fit in 64 bits.")
+        updated = bytearray(self.data)
+        offset = matches[0]
+        updated[offset : offset + 8] = value.to_bytes(8, "little")
+        return bytes(updated)
+
+    def relocate(self, stack_pointer: int, random_bytes: bytes) -> bytes:
+        if len(random_bytes) != 16:
+            raise ReplayEventError("Recorded AT_RANDOM payload must contain 16 bytes.")
+        delta = stack_pointer - self.stack_pointer
+        relocated = bytearray(self.data)
+        random_offset: int | None = None
+        for offset in self.pointer_offsets:
+            value = int.from_bytes(relocated[offset : offset + 8], "little")
+            if not self.stack_pointer <= value < self.end_address:
+                raise ReplayEventError(
+                    f"Initial-stack pointer {value:#x} is outside its retained image."
+                )
+            if relocated[offset - 8 : offset] == _X86_AT_RANDOM.to_bytes(8, "little"):
+                random_offset = value - self.stack_pointer
+            relocated[offset : offset + 8] = (value + delta).to_bytes(8, "little")
+        if random_offset is None:
+            raise ReplayEventError("Initial-stack relocation lost AT_RANDOM.")
+        relocated[random_offset : random_offset + 16] = random_bytes
+        return bytes(relocated)
 
 
 def validate_x86_partial_signal_extra_transition(
@@ -182,6 +373,18 @@ class ReplayTarget(Protocol):
 
 # Compatibility name retained for existing type annotations and callers.
 X86ReplayTarget = ReplayTarget
+
+
+class X86StartupReplayTarget(ReplayTarget, Protocol):
+    """Additional setup transaction required before the first x86 instruction."""
+
+    def map_target_memory(
+        self,
+        address: int,
+        length: int,
+        protection: int,
+        flags: int,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +471,143 @@ class X86ReplayEngine:
 
     def coverage_report(self) -> ReplayCoverageReport:
         return self.coverage.report()
+
+    @staticmethod
+    def _recorded_initial_stack(
+        post_event: SyscallEvent,
+        mappings: Sequence[MemoryMapping],
+    ) -> tuple[MemoryMapping, bytes, X86InitialStackImage]:
+        stack_mappings = tuple(
+            mapping
+            for mapping in mappings
+            if mapping.event_count == post_event.event_count
+            and mapping.name in (b"[stack]", "[stack]")
+        )
+        if len(stack_mappings) != 1:
+            raise ReplayEventError(
+                f"Exec event {post_event.event_count} has {len(stack_mappings)} stack mappings."
+            )
+        mapping = stack_mappings[0]
+        if mapping.source != "trace" or mapping.mmap_prot & 0x3 != 0x3:
+            raise ReplayEventError("Recorded initial stack is not a writable trace mapping.")
+        if mapping.mmap_flags & ~(_MAP_PRIVATE | _MAP_GROWSDOWN):
+            raise ReplayEventError("Recorded initial stack has unsupported mapping flags.")
+        if mapping.mmap_flags & _MAP_PRIVATE == 0:
+            raise ReplayEventError("Recorded initial stack is not a private mapping.")
+        image = bytearray(mapping.length)
+        known = bytearray(mapping.length)
+        for write in post_event.mem_writes:
+            data = write.materialize()
+            start = write.address - mapping.start_address
+            end = start + len(data)
+            if end <= 0 or start >= mapping.length:
+                continue
+            if start < 0 or end > mapping.length:
+                raise ReplayEventError("Exec memory write partially overlaps the initial stack.")
+            image[start:end] = data
+            known[start:end] = b"\x01" * len(data)
+        if not all(known):
+            raise ReplayEventError("Recorded initial stack contains unknown bytes.")
+        stack_pointer = X86ReplayEngine._event_register(post_event, "rsp")
+        recorded = X86InitialStackImage.read(
+            stack_pointer,
+            lambda address, size: image[
+                address - mapping.start_address : address - mapping.start_address + size
+            ],
+            maximum_end=mapping.end_address,
+        )
+        return mapping, bytes(image), recorded
+
+    def replay_initial_exec(
+        self,
+        target: X86StartupReplayTarget,
+        pre_event: SyscallEvent,
+        post_event: SyscallEvent,
+        mappings: Sequence[MemoryMapping],
+    ) -> ReadableProgramState:
+        """Establish the recorded x86 stack address before executing ELF entry."""
+        try:
+            if pre_event.syscall_number != 59 or post_event.syscall_number != 59:
+                raise ReplayEventError("Initial process-image event is not x86-64 execve.")
+            if pre_event.syscall_state not in ("entering", "enteringPtrace"):
+                raise ReplayEventError("Initial execve pre-event has an invalid phase.")
+            if post_event.syscall_state != "exiting" or post_event.failed_during_preparation:
+                raise ReplayEventError("Initial execve post-event is not a successful exit.")
+            if pre_event.tid != post_event.tid or pre_event.arch != post_event.arch:
+                raise ReplayEventError("Initial execve pair changes thread or architecture.")
+            if post_event.pc is None or target.current_state().read_pc() != post_event.pc:
+                raise ReplayEventError("QEMU is not stopped at the recorded ELF entry.")
+
+            mapping, recorded_mapping, recorded_stack = self._recorded_initial_stack(
+                post_event, mappings
+            )
+            source_state = target.current_state()
+            source_rsp = source_state.read_register("rsp")
+            source_stack = X86InitialStackImage.read(source_rsp, source_state.read_memory)
+            if source_stack.arguments[1:] != recorded_stack.arguments[1:]:
+                raise ReplayEventError(
+                    "QEMU application arguments differ from the recorded execve arguments."
+                )
+            source_vdso = source_stack.auxiliary_value(33)
+            if source_vdso == 0:
+                raise ReplayEventError("QEMU initial stack has no mapped vDSO pointer.")
+            relocated = recorded_stack.replace_auxiliary_value(33, source_vdso)
+            stack_offset = recorded_stack.stack_pointer - mapping.start_address
+            destination_end = stack_offset + len(relocated)
+            if stack_offset < 0 or destination_end > mapping.length:
+                raise ReplayEventError(
+                    "QEMU initial stack does not fit in the recorded stack mapping."
+                )
+            established_mapping = bytearray(recorded_mapping)
+            established_mapping[stack_offset:destination_end] = relocated
+
+            target.map_target_memory(
+                mapping.start_address,
+                mapping.length,
+                mapping.mmap_prot,
+                mapping.mmap_flags | _MAP_ANONYMOUS | _MAP_FIXED_NOREPLACE,
+            )
+            target.write_target_memory(mapping.start_address, established_mapping)
+            established = target.current_state().read_memory(mapping.start_address, mapping.length)
+            if established != established_mapping:
+                raise ReplayReconciliationError(
+                    "QEMU retained different recorded initial-stack bytes."
+                )
+            for register in _X86_INITIAL_REGISTERS:
+                target.write_target_register(
+                    register,
+                    self._event_register(post_event, register),
+                )
+            state = target.current_state()
+            for register in _X86_INITIAL_REGISTERS:
+                actual = state.read_register(register)
+                expected = self._event_register(post_event, register)
+                if actual != expected:
+                    raise ReplayReconciliationError(
+                        f"QEMU initial {register.upper()} is {actual:#x}, expected {expected:#x}."
+                    )
+        except (
+            DeterministicLogError,
+            ReplayError,
+            RegisterAccessError,
+            MemoryAccessError,
+            ValueError,
+        ) as error:
+            self.coverage.record(
+                event_count=post_event.event_count,
+                effect="startup:execve",
+                strategy=ReplayStrategy.RECORDED,
+                outcome=CoverageOutcome.FAILED,
+                detail=str(error),
+            )
+            raise
+        self.coverage.record(
+            event_count=post_event.event_count,
+            effect="startup:execve",
+            strategy=ReplayStrategy.RECORDED,
+            outcome=CoverageOutcome.HANDLED,
+        )
+        return state
 
     def prepare_syscall(self, event: SyscallEvent) -> SyscallPolicy:
         """Validate and classify a pre-event before consuming its post-event."""

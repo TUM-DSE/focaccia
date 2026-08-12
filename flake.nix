@@ -1982,6 +1982,22 @@
       ];
     };
 
+    recordedX86InitialStackCheck = mkStaticUnitCheck {
+      name = "recorded-x86-initial-stack";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_x86_replay.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "initial_stack or initial_exec"
+      ];
+    };
+
     qemuStructuredReplayReportCheck = mkStaticUnitCheck {
       name = "qemu-structured-replay-report";
       ruffTargets = [
@@ -2881,6 +2897,7 @@
       x86-signal-return = x86SignalReturnCheck;
       replay-effect-coverage = replayEffectCoverageCheck;
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
+      recorded-x86-initial-stack = recordedX86InitialStackCheck;
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
       non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;
       bounded-diagnostic-rendering = boundedDiagnosticRenderingCheck;
