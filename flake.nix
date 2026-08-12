@@ -1745,6 +1745,20 @@
       ];
     };
 
+    fixedRecordedAnonymousMmapCheck = mkStaticUnitCheck {
+      name = "fixed-recorded-anonymous-mmap";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py"
+        "-k"
+        "anonymous_mmap_null"
+      ];
+    };
+
     translatedInitialBrkQueryCheck = mkStaticUnitCheck {
       name = "translated-initial-brk-query";
       ruffTargets = [
@@ -2595,6 +2609,7 @@
       recorded-fcntl-replay = recordedFcntlReplayCheck;
       recorded-tiocgwinsz-replay = recordedTiocgwinszReplayCheck;
       qemu-syscall-post-boundary = qemuSyscallPostBoundaryCheck;
+      fixed-recorded-anonymous-mmap = fixedRecordedAnonymousMmapCheck;
       translated-initial-brk-query = translatedInitialBrkQueryCheck;
       recorded-syscall-clobber-replay = recordedSyscallClobberReplayCheck;
       recorded-arch-prctl-replay = recordedArchPrctlReplayCheck;

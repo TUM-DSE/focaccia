@@ -95,6 +95,7 @@ _X86_GPRS = (
     "rsp",
 )
 _MAP_ANONYMOUS = 0x20
+_MAP_FIXED_NOREPLACE = 0x100000
 _SA_NODEFER = 0x40000000
 _SA_RESETHAND = 0x80000000
 _SIG_BLOCK = 0
@@ -313,8 +314,7 @@ class X86ReplayEngine:
             if policy.number in self.thread_creating_syscalls:
                 reject_thread_creating_effect(policy.name)
             raise UnsupportedReplayEffect(
-                f"System call {policy.name} ({policy.number}) is rejected: "
-                f"{policy.reject_reason}.",
+                f"System call {policy.name} ({policy.number}) is rejected: {policy.reject_reason}.",
                 event_count=event.event_count,
                 syscall_number=policy.number,
                 syscall_name=policy.name,
@@ -421,6 +421,12 @@ class X86ReplayEngine:
             ReplayStrategy.EXECUTE_RECONCILE,
             ReplayStrategy.SAFE_PASSTHROUGH,
         ):
+            execution_inputs, execution_restores = self._plan_execution_registers(
+                policy,
+                context,
+            )
+            for effect in execution_inputs:
+                target.write_target_register(effect.register, effect.value)
             state = target.execute_replay_instruction(post_event.pc)
             if state is None or target.is_exited():
                 raise ReplayReconciliationError(
@@ -429,10 +435,7 @@ class X86ReplayEngine:
             control_effects = self._recorded_execution_control_effects(post_event)
             apply_recorded = policy.reconcile is ReconcileMode.APPLY_RECORDED or (
                 policy.reconcile is ReconcileMode.APPLY_RECORDED_ON_ZERO_ARGUMENT
-                and context.target_state.read_register(
-                    self.syscall_argument_registers[0]
-                )
-                == 0
+                and context.target_state.read_register(self.syscall_argument_registers[0]) == 0
             )
             if apply_recorded:
                 self._reconcile_execution_boundary(state, post_event)
@@ -445,6 +448,7 @@ class X86ReplayEngine:
                             self._event_register(post_event, self.result_register),
                         ),
                         *control_effects,
+                        *execution_restores,
                     ),
                     memory_effects,
                     set_pc=False,
@@ -460,7 +464,7 @@ class X86ReplayEngine:
                 self._apply_recorded_effects(
                     target,
                     post_event,
-                    control_effects,
+                    (*control_effects, *execution_restores),
                     (),
                     set_pc=False,
                 )
@@ -488,7 +492,9 @@ class X86ReplayEngine:
         strategy = (
             ReplayStrategy.SAFE_PASSTHROUGH
             if disposition == "ignored"
-            else ReplayStrategy.REJECT if disposition == "fatal" else ReplayStrategy.RECORDED
+            else ReplayStrategy.REJECT
+            if disposition == "fatal"
+            else ReplayStrategy.RECORDED
         )
         try:
             return self._replay_signal(target, pre_event, post_event)
@@ -726,13 +732,12 @@ class X86ReplayEngine:
     ) -> None:
         if target_state.read_pc() != event.pc:
             raise ReplayEventError(
-                f"System call expects PC {event.pc:#x}, target has " f"{target_state.read_pc():#x}."
+                f"System call expects PC {event.pc:#x}, target has {target_state.read_pc():#x}."
             )
         observed_number = target_state.read_register(self.syscall_number_register)
         if observed_number != event.syscall_number:
             raise ReplayEventError(
-                f"RR records system call {event.syscall_number}, target requests "
-                f"{observed_number}."
+                f"RR records system call {event.syscall_number}, target requests {observed_number}."
             )
 
     def _validate_pair(
@@ -758,7 +763,7 @@ class X86ReplayEngine:
         extra_kind = post_event.syscall_extras.kind
         if extra_kind not in policy.allowed_extras:
             raise UnsupportedReplayEffect(
-                f"System call {policy.name} has unsupported RR extra effect " f"{extra_kind!r}.",
+                f"System call {policy.name} has unsupported RR extra effect {extra_kind!r}.",
                 event_count=post_event.event_count,
                 syscall_number=policy.number,
                 syscall_name=policy.name,
@@ -795,14 +800,42 @@ class X86ReplayEngine:
         policy: SyscallPolicy,
     ) -> tuple[RegisterReplayEffect, ...]:
         registers = tuple(
-            dict.fromkeys(
-                (*self.recorded_result_registers, *policy.recorded_post_registers)
-            )
+            dict.fromkeys((*self.recorded_result_registers, *policy.recorded_post_registers))
         )
         return tuple(
             RegisterReplayEffect(register, self._event_register(post_event, register))
             for register in registers
         )
+
+    def _plan_execution_registers(
+        self,
+        policy: SyscallPolicy,
+        context: SyscallReplayContext,
+    ) -> tuple[tuple[RegisterReplayEffect, ...], tuple[RegisterReplayEffect, ...]]:
+        """Plan temporary syscall inputs and their recorded post-event restoration."""
+        if policy.number != 9 or context.result < 0:
+            return (), ()
+        address_register = self.syscall_argument_registers[0]
+        flags_register = self.syscall_argument_registers[3]
+        if context.target_state.read_register(address_register) != 0:
+            return (), ()
+        if context.result == 0 or context.result & 0xFFF:
+            raise ReplayEventError(
+                "Successful anonymous mmap(NULL) has an invalid recorded address."
+            )
+        flags = context.target_state.read_register(flags_register)
+        inputs = (
+            RegisterReplayEffect(address_register, context.result),
+            RegisterReplayEffect(flags_register, flags | _MAP_FIXED_NOREPLACE),
+        )
+        restores = tuple(
+            RegisterReplayEffect(
+                register,
+                self._event_register(context.post_event, register),
+            )
+            for register in (address_register, flags_register)
+        )
+        return inputs, restores
 
     def _recorded_execution_control_effects(
         self,
@@ -838,8 +871,7 @@ class X86ReplayEngine:
     ) -> None:
         if post_event.pc is None or state.read_pc() != post_event.pc:
             raise ReplayReconciliationError(
-                f"Executed system call reached {state.read_pc():#x}, expected "
-                f"{post_event.pc!r}."
+                f"Executed system call reached {state.read_pc():#x}, expected {post_event.pc!r}."
             )
         self._reconcile_event_registers(
             state,
@@ -864,8 +896,7 @@ class X86ReplayEngine:
             actual = state.read_memory(effect.target_address, len(effect.data))
             if actual != effect.data:
                 raise ReplayReconciliationError(
-                    f"Executed system call produced different bytes at "
-                    f"{effect.target_address:#x}."
+                    f"Executed system call produced different bytes at {effect.target_address:#x}."
                 )
 
     def _reconcile_event_registers(
@@ -965,7 +996,7 @@ class X86ReplayEngine:
                 payload = b"".join(effect.data for effect in memory_effects)
                 if len(payload) != 8:
                     raise ReplayEventError(
-                        f"Successful {policy.name} must replay exactly two int32 " "descriptors."
+                        f"Successful {policy.name} must replay exactly two int32 descriptors."
                     )
                 descriptors = tuple(
                     int.from_bytes(payload[offset : offset + 4], "little", signed=True)
@@ -1098,8 +1129,7 @@ class X86ReplayEngine:
                     raise ReplayEventError("RR openedFds contains a negative descriptor.")
                 if context.result >= 0 and opened.fd != context.result:
                     raise ReplayEventError(
-                        f"RR opened descriptor {opened.fd} differs from result "
-                        f"{context.result}."
+                        f"RR opened descriptor {opened.fd} differs from result {context.result}."
                     )
                 effects.append(
                     OpenedDescriptorReplayEffect(
@@ -1340,7 +1370,9 @@ class AArch64ReplayEngine(X86ReplayEngine):
         strategy = (
             ReplayStrategy.SAFE_PASSTHROUGH
             if disposition == "ignored"
-            else ReplayStrategy.REJECT if disposition == "fatal" else ReplayStrategy.RECORDED
+            else ReplayStrategy.REJECT
+            if disposition == "fatal"
+            else ReplayStrategy.RECORDED
         )
         try:
             return self._replay_aarch64_signal(target, pre_event, post_event)

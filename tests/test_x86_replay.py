@@ -395,6 +395,62 @@ def test_anonymous_mmap_executes_and_reconciles_exact_result():
     assert engine.coverage_report().by_strategy[ReplayStrategy.EXECUTE_RECONCILE] == 1
 
 
+def test_anonymous_mmap_null_forces_recorded_address_without_leaking_fixed_flags():
+    pre, post = make_syscall_pair(
+        9,
+        arguments={
+            "rdi": 0,
+            "rsi": 0x1000,
+            "rdx": 3,
+            "r10": 0x22,
+            "r8": MASK64,
+            "r9": 0,
+        },
+        result=0x709567A6C000,
+    )
+    observed_inputs: list[tuple[int, int]] = []
+
+    def execute(target: FakeReplayTarget) -> ReadableProgramState:
+        observed_inputs.append(
+            (target.state.read_register("rdi"), target.state.read_register("r10"))
+        )
+        return install_post_state(target, post)
+
+    target = make_target_for_event(pre, execute=execute)
+
+    state = X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+    assert observed_inputs == [(0x709567A6C000, 0x22 | 0x100000)]
+    assert state.read_register("rax") == 0x709567A6C000
+    assert state.read_register("rdi") == 0
+    assert state.read_register("r10") == 0x22
+
+
+def test_anonymous_mmap_null_fails_if_recorded_address_cannot_be_established():
+    pre, post = make_syscall_pair(
+        9,
+        arguments={
+            "rdi": 0,
+            "rsi": 0x1000,
+            "rdx": 3,
+            "r10": 0x22,
+            "r8": MASK64,
+            "r9": 0,
+        },
+        result=0x709567A6C000,
+    )
+
+    def execute(target: FakeReplayTarget) -> ReadableProgramState:
+        install_post_state(target, post)
+        target.state.write_register("rax", MASK64 - 16)
+        return target.state
+
+    target = make_target_for_event(pre, execute=execute)
+
+    with pytest.raises(ReplayReconciliationError, match="expects rax"):
+        X86ReplayEngine(target.arch).replay_syscall(target, pre, post)
+
+
 def test_brk_zero_query_applies_recorded_address_but_nonzero_growth_remains_exact():
     pre, post = make_syscall_pair(
         12,
