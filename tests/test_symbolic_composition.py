@@ -81,6 +81,47 @@ def test_deep_expression_composition_evaluation_and_dependencies_are_iterative(
     assert composed.get_used_registers() == ["RAX"]
 
 
+def test_long_composition_does_not_rescan_accumulated_register_dags(monkeypatch):
+    import focaccia.symbolic as symbolic
+
+    depth = 1_100
+    expression = ExprId("RAX", 64)
+    for _ in range(depth):
+        expression = ExprOp("deep_identity", expression)
+    first = transform(
+        X86,
+        0x1000,
+        0x1001,
+        {ExprId("RBX", 64): expression},
+    )
+    copies = 2_000
+    composer = SymbolicTransformComposer(first)
+    depth_calls = 0
+    original_depth = symbolic.expression_depth
+
+    def counted_depth(value):
+        nonlocal depth_calls
+        depth_calls += 1
+        return original_depth(value)
+
+    monkeypatch.setattr(symbolic, "expression_depth", counted_depth)
+    for index in range(copies):
+        composer.append(
+            transform(
+                X86,
+                0x1001 + index,
+                0x1002 + index,
+                {ExprId("RBX", 64): ExprId("RBX", 64)},
+            )
+        )
+
+    composed = composer.finish()
+
+    assert composed.range == (0x1000, 0x1001 + copies)
+    assert expression_depth(composed.changed_regs["RBX"]) > 1_000
+    assert depth_calls == 0
+
+
 def test_unknown_symbolic_destinations_fail_closed_while_irdst_is_internal():
     internal = transform(
         X86,

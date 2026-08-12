@@ -646,24 +646,38 @@ class SymbolicTransform:
 class _SymbolicState:
     arch: Arch
     registers: dict[str, Expr]
+    register_depths: dict[str, int]
     memory_writes: list[MemoryWrite]
 
     @classmethod
     def identity(cls, arch: Arch) -> _SymbolicState:
         registers: dict[str, Expr] = {}
+        register_depths: dict[str, int] = {}
         for base_reg in sorted(arch.regnames):
             accessor = arch.get_reg_accessor(base_reg)
             if accessor is None:
                 raise SymbolicCompositionError(f"Missing accessor for {base_reg}.")
             registers[base_reg] = ExprId(base_reg, accessor.num_bits)
-        return cls(arch, registers, [])
+            register_depths[base_reg] = 0
+        return cls(arch, registers, register_depths, [])
 
 
-def _pointer_with_offset(pointer: Expr, offset: int) -> Expr:
+def _simplify_with_depth(expression: Expr, depth: int) -> tuple[Expr, int]:
+    """Simplify a shallow node and retain its depth without rescanning deep children."""
+    result = simplify_if_shallow(expression, depth)
+    if result is expression:
+        return result, depth
+    # Simplification is attempted only below the recursive depth limit, so a
+    # changed result is bounded and inexpensive to measure exactly.
+    return result, expression_depth(result)
+
+
+def _pointer_with_offset(pointer: Expr, depth: int, offset: int) -> tuple[Expr, int]:
     if offset == 0:
-        return pointer
+        return pointer, depth
     mask = (1 << pointer.size) - 1
-    return expr_simp(pointer + ExprInt(offset & mask, pointer.size))
+    expression = pointer + ExprInt(offset & mask, pointer.size)
+    return _simplify_with_depth(expression, depth + 1)
 
 
 def _constant_address_delta(left: Expr, right: Expr) -> int | None:
@@ -687,38 +701,49 @@ def _memory_value_byte(write: MemoryWrite, offset: int, endianness: Arch.Endiann
     return expr_simp(ExprSlice(write.value, start, start + 8))
 
 
-def _assemble_memory_bytes(values: list[Expr], endianness: Arch.Endianness) -> Expr:
+def _assemble_memory_bytes(
+    values: list[tuple[Expr, int]],
+    endianness: Arch.Endianness,
+) -> tuple[Expr, int]:
     if not values:
         raise SymbolicCompositionError("Cannot assemble an empty memory read.")
     significance_order = values if endianness == "little" else list(reversed(values))
     if len(significance_order) == 1:
         return significance_order[0]
-    return expr_simp(ExprCompose(*significance_order))
+    expression = ExprCompose(*(value for value, _depth in significance_order))
+    depth = 1 + max(depth for _value, depth in significance_order)
+    return _simplify_with_depth(expression, depth)
 
 
 def _read_symbolic_memory(
     address: Expr,
+    address_depth: int,
     size_bits: int,
     state: _SymbolicState,
-) -> Expr:
+) -> tuple[Expr, int]:
     if size_bits <= 0 or size_bits % 8 != 0:
         raise SymbolicCompositionError(f"Symbolic memory read has non-byte width {size_bits}.")
 
     prefix = ExprInt(len(state.memory_writes), state.arch.ptr_size)
-    values: list[Expr] = []
+    values: list[tuple[Expr, int]] = []
     for load_offset in range(size_bits // 8):
-        load_address = _pointer_with_offset(address, load_offset)
+        load_address, load_address_depth = _pointer_with_offset(address, address_depth, load_offset)
         deferred = ExprOp(_DEFERRED_MEMORY_BYTE_OP, load_address, prefix)
-        values.append(ExprSlice(deferred, 0, 8))
+        deferred_depth = load_address_depth + 1
+        value = ExprSlice(deferred, 0, 8)
+        values.append((value, deferred_depth + 1))
     return _assemble_memory_bytes(values, state.arch.endianness)
 
 
-def _read_symbolic_register(identifier: ExprId, state: _SymbolicState) -> Expr:
+def _read_symbolic_register(
+    identifier: ExprId,
+    state: _SymbolicState,
+) -> tuple[Expr, int]:
     if not isinstance(identifier.name, str):
-        return identifier
+        return identifier, 0
     canonical = state.arch.to_regname(identifier.name)
     if canonical is None:
-        return identifier
+        return identifier, 0
     accessor = state.arch.get_reg_accessor(canonical)
     if accessor is None:
         raise SymbolicCompositionError(f"Missing accessor for symbolic register {canonical}.")
@@ -731,19 +756,23 @@ def _read_symbolic_register(identifier: ExprId, state: _SymbolicState) -> Expr:
         value = state.arch.get_constant_register_value(canonical)
         if value is None:
             raise SymbolicCompositionError(f"Missing constant value for {canonical}.")
-        return ExprInt(value, accessor.num_bits)
+        return ExprInt(value, accessor.num_bits), 0
 
     base = state.registers.get(accessor.base_reg)
-    if base is None:
+    base_depth = state.register_depths.get(accessor.base_reg)
+    if base is None or base_depth is None:
         raise SymbolicCompositionError(
             f"Missing symbolic base register {accessor.base_reg} for {identifier.name}."
         )
     if accessor.start == 0 and accessor.end == base.size:
-        return base
-    return simplify_if_shallow(ExprSlice(base, accessor.start, accessor.end))
+        return base, base_depth
+    return _simplify_with_depth(ExprSlice(base, accessor.start, accessor.end), base_depth + 1)
 
 
-def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Expr:
+def _rewrite_symbolic_expression(
+    expression: Expr,
+    state: _SymbolicState,
+) -> tuple[Expr, int]:
     """Rewrite an expression DAG iteratively and memoize shared subexpressions."""
     results: dict[int, Expr] = {}
     depths: dict[int, int] = {}
@@ -764,9 +793,14 @@ def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Exp
         if isinstance(current, (ExprInt, ExprLoc)):
             rewritten = current
         elif isinstance(current, ExprId):
-            rewritten = _read_symbolic_register(current, state)
+            rewritten, replacement_depth = _read_symbolic_register(current, state)
         elif isinstance(current, ExprMem):
-            rewritten = _read_symbolic_memory(results[id(current.ptr)], current.size, state)
+            rewritten, replacement_depth = _read_symbolic_memory(
+                results[id(current.ptr)],
+                depths[id(current.ptr)],
+                current.size,
+                state,
+            )
         elif isinstance(current, ExprSlice):
             rewritten = ExprSlice(results[id(current.arg)], current.start, current.stop)
         elif isinstance(current, ExprCond):
@@ -790,41 +824,47 @@ def _rewrite_symbolic_expression(expression: Expr, state: _SymbolicState) -> Exp
                 f"Unsupported symbolic expression class {type(current).__name__}."
             )
         if isinstance(current, ExprId) and rewritten is not current:
-            depth = expression_depth(rewritten)
+            depth = replacement_depth
         elif isinstance(current, ExprMem):
-            depth = expression_depth(rewritten)
+            depth = replacement_depth
         else:
             depth = 1 + max((depths[id(child)] for child in children), default=-1)
-        result = simplify_if_shallow(rewritten, depth)
+        result, result_depth = _simplify_with_depth(rewritten, depth)
         results[key] = result
-        depths[key] = depth if result is rewritten else expression_depth(result)
-    return results[id(expression)]
+        depths[key] = result_depth
+    return results[id(expression)], depths[id(expression)]
 
 
 def _write_symbolic_register(
     current: Expr,
+    current_depth: int,
     accessor: RegisterAccessor,
     value: Expr,
+    value_depth: int,
     *,
     zero_extend: bool,
-) -> Expr:
+) -> tuple[Expr, int]:
     if value.size != accessor.num_bits:
         raise SymbolicCompositionError(
             f"Register write to {accessor} has {value.size} bits, expected {accessor.num_bits}."
         )
     if accessor.start == 0 and accessor.end == current.size:
-        return value
+        return value, value_depth
 
-    parts: list[Expr] = []
+    parts: list[tuple[Expr, int]] = []
     if accessor.start:
-        parts.append(ExprSlice(current, 0, accessor.start))
-    parts.append(value)
+        parts.append((ExprSlice(current, 0, accessor.start), current_depth + 1))
+    parts.append((value, value_depth))
     if accessor.end < current.size:
         if zero_extend:
-            parts.append(ExprInt(0, current.size - accessor.end))
+            parts.append((ExprInt(0, current.size - accessor.end), 0))
         else:
-            parts.append(ExprSlice(current, accessor.end, current.size))
-    return simplify_if_shallow(parts[0] if len(parts) == 1 else ExprCompose(*parts))
+            parts.append((ExprSlice(current, accessor.end, current.size), current_depth + 1))
+    if len(parts) == 1:
+        return parts[0]
+    expression = ExprCompose(*(part for part, _depth in parts))
+    depth = 1 + max(depth for _part, depth in parts)
+    return _simplify_with_depth(expression, depth)
 
 
 def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransform) -> None:
@@ -832,8 +872,13 @@ def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransfor
     # snapshot of the incoming register map. Memory writes are appended only
     # after every expression has been rewritten and can therefore share the
     # incoming ordered-write list without copying its complete history.
-    before = _SymbolicState(state.arch, state.registers.copy(), state.memory_writes)
-    register_updates: list[tuple[str, RegisterAccessor, Expr]] = []
+    before = _SymbolicState(
+        state.arch,
+        state.registers.copy(),
+        state.register_depths.copy(),
+        state.memory_writes,
+    )
+    register_updates: list[tuple[str, RegisterAccessor, Expr, int]] = []
     written_masks: dict[str, int] = {}
     for regname, expression in transform.changed_regs.items():
         canonical = state.arch.to_regname(regname)
@@ -848,26 +893,28 @@ def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransfor
                 f"Transform has overlapping writes to {accessor.base_reg}."
             )
         written_masks[accessor.base_reg] = previous_mask | accessor.mask
-        register_updates.append(
-            (canonical, accessor, _rewrite_symbolic_expression(expression, before))
-        )
+        rewritten, rewritten_depth = _rewrite_symbolic_expression(expression, before)
+        register_updates.append((canonical, accessor, rewritten, rewritten_depth))
 
-    memory_updates = [
-        MemoryWrite(
-            _rewrite_symbolic_expression(write.address, before),
-            _rewrite_symbolic_expression(write.value, before),
-        )
-        for write in transform.memory_writes
-    ]
+    memory_updates = []
+    for write in transform.memory_writes:
+        address, _address_depth = _rewrite_symbolic_expression(write.address, before)
+        value, _value_depth = _rewrite_symbolic_expression(write.value, before)
+        memory_updates.append(MemoryWrite(address, value))
 
-    for canonical, accessor, value in register_updates:
+    for canonical, accessor, value, value_depth in register_updates:
         current = state.registers[accessor.base_reg]
-        state.registers[accessor.base_reg] = _write_symbolic_register(
+        current_depth = state.register_depths[accessor.base_reg]
+        updated, updated_depth = _write_symbolic_register(
             current,
+            current_depth,
             accessor,
             value,
+            value_depth,
             zero_extend=state.arch.register_write_zero_extends(canonical),
         )
+        state.registers[accessor.base_reg] = updated
+        state.register_depths[accessor.base_reg] = updated_depth
     state.memory_writes.extend(memory_updates)
 
 

@@ -2470,6 +2470,19 @@
       pytestTargets = [ "tests/test_symbolic_composition.py" ];
     };
 
+    boundedLongCutpointCompositionCheck = mkStaticUnitCheck {
+      name = "bounded-long-cutpoint-composition";
+      ruffTargets = [
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_symbolic_composition.py"
+        "-k"
+        "long_composition_does_not_rescan_accumulated_register_dags"
+      ];
+    };
+
     iterativeSymbolicDagProcessingCheck = mkStaticUnitCheck {
       name = "iterative-symbolic-dag-processing";
       ruffTargets = [
@@ -2849,6 +2862,7 @@
       defined-register-output-validation = definedRegisterOutputValidationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
       symbolic-composition = symbolicCompositionCheck;
+      bounded-long-cutpoint-composition = boundedLongCutpointCompositionCheck;
       iterative-symbolic-dag-processing = iterativeSymbolicDagProcessingCheck;
       fp32-to-fp64 = fp32ToFp64Check;
       explicit-trace-gaps = explicitTraceGapsCheck;
