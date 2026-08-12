@@ -246,9 +246,10 @@ def make_signal_pair(
     frame: bytes | None = None,
     signal_number: int = SIGNAL,
     include_handler_extra: bool = True,
+    saved_overrides: Mapping[str, int] | None = None,
 ) -> tuple[SignalEvent, SignalEvent, dict[str, int]]:
     arch = x86.ArchX86()
-    saved = saved_registers()
+    saved = {**saved_registers(), **(saved_overrides or {})}
     info = siginfo_bytes(signal_number)
     descriptor = SignalDescriptor(arch, info, False, "userHandler")
     pre = SignalEvent(
@@ -359,7 +360,13 @@ def test_recorded_signal_frame_preserves_number_mask_context_restorer_and_fpstat
     pre, post, saved = make_signal_pair()
     materialized = tuple(MaterializedMemoryWrite.from_recorded(write) for write in post.mem_writes)
 
-    frame = X86RecordedSignalFrame.from_events(pre, post, materialized, action_uses_siginfo=True)
+    frame = X86RecordedSignalFrame.from_events(
+        pre,
+        post,
+        materialized,
+        action_uses_siginfo=True,
+        action_restarts_syscalls=False,
+    )
 
     assert frame.signal_number == SIGNAL
     assert frame.signal_mask == SAVED_MASK
@@ -450,7 +457,13 @@ def test_signal_frame_validates_and_preserves_variable_xstate_tail():
     _unused, post, _saved = make_signal_pair(frame=bytes(frame))
     materialized = tuple(MaterializedMemoryWrite.from_recorded(write) for write in post.mem_writes)
 
-    parsed = X86RecordedSignalFrame.from_events(pre, post, materialized, action_uses_siginfo=True)
+    parsed = X86RecordedSignalFrame.from_events(
+        pre,
+        post,
+        materialized,
+        action_uses_siginfo=True,
+        action_restarts_syscalls=False,
+    )
 
     assert parsed.fpstate_size == extended_size
     assert materialized[0].data[-4:] == X86_64_FP_XSTATE_MAGIC2.to_bytes(4, "little")
@@ -518,6 +531,55 @@ def test_siginfo_signal_rejects_frame_descriptor_mismatch():
     configure_action(engine)
 
     with pytest.raises(ReplayEventError, match="siginfo differs"):
+        engine.replay_signal(target, pre, post)
+
+    assert target.mutations == []
+
+
+def test_non_restarted_interrupted_syscall_normalizes_saved_rax_to_eintr():
+    _pre, _post, saved = make_signal_pair()
+    restart_result = (1 << 64) - 512
+    interrupted_result = (1 << 64) - 4
+    frame_saved = {**saved, "rax": interrupted_result}
+    pre, post, _saved = make_signal_pair(
+        frame=build_frame(frame_saved),
+        saved_overrides={"rax": restart_result},
+    )
+    target = FakeSignalTarget({**saved, "rax": restart_result})
+    engine = X86ReplayEngine(target.arch)
+    engine.state.signal_actions[SIGNAL] = X86KernelSigaction(
+        HANDLER_PC,
+        X86KernelSigaction.SA_SIGINFO | X86KernelSigaction.SA_RESTORER,
+        RESTORER_PC,
+        1 << 11,
+    )
+    engine.state.signal_mask = SAVED_MASK
+
+    state = engine.replay_signal(target, pre, post)
+
+    assert state is not None
+    assert engine.state.signal_frames[-1].frame.saved_registers["rax"] == interrupted_result
+
+
+def test_restarted_interrupted_syscall_rejects_saved_rax_normalization():
+    _pre, _post, saved = make_signal_pair()
+    restart_result = (1 << 64) - 512
+    frame_saved = {**saved, "rax": (1 << 64) - 4}
+    pre, post, _saved = make_signal_pair(
+        frame=build_frame(frame_saved),
+        saved_overrides={"rax": restart_result},
+    )
+    target = FakeSignalTarget({**saved, "rax": restart_result})
+    engine = X86ReplayEngine(target.arch)
+    engine.state.signal_actions[SIGNAL] = X86KernelSigaction(
+        HANDLER_PC,
+        X86KernelSigaction.SA_SIGINFO | X86KernelSigaction.SA_RESTORER | 0x10000000,
+        RESTORER_PC,
+        1 << 11,
+    )
+    engine.state.signal_mask = SAVED_MASK
+
+    with pytest.raises(ReplayEventError, match="Unsupported interrupted/restarted"):
         engine.replay_signal(target, pre, post)
 
     assert target.mutations == []

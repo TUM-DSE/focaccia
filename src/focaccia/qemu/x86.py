@@ -691,6 +691,7 @@ class X86RecordedSignalFrame:
         writes: Sequence[MaterializedMemoryWrite],
         *,
         action_uses_siginfo: bool,
+        action_restarts_syscalls: bool,
     ) -> X86RecordedSignalFrame:
         if pre_event.arch.archname != "x86_64" or post_event.arch.archname != "x86_64":
             raise ReplayEventError("x86 signal replay received a non-x86-64 event.")
@@ -759,11 +760,17 @@ class X86RecordedSignalFrame:
             except KeyError as error:
                 raise ReplayEventError(f"Signal event lacks saved register {register}.") from error
             if value != expected:
-                raise ReplayEventError(
-                    f"Signal context saves {register}={value:#x}, RR event has "
-                    f"{expected:#x}. Interrupted/restarted signal contexts are not yet "
-                    "supported."
+                normalizes_interrupted_syscall = (
+                    register == "rax"
+                    and expected == ((1 << 64) - 512)
+                    and value == ((1 << 64) - 4)
+                    and not action_restarts_syscalls
                 )
+                if not normalizes_interrupted_syscall:
+                    raise ReplayEventError(
+                        f"Signal context saves {register}={value:#x}, RR event has "
+                        f"{expected:#x}. Unsupported interrupted/restarted signal context."
+                    )
 
         for register, offset in (
             ("cs", X86_64_SIGCONTEXT_CS_OFFSET),

@@ -1882,6 +1882,20 @@
       ];
     };
 
+    interruptedSyscallSignalFrameCheck = mkStaticUnitCheck {
+      name = "interrupted-syscall-signal-frame";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/x86.py"
+        "tests/test_x86_signal_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_signal_replay.py"
+        "-k"
+        "interrupted_syscall"
+      ];
+    };
+
     nonSiginfoSignalFrameCheck = mkStaticUnitCheck {
       name = "non-siginfo-signal-frame";
       ruffTargets = [
@@ -2815,6 +2829,7 @@
       x86-replay-fail-closed = x86ReplayFailClosedCheck;
       x86-nested-output-replay = x86NestedOutputReplayCheck;
       x86-signal-frame-abi = x86SignalFrameAbiCheck;
+      interrupted-syscall-signal-frame = interruptedSyscallSignalFrameCheck;
       non-siginfo-signal-frame = nonSiginfoSignalFrameCheck;
       partial-x86-signal-state-replay = partialX86SignalStateReplayCheck;
       x86-signal-return = x86SignalReturnCheck;

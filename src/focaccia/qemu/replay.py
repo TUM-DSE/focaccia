@@ -96,6 +96,7 @@ _X86_GPRS = (
 )
 _MAP_ANONYMOUS = 0x20
 _MAP_FIXED_NOREPLACE = 0x100000
+_SA_RESTART = 0x10000000
 _SA_NODEFER = 0x40000000
 _SA_RESETHAND = 0x80000000
 _SIG_BLOCK = 0
@@ -583,13 +584,21 @@ class X86ReplayEngine:
             post_event,
             writes,
             action_uses_siginfo=bool(action.flags & X86KernelSigaction.SA_SIGINFO),
+            action_restarts_syscalls=bool(action.flags & _SA_RESTART),
         )
         if target_state.read_register("rsp") != self._event_register(pre_event, "rsp"):
             raise ReplayReconciliationError(
                 "Signal-frame replay currently requires the target and RR stack addresses "
                 "to match exactly."
             )
-        self._reconcile_event_registers(target_state, pre_event, frame.saved_registers)
+        self._reconcile_event_registers(
+            target_state,
+            pre_event,
+            {
+                register: self._event_register(pre_event, register)
+                for register in frame.saved_registers
+            },
+        )
         if post_event.pc != action.handler:
             raise ReplayEventError(
                 f"Signal handler PC {post_event.pc:#x} differs from rt_sigaction handler "
