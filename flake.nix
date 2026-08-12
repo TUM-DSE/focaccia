@@ -2201,6 +2201,19 @@
       ];
     };
 
+    indexedDestinationMatchingCheck = mkStaticUnitCheck {
+      name = "indexed-destination-matching";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "tests/test_match.py"
+      ];
+      pytestTargets = [
+        "tests/test_match.py"
+        "-k"
+        "bounded_unmatched_destination or indexed_terminal_destination"
+      ];
+    };
+
     terminalTransitionValidationCheck = mkStaticUnitCheck {
       name = "terminal-transition-validation";
       ruffTargets = [
@@ -2644,6 +2657,7 @@
       matching-failure-diagnostics = matchingFailureDiagnosticsCheck;
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
+      indexed-destination-matching = indexedDestinationMatchingCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;

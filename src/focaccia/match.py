@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 from copy import copy
 from dataclasses import dataclass
@@ -91,16 +92,16 @@ class TransitionMatcher:
         self.trace = _as_symbolic_trace(transforms)
         self.environment = self.trace.env
         self.addresses = self.trace.require_addresses()
+        source_positions: dict[int, list[int]] = {}
+        for index, address in enumerate(self.addresses):
+            source_positions.setdefault(address, []).append(index)
+        self._source_positions = {
+            address: tuple(positions) for address, positions in source_positions.items()
+        }
         self._iterator = (
-            self.trace.cursor()
-            if isinstance(self.trace, MaterializedTrace)
-            else self.trace
+            self.trace.cursor() if isinstance(self.trace, MaterializedTrace) else self.trace
         )
-        self._stop_address = (
-            self.environment.stop_address
-            if stop_address is None
-            else stop_address
-        )
+        self._stop_address = self.environment.stop_address if stop_address is None else stop_address
 
         self._diagnostics: list[TraceDiagnostic] = []
         self._next_transform_index = 0
@@ -206,8 +207,7 @@ class TransitionMatcher:
             return self._loaded_transforms[index]
         if index != self._next_transform_index:
             raise RuntimeError(
-                f"Internal transform cursor mismatch: {index} != "
-                f"{self._next_transform_index}."
+                f"Internal transform cursor mismatch: {index} != {self._next_transform_index}."
             )
         try:
             transform = next(self._iterator)
@@ -292,10 +292,11 @@ class TransitionMatcher:
         )
 
     def _find_address(self, start: int, pc: int) -> int | None:
-        for index in range(start, len(self.addresses)):
-            if self.addresses[index] == pc:
-                return index
-        return None
+        positions = self._source_positions.get(pc)
+        if positions is None:
+            return None
+        offset = bisect_left(positions, start)
+        return positions[offset] if offset < len(positions) else None
 
     def _load_initial_transform(self, target_index: int) -> SymbolicTraceItem | None:
         for index in range(self._next_transform_index, target_index + 1):
@@ -320,6 +321,8 @@ class TransitionMatcher:
                 "outside the selected region.",
                 transform_index=transform_index,
             )
+        else:
+            self._verify_exhausted()
         self._current = None
         self._current_index = None
         self._has_source = False
@@ -331,12 +334,37 @@ class TransitionMatcher:
         pc: int,
         concrete_index: int,
     ) -> int | None:
-        previous: SymbolicTraceItem | None = None
-        for index in range(start_index, len(self.addresses)):
+        assert self._current is not None
+        if self._current.range[1] == pc:
+            return start_index
+
+        # Every non-terminal destination is the following transform's source.
+        # Consult the address index before decoding any additional transforms;
+        # repeated PCs select the first occurrence after the current source.
+        next_source = self._find_address(start_index + 1, pc)
+        if next_source is not None:
+            return next_source - 1
+
+        # A persisted trace records its final destination separately because
+        # the source-address index has one entry per transform. Composition
+        # below still decodes and verifies every selected transform and checks
+        # that the composed range really ends at this PC.
+        terminal_index = len(self.addresses) - 1
+        if self._stop_address == pc and terminal_index > start_index:
+            return terminal_index
+
+        if self._stop_address is not None:
+            return None
+
+        # Legacy/unbounded streams have no indexed terminal destination. Keep
+        # their historical fallback, while bounded persisted traces avoid an
+        # expensive full-suffix decode for every unmatched concrete state.
+        previous: SymbolicTraceItem = self._current
+        for index in range(start_index + 1, len(self.addresses)):
             transform = self._read_transform(index)
             if transform is None:
                 return None
-            if previous is not None and previous.range[1] != transform.range[0]:
+            if previous.range[1] != transform.range[0]:
                 self._fatal(
                     "symbolic-trace-discontinuous",
                     f"Transform {index - 1} ends at {hex(previous.range[1])}, "
@@ -379,9 +407,7 @@ class TransitionMatcher:
             return self._current
 
         composite = (
-            self._current
-            if end_index == self._current_index
-            else _clone_transform(self._current)
+            self._current if end_index == self._current_index else _clone_transform(self._current)
         )
         previous: SymbolicTraceItem = self._current
 

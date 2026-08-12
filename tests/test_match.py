@@ -1,7 +1,7 @@
 from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch import aarch64, x86
-from focaccia.match import fold_traces, match_traces, match_transitions
+from focaccia.match import TransitionMatcher, fold_traces, match_traces, match_transitions
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
@@ -151,6 +151,66 @@ def test_adaptive_matching_consumes_a_one_shot_transform_stream_once():
     assert [item.range for item in result.trace.transforms] == [(0x1000, 0x1002)]
     assert stream.exhausted
     assert stream.position == 2
+
+
+def test_bounded_unmatched_destination_does_not_decode_symbolic_suffix():
+    transforms = tuple(transform(0x1000 + index, 0x1001 + index) for index in range(10_000))
+    stream = TransformStream(
+        iter(transforms),
+        environment(stop_address=0x1000 + len(transforms)),
+        [item.addr for item in transforms],
+    )
+    matcher = TransitionMatcher(stream)
+
+    assert matcher.observe(0x1000) is not None
+    assert stream.position == 1
+
+    assert matcher.observe(0xDEAD) is None
+    assert stream.position == 1
+    assert not matcher.done
+
+    boundary = matcher.observe(0x1001)
+    assert boundary is not None
+    assert boundary.incoming is transforms[0]
+    assert stream.position == 2
+
+
+def test_indexed_terminal_destination_composes_and_verifies_full_suffix():
+    transforms = (
+        transform(0x1000, 0x1001),
+        transform(0x1001, 0x1002),
+        transform(0x1002, 0x1003),
+    )
+    stream = TransformStream(
+        iter(transforms),
+        environment(stop_address=0x1003),
+        [item.addr for item in transforms],
+    )
+
+    result = match_transitions([state(0x1000), state(0x1003)], stream)
+
+    assert result.trace is not None
+    assert [item.range for item in result.trace.transforms] == [(0x1000, 0x1003)]
+    assert stream.position == len(transforms)
+    assert stream.exhausted
+    assert result.complete
+
+
+def test_legacy_trace_without_stop_address_still_matches_terminal_destination():
+    transforms = (
+        transform(0x1000, 0x1001),
+        transform(0x1001, 0x1002),
+        transform(0x1002, 0x1003),
+    )
+
+    result = match_transitions(
+        [state(0x1000), state(0x1003)],
+        symbolic_trace(*transforms),
+    )
+
+    assert result.trace is not None
+    assert [item.range for item in result.trace.transforms] == [(0x1000, 0x1003)]
+    assert result.complete
 
 
 def test_concrete_only_states_are_skipped_with_a_structured_diagnostic():
@@ -308,9 +368,7 @@ def test_concrete_suffix_after_symbolic_completion_is_reported():
     assert result.trace is not None
     assert result.trace.transforms == (item,)
     assert "concrete-suffix-skipped" in diagnostic_codes(result)
-    diagnostic = next(
-        item for item in result.diagnostics if item.code == "concrete-suffix-skipped"
-    )
+    diagnostic = next(item for item in result.diagnostics if item.code == "concrete-suffix-skipped")
     assert diagnostic.concrete_index == 2
 
 
