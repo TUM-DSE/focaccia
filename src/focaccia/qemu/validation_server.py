@@ -15,6 +15,7 @@ from focaccia.qemu.snapshot import (
     collect_snapshot_plan,
     merge_snapshot_plans,
     plan_minimal_snapshot,
+    plan_symbolic_dependencies,
     snapshot_diagnostics,
 )
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
@@ -191,10 +192,9 @@ def collect_conc_trace(
             )
         ]
         if boundary.outgoing is not None and not skip_unmatched:
-            plans.extend(
-                plan_minimal_snapshot(current_state, boundary.incoming, candidate)
-                for candidate in matcher.plan_successors()
-            )
+            dependencies = matcher.plan_successor_dependencies()
+            if dependencies is not None:
+                plans.append(plan_symbolic_dependencies(current_state, dependencies))
         collection = collect_snapshot_plan(
             previous_state,
             current_state,

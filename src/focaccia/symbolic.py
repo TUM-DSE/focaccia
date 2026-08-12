@@ -642,6 +642,15 @@ class SymbolicTransform:
         return res[:-1]  # Remove trailing newline
 
 
+@dataclass(frozen=True, slots=True)
+class SymbolicDependencies:
+    """Source-state inputs required by one or more symbolic outputs."""
+
+    arch: Arch
+    registers: frozenset[str]
+    memory: tuple[ExprMem, ...]
+
+
 @dataclass(slots=True)
 class _SymbolicState:
     arch: Arch
@@ -772,6 +781,7 @@ def _read_symbolic_register(
 def _rewrite_symbolic_expression(
     expression: Expr,
     state: _SymbolicState,
+    memory_dependencies: tuple[list[ExprMem], set[tuple[int, int]]] | None = None,
 ) -> tuple[Expr, int]:
     """Rewrite an expression DAG iteratively and memoize shared subexpressions."""
     results: dict[int, Expr] = {}
@@ -795,8 +805,15 @@ def _rewrite_symbolic_expression(
         elif isinstance(current, ExprId):
             rewritten, replacement_depth = _read_symbolic_register(current, state)
         elif isinstance(current, ExprMem):
+            rewritten_pointer = results[id(current.ptr)]
+            if memory_dependencies is not None:
+                dependencies, keys = memory_dependencies
+                dependency_key = (id(rewritten_pointer), current.size)
+                if dependency_key not in keys:
+                    keys.add(dependency_key)
+                    dependencies.append(ExprMem(rewritten_pointer, current.size))
             rewritten, replacement_depth = _read_symbolic_memory(
-                results[id(current.ptr)],
+                rewritten_pointer,
                 depths[id(current.ptr)],
                 current.size,
                 state,
@@ -814,6 +831,12 @@ def _rewrite_symbolic_expression(
             if current.op == _DEFERRED_MEMORY_BYTE_OP:
                 if len(arguments) != 2 or not isinstance(arguments[1], ExprInt):
                     raise SymbolicCompositionError("Malformed deferred memory read.")
+                if memory_dependencies is not None:
+                    dependencies, keys = memory_dependencies
+                    dependency_key = (id(arguments[0]), 8)
+                    if dependency_key not in keys:
+                        keys.add(dependency_key)
+                        dependencies.append(ExprMem(arguments[0], 8))
                 prefix = int(arguments[1]) + len(state.memory_writes)
                 arguments = (arguments[0], ExprInt(prefix, arguments[1].size))
             rewritten = ExprOp(current.op, *arguments)
@@ -867,7 +890,11 @@ def _write_symbolic_register(
     return _simplify_with_depth(expression, depth)
 
 
-def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransform) -> None:
+def _apply_symbolic_transform(
+    state: _SymbolicState,
+    transform: SymbolicTransform,
+    memory_dependencies: tuple[list[ExprMem], set[tuple[int, int]]] | None = None,
+) -> None:
     # Register outputs within one transform are simultaneous, so they need a
     # snapshot of the incoming register map. Memory writes are appended only
     # after every expression has been rewritten and can therefore share the
@@ -893,13 +920,25 @@ def _apply_symbolic_transform(state: _SymbolicState, transform: SymbolicTransfor
                 f"Transform has overlapping writes to {accessor.base_reg}."
             )
         written_masks[accessor.base_reg] = previous_mask | accessor.mask
-        rewritten, rewritten_depth = _rewrite_symbolic_expression(expression, before)
+        rewritten, rewritten_depth = _rewrite_symbolic_expression(
+            expression,
+            before,
+            memory_dependencies,
+        )
         register_updates.append((canonical, accessor, rewritten, rewritten_depth))
 
     memory_updates = []
     for write in transform.memory_writes:
-        address, _address_depth = _rewrite_symbolic_expression(write.address, before)
-        value, _value_depth = _rewrite_symbolic_expression(write.value, before)
+        address, _address_depth = _rewrite_symbolic_expression(
+            write.address,
+            before,
+            memory_dependencies,
+        )
+        value, _value_depth = _rewrite_symbolic_expression(
+            write.value,
+            before,
+            memory_dependencies,
+        )
         memory_updates.append(MemoryWrite(address, value))
 
     for canonical, accessor, value, value_depth in register_updates:
@@ -932,13 +971,17 @@ def _canonical_register_outputs(transform: SymbolicTransform) -> dict[str, Expr]
 class SymbolicTransformComposer:
     """Incrementally compose a contiguous transform sequence in one symbolic state."""
 
-    def __init__(self, first: SymbolicTransform):
+    def __init__(self, first: SymbolicTransform, *, track_dependencies: bool = False):
         self._arch = first.arch
         self._tid = first.tid
         self._start = first.range[0]
         self._end = first.range[0]
         self._state = _SymbolicState.identity(first.arch)
         self._instructions: list[Instruction] = []
+        self._track_dependencies = track_dependencies
+        self._dependency_registers: set[str] = set()
+        self._dependency_memory: list[ExprMem] = []
+        self._dependency_memory_keys: set[tuple[int, int]] = set()
         self.append(first)
 
     def append(self, transform: SymbolicTransform) -> None:
@@ -956,9 +999,38 @@ class SymbolicTransformComposer:
                 f"Cannot compose discontinuous ranges {previous_range!r} and {transform.range!r}."
             )
 
-        _apply_symbolic_transform(self._state, transform)
+        if self._track_dependencies:
+            expressions = [
+                *transform.changed_regs.values(),
+                *(write.address for write in transform.memory_writes),
+                *(write.value for write in transform.memory_writes),
+            ]
+            for expression in expressions:
+                for node in iter_expression_dag(expression):
+                    if not isinstance(node, ExprId) or not isinstance(node.name, str):
+                        continue
+                    canonical = self._arch.to_regname(node.name)
+                    if canonical is not None:
+                        self._dependency_registers.add(canonical)
+        _apply_symbolic_transform(
+            self._state,
+            transform,
+            (self._dependency_memory, self._dependency_memory_keys)
+            if self._track_dependencies
+            else None,
+        )
         self._instructions.extend(transform.instructions)
         self._end = transform.range[1]
+
+    def dependencies(self) -> SymbolicDependencies:
+        """Return the union of source inputs seen at every appended prefix."""
+        if not self._track_dependencies:
+            raise SymbolicCompositionError("This composer is not tracking source dependencies.")
+        return SymbolicDependencies(
+            self._arch,
+            frozenset(self._dependency_registers),
+            tuple(self._dependency_memory),
+        )
 
     def finish(self) -> SymbolicTransform:
         result = SymbolicTransform(

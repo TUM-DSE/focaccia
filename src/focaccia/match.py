@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from .snapshot import ProgramState, RegisterAccessError
 from .symbolic import (
+    SymbolicDependencies,
     SymbolicTraceItem,
     SymbolicTransformComposer,
     TraceGap,
@@ -134,29 +135,26 @@ class TransitionMatcher:
         """Return the next symbolic destination from the retained source."""
         return self._current.range[1] if self._has_source and self._current is not None else None
 
-    def plan_successors(self) -> tuple[SymbolicTraceItem, ...]:
-        """Compose candidate observable ranges through one bounded basic block.
+    def plan_successor_dependencies(self) -> SymbolicDependencies | None:
+        """Plan the union of candidate source inputs through one basic block.
 
-        QEMU may expose only a later boundary within the native execution's
-        current basic block. Every intervening oracle destination is therefore
-        a candidate until the executed control-flow instruction terminates the
-        block. The persisted trace fixes the executed path; divergent emulator
-        destinations remain unmatched and fail closed.
+        Candidate prefixes are speculative: only one later destination can be
+        observed. Keep one incremental symbolic state and accumulate its source
+        inputs without materializing overlapping composed transforms.
         """
         if self._done or not self._has_source:
-            return ()
+            return None
         assert self._current is not None
         assert self._current_index is not None
         if isinstance(self._current, TraceGap):
-            return (self._current,)
+            return None
 
-        planned: list[SymbolicTraceItem] = [self._current]
-        composer = SymbolicTransformComposer(self._current)
+        composer = SymbolicTransformComposer(self._current, track_dependencies=True)
         previous: SymbolicTraceItem = self._current
         for end_index in range(self._current_index + 1, len(self.addresses)):
             transform = self._read_transform(end_index)
             if transform is None:
-                return tuple(planned)
+                return composer.dependencies()
             if previous.range[1] != transform.range[0]:
                 self._fatal(
                     "symbolic-trace-discontinuous",
@@ -165,7 +163,7 @@ class TransitionMatcher:
                     f"at {hex(transform.range[0])}.",
                     transform_index=end_index,
                 )
-                return tuple(planned)
+                return composer.dependencies()
             if isinstance(transform, TraceGap):
                 break
             try:
@@ -176,14 +174,13 @@ class TransitionMatcher:
                     f"Unable to plan candidate transform {end_index}: {error}.",
                     transform_index=end_index,
                 )
-                return tuple(planned)
-            planned.append(composer.finish())
+                return composer.dependencies()
             previous = transform
             if transform.instructions:
                 underlying = getattr(transform.instructions[-1], "instr", None)
                 if underlying is None or underlying.breakflow():
                     break
-        return tuple(planned)
+        return composer.dependencies()
 
     def _diagnose(
         self,

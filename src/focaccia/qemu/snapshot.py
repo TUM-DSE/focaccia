@@ -16,6 +16,7 @@ from focaccia.snapshot import (
 )
 from focaccia.symbolic import (
     SymbolEvaluationError,
+    SymbolicDependencies,
     SymbolicTraceItem,
     SymbolicTransform,
     eval_symbol,
@@ -139,6 +140,23 @@ def plan_minimal_snapshot(
         architecture,
         tuple(sorted(registers)),
         tuple(unique_memory),
+    )
+
+
+def plan_symbolic_dependencies(
+    current_state: ReadableProgramState,
+    dependencies: SymbolicDependencies,
+) -> SnapshotPlan:
+    """Convert a precomposed source-dependency union into a snapshot plan."""
+    if current_state.arch != dependencies.arch:
+        raise SnapshotPlanningError(
+            f"Concrete architecture {current_state.arch} does not match "
+            f"symbolic architecture {dependencies.arch}."
+        )
+    return SnapshotPlan(
+        dependencies.arch,
+        tuple(sorted(dependencies.registers)),
+        tuple(MemoryDependency(expression, "current") for expression in dependencies.memory),
     )
 
 

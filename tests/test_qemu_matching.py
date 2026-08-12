@@ -6,6 +6,7 @@ import pytest
 from miasm.expression.expression import ExprId, ExprInt, ExprMem
 
 from focaccia.arch import x86
+from focaccia.match import TransitionMatcher
 from focaccia.qemu.validation_server import collect_conc_trace
 from focaccia.snapshot import ProgramState, RegisterAccessError
 from focaccia.symbolic import Instruction, SymbolicTransform, TraceGap
@@ -124,7 +125,10 @@ def test_skip_mode_does_not_compose_candidate_dependencies(monkeypatch):
     def unexpected_plan(_self):
         raise AssertionError("skip mode must not compose successor candidates")
 
-    monkeypatch.setattr("focaccia.match.TransitionMatcher.plan_successors", unexpected_plan)
+    monkeypatch.setattr(
+        "focaccia.match.TransitionMatcher.plan_successor_dependencies",
+        unexpected_plan,
+    )
 
     result = collect_conc_trace(
         iter([state(0x1000), state(0x1064)]),
@@ -134,6 +138,59 @@ def test_skip_mode_does_not_compose_candidate_dependencies(monkeypatch):
 
     assert result.trace is not None
     assert isinstance(result.trace.transforms[0], TraceGap)
+
+
+def test_successor_dependency_planning_does_not_materialize_candidate_prefixes(monkeypatch):
+    items = tuple(transform(0x1000 + index, 0x1001 + index) for index in range(100))
+    for index, item in enumerate(items):
+        item.instructions = [
+            Instruction.from_string(
+                "RET" if index == len(items) - 1 else "NOP",
+                ARCH,
+                item.range[0],
+                1,
+            )
+        ]
+    matcher = TransitionMatcher(trace(*items))
+    assert matcher.observe(0x1000) is not None
+
+    def unexpected_finish(_self):
+        raise AssertionError("candidate dependency planning must not materialize prefixes")
+
+    monkeypatch.setattr("focaccia.match.SymbolicTransformComposer.finish", unexpected_finish)
+
+    dependencies = matcher.plan_successor_dependencies()
+
+    assert dependencies is not None
+    assert dependencies.arch == ARCH
+
+
+def test_successor_dependencies_rewrite_late_memory_address_to_source_state():
+    first = SymbolicTransform(
+        1,
+        {ExprId("RAX", 64): ExprId("RBX", 64)},
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+    second = SymbolicTransform(
+        1,
+        {ExprId("RCX", 64): ExprMem(ExprId("RAX", 64), 64)},
+        [Instruction.from_string("RET", ARCH, 0x1001, 1)],
+        ARCH,
+        0x1001,
+        0x1002,
+    )
+    matcher = TransitionMatcher(trace(first, second))
+    assert matcher.observe(0x1000) is not None
+
+    dependencies = matcher.plan_successor_dependencies()
+
+    assert dependencies is not None
+    assert "RBX" in dependencies.registers
+    assert len(dependencies.memory) == 1
+    assert dependencies.memory[0].ptr == ExprId("RBX", 64)
 
 
 def test_plugin_collector_captures_union_of_direct_successor_dependencies():

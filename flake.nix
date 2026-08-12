@@ -2502,16 +2502,16 @@
       name = "linear-successor-planning";
       ruffTargets = [
         "src/focaccia/match.py"
+        "src/focaccia/symbolic.py"
+        "src/focaccia/qemu/snapshot.py"
         "src/focaccia/qemu/_qemu_tool.py"
         "src/focaccia/qemu/validation_server.py"
-        "tests/test_match.py"
         "tests/test_qemu_matching.py"
       ];
       pytestTargets = [
-        "tests/test_match.py"
         "tests/test_qemu_matching.py"
         "-k"
-        "successor_planning_composes_each_candidate_transform_once or skip_mode_does_not_compose_candidate_dependencies"
+        "successor_dependency_planning or successor_dependencies or skip_mode_does_not_compose_candidate_dependencies"
       ];
     };
 
