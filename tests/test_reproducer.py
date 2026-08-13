@@ -8,14 +8,18 @@ from miasm.expression.expression import ExprInt, ExprMem
 
 from focaccia.arch import x86
 from focaccia.reproducer import (
+    EntryPrefix,
+    ExecutableFragment,
     FixedMemoryMapping,
     MemoryInitialization,
     RegisterRestore,
     Reproducer,
+    ReproducerFragmentError,
     ReproducerMemoryError,
     ReproducerRegisterError,
     plan_reproducer_memory,
     plan_x86_state_restore,
+    single_transition_reproducer_trace,
 )
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
@@ -42,9 +46,13 @@ class FakeSymbolicInputs:
         memory: Sequence[ExprMem] = (),
         registers: Sequence[str] = (),
         memory_writes: Sequence[FakeMemoryWrite] = (),
+        validation_registers: Sequence[str] | None = None,
     ) -> None:
         self._memory = list(memory)
         self._registers = list(registers)
+        self._validation_registers = list(
+            registers if validation_registers is None else validation_registers
+        )
         self.memory_writes = list(memory_writes)
 
     def get_used_memory_addresses(self) -> list[ExprMem]:
@@ -52,6 +60,9 @@ class FakeSymbolicInputs:
 
     def get_used_registers(self) -> list[str]:
         return list(self._registers)
+
+    def get_validation_input_registers(self) -> list[str]:
+        return list(self._validation_registers)
 
 
 def make_reproducer(
@@ -183,7 +194,13 @@ def test_reproducer_state_restoration_is_call_free_and_restores_stack_last():
     assert restoration.index("popfq") < restoration.index("%rax")
     assert restoration.index("%rax") < restoration.index("%rsp")
     assert restoration.rstrip().endswith("jmp _bb_0x4000")
-    assert block == "_bb_0x4000:\nnop\njmp _exit\n"
+    assert block == (
+        "_bb_0x4000:\n"
+        ".global focaccia_reproducer_transition\n"
+        "focaccia_reproducer_transition:\n"
+        "nop\n"
+        "jmp _exit\n"
+    )
 
 
 def test_reproducer_state_restore_rejects_unsafe_or_unsupported_register_inputs():
@@ -205,3 +222,81 @@ def test_reproducer_state_restore_does_not_invent_unknown_base_register_bits():
 
     with pytest.raises(ReproducerRegisterError, match="complete base-register.*RAX"):
         plan_x86_state_restore(snapshot, ("AL",), target_pc=0x4000)
+
+
+def test_exact_fragment_emission_preserves_bytes_and_uses_only_validation_inputs():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x40105F)
+    snapshot.write_register("RBP", 0x7000)
+    symbolic = FakeSymbolicInputs(
+        registers=("ZMM0", "RBP"),
+        validation_registers=("RBP",),
+    )
+    reproducer = Reproducer(
+        "/tmp/oracle",
+        [],
+        snapshot,
+        cast(SymbolicTransform, symbolic),
+        fragment=ExecutableFragment(0x40105F, 0x401064, b"\xc4\xe2\x70\xf7\xc3"),
+    )
+
+    source = reproducer.asm()
+
+    assert reproducer.link_address == 0x40105F
+    assert ".org" not in source
+    assert ".global focaccia_reproducer_transition" in source
+    assert ".byte 0xc4, 0xe2, 0x70, 0xf7, 0xc3" in source
+    assert "movabsq $0x7000, %rbp" in source
+    assert "%zmm0" not in source.lower()
+
+
+def test_exact_fragment_rejects_snapshot_or_symbolic_range_mismatch():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    symbolic = FakeSymbolicInputs()
+
+    with pytest.raises(ReproducerFragmentError, match="snapshot PC"):
+        Reproducer(
+            "/tmp/oracle",
+            [],
+            snapshot,
+            cast(SymbolicTransform, symbolic),
+            fragment=ExecutableFragment(0x4010, 0x4011, b"\x90"),
+        )
+
+
+def test_straight_line_entry_prefix_retains_original_transition_address():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x401014)
+    symbolic = FakeSymbolicInputs()
+    reproducer = Reproducer(
+        "/tmp/oracle",
+        [],
+        snapshot,
+        cast(SymbolicTransform, symbolic),
+        fragment=ExecutableFragment(0x401014, 0x401018, b"\x0f\x03\xc3\x90"),
+        entry_prefix=EntryPrefix(0x401000, bytes(range(20))),
+    )
+
+    source = reproducer.asm()
+
+    assert reproducer.link_address == 0x401000
+    assert source.index("_start:") < source.index("_bb_0x401014:")
+    assert "_restore_state:" not in source
+    assert "_setup_dyn:" not in source
+
+
+def test_single_transition_trace_binds_generated_binary_and_exact_bounds(tmp_path):
+    binary = tmp_path / "reproducer"
+    binary.write_bytes(b"generated executable")
+    transform = SymbolicTransform(1, {}, [], x86.ArchX86(), 0x401000, 0x401005)
+
+    trace = single_transition_reproducer_trace(transform, binary)
+
+    assert tuple(trace) == (transform,)
+    assert trace.require_addresses() == (0x401000,)
+    assert trace.env.binary_name == str(binary)
+    assert trace.env.binary_hash is not None
+    assert trace.env.start_address == 0x401000
+    assert trace.env.stop_address == 0x401005
+    assert trace.env.architecture == x86.ArchX86().key

@@ -685,6 +685,19 @@
       ];
     };
 
+    reproducerFragmentFidelityCheck = mkStaticUnitCheck {
+      name = "reproducer-fragment-fidelity";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py"
+        "-k"
+        "exact_fragment or entry_prefix or single_transition"
+      ];
+    };
+
     registerApiMigrationCheck = mkStaticUnitCheck {
       name = "register-api-migration";
       ruffTargets = [
@@ -2983,6 +2996,7 @@
       property-core-models = propertyCoreModelsCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
+      reproducer-fragment-fidelity = reproducerFragmentFidelityCheck;
       register-api-migration = registerApiMigrationCheck;
       cli-imports = cliImportsCheck;
       native-read-pc = nativeReadPcCheck;

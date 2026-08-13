@@ -1,10 +1,12 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
+from os import PathLike
 from typing import Callable, Protocol
 
 from .arch import x86
 from .snapshot import MemoryAccessError, ProgramState, RegisterAccessError
 from .symbolic import SymbolEvaluationError, SymbolicTransform, eval_symbol
+from .trace import MaterializedTrace, TraceEnvironment
 
 
 DEFAULT_PAGE_SIZE = 4096
@@ -39,6 +41,49 @@ class ReproducerBasicBlockError(Exception):
 
 class ReproducerRegisterError(Exception):
     pass
+
+
+class ReproducerFragmentError(Exception):
+    """Raised when executable bytes cannot form an exact reproduced fragment."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableFragment:
+    """Exact instruction bytes retained at their original guest addresses."""
+
+    start: int
+    end: int
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.end <= self.start:
+            raise ValueError("A reproducer fragment must have a non-empty address range.")
+        if self.end > _X86_ADDRESS_SPACE_SIZE:
+            raise ValueError("The reproducer fragment exceeds x86-64 address width.")
+        object.__setattr__(self, "data", bytes(self.data))
+        if len(self.data) != self.end - self.start:
+            raise ValueError("Reproducer fragment byte length does not match its address range.")
+
+
+@dataclass(frozen=True, slots=True)
+class EntryPrefix:
+    """A straight-line executable prefix ending at the reproduced transition."""
+
+    start: int
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.start >= _X86_ADDRESS_SPACE_SIZE:
+            raise ValueError("The reproducer entry prefix start does not fit in 64 bits.")
+        object.__setattr__(self, "data", bytes(self.data))
+        if not self.data:
+            raise ValueError("A reproducer entry prefix cannot be empty.")
+        if self.end > _X86_ADDRESS_SPACE_SIZE:
+            raise ValueError("The reproducer entry prefix exceeds x86-64 address width.")
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +341,79 @@ def plan_x86_state_restore(
     )
 
 
+def extract_executable_fragment(
+    binary: str | PathLike[str],
+    start: int,
+    end: int,
+    *,
+    require_fallthrough: bool = False,
+) -> ExecutableFragment:
+    """Read an x86-64 ELF virtual-address range without launching the program."""
+    if start < 0 or end <= start or end > _X86_ADDRESS_SPACE_SIZE:
+        raise ReproducerFragmentError(f"Invalid executable fragment range [{start:#x}, {end:#x}).")
+
+    from miasm.analysis.binary import Container
+    from miasm.analysis.machine import Machine
+    from miasm.core.locationdb import LocationDB
+
+    location_db = LocationDB()
+    try:
+        with open(binary, "rb") as stream:
+            container = Container.from_stream(stream, location_db)
+            if container.arch != "x86_64":
+                raise ReproducerFragmentError(
+                    f"Reproducer fragment extraction requires x86-64, not {container.arch}."
+                )
+            data = bytes(container.bin_stream.getbytes(start, end - start))
+            if require_fallthrough:
+                disassembler = Machine(container.arch).dis_engine(
+                    container.bin_stream,
+                    loc_db=location_db,
+                )
+                address = start
+                while address < end:
+                    instruction = disassembler.dis_instr(address)
+                    length = instruction.l
+                    if instruction.offset != address or length <= 0 or address + length > end:
+                        raise ReproducerFragmentError(
+                            f"Executable prefix is not instruction-aligned at {address:#x}."
+                        )
+                    if instruction.breakflow():
+                        raise ReproducerFragmentError(
+                            f"Executable prefix changes control flow at {address:#x}."
+                        )
+                    address += length
+    except ReproducerFragmentError:
+        raise
+    except (OSError, ValueError, KeyError, IndexError) as error:
+        raise ReproducerFragmentError(
+            f"Unable to extract executable range [{start:#x}, {end:#x}) " f"from {binary}: {error}"
+        ) from error
+
+    if len(data) != end - start:
+        raise ReproducerFragmentError(
+            f"Executable returned {len(data)} bytes for range [{start:#x}, {end:#x})."
+        )
+    return ExecutableFragment(start, end, data)
+
+
+def single_transition_reproducer_trace(
+    transform: SymbolicTransform,
+    binary: str | PathLike[str],
+) -> MaterializedTrace[SymbolicTransform]:
+    """Bind one localized transition to the generated executable's identity."""
+    start, end = transform.range
+    environment = TraceEnvironment(
+        str(binary),
+        (),
+        (),
+        start_address=start,
+        stop_address=end,
+        architecture=transform.arch.key,
+    )
+    return MaterializedTrace((transform,), environment, (start,))
+
+
 class _ReproducerTarget(Protocol):
     def get_basic_block_inst(self, addr: int) -> list[str]: ...
     def get_symbol_limit(self) -> int: ...
@@ -318,18 +436,76 @@ class Reproducer:
         snap: ProgramState,
         sym: SymbolicTransform,
         target_factory: _TargetFactory | None = None,
+        *,
+        fragment: ExecutableFragment | None = None,
+        entry_prefix: EntryPrefix | None = None,
+        required_registers: Iterable[str] = (),
     ) -> None:
-        if target_factory is None:
-            target_factory = _make_local_target
-        target = target_factory(oracle, argv)
-
         self.pc = snap.read_register("pc")
-        self.bb = target.get_basic_block_inst(self.pc)
-        self.sl = target.get_symbol_limit()
         self.snap = snap
         self.sym = sym
+        self.fragment = fragment
+        self.entry_prefix = entry_prefix
+        self.required_registers = tuple(required_registers)
+
+        if fragment is not None:
+            if fragment.start != self.pc:
+                raise ReproducerFragmentError(
+                    f"Fragment starts at {fragment.start:#x}, but snapshot PC is {self.pc:#x}."
+                )
+            symbolic_range = getattr(sym, "range", None)
+            if symbolic_range is not None and tuple(symbolic_range) != (
+                fragment.start,
+                fragment.end,
+            ):
+                raise ReproducerFragmentError(
+                    f"Fragment range {fragment.start:#x}->{fragment.end:#x} differs "
+                    f"from symbolic range {tuple(symbolic_range)!r}."
+                )
+            if entry_prefix is not None and entry_prefix.end != fragment.start:
+                raise ReproducerFragmentError(
+                    f"Entry prefix ends at {entry_prefix.end:#x}, not fragment start "
+                    f"{fragment.start:#x}."
+                )
+            self.bb: list[str] = []
+            self.sl = 0
+        else:
+            if entry_prefix is not None:
+                raise ReproducerFragmentError(
+                    "An entry prefix requires an exact executable fragment."
+                )
+            if target_factory is None:
+                target_factory = _make_local_target
+            target = target_factory(oracle, argv)
+            self.bb = target.get_basic_block_inst(self.pc)
+            self.sl = target.get_symbol_limit()
+
+    @property
+    def link_address(self) -> int:
+        """Virtual address at which the emitted text section must begin."""
+        if self.entry_prefix is not None:
+            return self.entry_prefix.start
+        return self.pc
+
+    @staticmethod
+    def _byte_directives(data: bytes) -> tuple[str, ...]:
+        return tuple(
+            ".byte " + ", ".join(f"{value:#x}" for value in data[offset : offset + 16])
+            for offset in range(0, len(data), 16)
+        )
 
     def get_bb(self) -> str:
+        labels = (".global focaccia_reproducer_transition", "focaccia_reproducer_transition:")
+        if self.fragment is not None:
+            return "\n".join(
+                (
+                    f"_bb_{self.pc:#x}:",
+                    *labels,
+                    *self._byte_directives(self.fragment.data),
+                    "jmp _exit",
+                    "",
+                )
+            )
         if not self.bb:
             raise ReproducerBasicBlockError(
                 f"No basic-block instructions were found at {self.pc:#x}."
@@ -337,6 +513,7 @@ class Reproducer:
         return "\n".join(
             (
                 f"_bb_{self.pc:#x}:",
+                *labels,
                 *self.bb[:-1],
                 "jmp _exit",
                 "",
@@ -349,9 +526,14 @@ class Reproducer:
             raise ReproducerRegisterError(
                 "The symbolic transform and concrete snapshot use different architectures."
             )
+        validation_inputs = getattr(self.sym, "get_validation_input_registers", None)
+        if callable(validation_inputs):
+            used_registers = validation_inputs()
+        else:
+            used_registers = self.sym.get_used_registers()
         return plan_x86_state_restore(
             self.snap,
-            self.sym.get_used_registers(),
+            (*used_registers, *self.required_registers),
             target_pc=self.pc,
         )
 
@@ -475,19 +657,28 @@ class Reproducer:
         )
 
     def get_code(self) -> str:
-        asm = ""
-        asm += f".section .text\n"
-        asm += f".global _start\n"
-        asm += f"\n"
-        asm += f".org {hex(self.pc)}\n"
-        asm += self.get_bb()
-        asm += self.get_start()
-        asm += self.get_exit()
-        asm += self.get_alloc()
-        asm += self.get_regs()
-        asm += self.get_dyn()
-
-        return asm
+        lines = [".section .text", ".global _start", ""]
+        if self.entry_prefix is not None:
+            lines.extend(
+                (
+                    "_start:",
+                    *self._byte_directives(self.entry_prefix.data),
+                    self.get_bb(),
+                    self.get_exit(),
+                )
+            )
+        else:
+            lines.extend(
+                (
+                    self.get_bb(),
+                    self.get_start(),
+                    self.get_exit(),
+                    self.get_alloc(),
+                    self.get_regs(),
+                    self.get_dyn(),
+                )
+            )
+        return "\n".join(lines)
 
     def get_data(self) -> str:
         asm = ""
@@ -503,8 +694,11 @@ class Reproducer:
         return asm
 
     def asm(self) -> str:
-        asm = ""
-        asm += self.get_code()
-        asm += self.get_data()
-
-        return asm
+        return "\n".join(
+            (
+                self.get_code(),
+                self.get_data(),
+                '.section .note.GNU-stack,"",@progbits',
+                "",
+            )
+        )
