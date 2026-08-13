@@ -62,7 +62,7 @@ class FakeReplayTarget:
         self.steps = 0
         self.expected_execution_pcs: list[int | None] = []
         self.mutations: list[tuple[str, int, bytes | int]] = []
-        self.mappings: list[tuple[int, int, int, int]] = []
+        self.mappings: list[tuple[int, int, int, int, int]] = []
         self.exited = False
 
     def current_state(self) -> ReadableProgramState:
@@ -86,8 +86,11 @@ class FakeReplayTarget:
         length: int,
         protection: int,
         flags: int,
+        syscall_image_address: int,
     ) -> None:
-        self.mappings.append((address, length, protection, flags))
+        self.mappings.append(
+            (address, length, protection, flags, syscall_image_address)
+        )
         self.state.write_memory(address, bytes(length))
 
     def write_signal_handler_extra_registers(
@@ -342,7 +345,7 @@ def test_initial_exec_establishes_recorded_stack_with_live_vdso():
     state = X86ReplayEngine(arch).replay_initial_exec(target, pre, post, (mapping,))
     established = X86InitialStackImage.read(recorded_rsp, state.read_memory)
 
-    assert target.mappings == [(0x3000, 0x2000, 3, 0x100122)]
+    assert target.mappings == [(0x3000, 0x2000, 3, 0x100122, 0x900000)]
     assert state.read_register("rsp") == recorded_rsp
     assert state.read_register("fs_base") == 0x12340000
     assert state.read_memory(0x3020, 1) == b"\xa5"

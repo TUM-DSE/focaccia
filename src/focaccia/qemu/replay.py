@@ -384,6 +384,7 @@ class X86StartupReplayTarget(ReplayTarget, Protocol):
         length: int,
         protection: int,
         flags: int,
+        syscall_image_address: int,
     ) -> None: ...
 
 
@@ -561,11 +562,21 @@ class X86ReplayEngine:
             established_mapping = bytearray(recorded_mapping)
             established_mapping[stack_offset:destination_end] = relocated
 
+            recorded_registers = {
+                register: self._event_register(post_event, register)
+                for register in _X86_INITIAL_REGISTERS
+            }
+            if recorded_registers["rip"] != post_event.pc:
+                raise ReplayEventError(
+                    "Recorded initial RIP differs from the exec event program counter."
+                )
+
             target.map_target_memory(
                 mapping.start_address,
                 mapping.length,
                 mapping.mmap_prot,
                 mapping.mmap_flags | _MAP_ANONYMOUS | _MAP_FIXED_NOREPLACE,
+                source_vdso,
             )
             target.write_target_memory(mapping.start_address, established_mapping)
             established = target.current_state().read_memory(mapping.start_address, mapping.length)
@@ -573,15 +584,11 @@ class X86ReplayEngine:
                 raise ReplayReconciliationError(
                     "QEMU retained different recorded initial-stack bytes."
                 )
-            for register in _X86_INITIAL_REGISTERS:
-                target.write_target_register(
-                    register,
-                    self._event_register(post_event, register),
-                )
+            for register, value in recorded_registers.items():
+                target.write_target_register(register, value)
             state = target.current_state()
-            for register in _X86_INITIAL_REGISTERS:
+            for register, expected in recorded_registers.items():
                 actual = state.read_register(register)
-                expected = self._event_register(post_event, register)
                 if actual != expected:
                     raise ReplayReconciliationError(
                         f"QEMU initial {register.upper()} is {actual:#x}, expected {expected:#x}."

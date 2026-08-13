@@ -2070,6 +2070,21 @@
       ];
     };
 
+    protectedEntryStartupReplayCheck = mkStaticUnitCheck {
+      name = "protected-entry-startup-replay";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py::test_startup_mmap_uses_existing_syscall_without_writing_rx_text"
+        "tests/test_gdb_program_state.py::test_startup_mmap_rejects_image_without_syscall_before_mutation"
+        "tests/test_x86_replay.py::test_initial_exec_establishes_recorded_stack_with_live_vdso"
+      ];
+    };
+
     recordedX86InitialStackCheck = mkStaticUnitCheck {
       name = "recorded-x86-initial-stack";
       ruffTargets = [
@@ -3002,6 +3017,7 @@
       x86-signal-return = x86SignalReturnCheck;
       replay-effect-coverage = replayEffectCoverageCheck;
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
+      protected-entry-startup-replay = protectedEntryStartupReplayCheck;
       recorded-x86-initial-stack = recordedX86InitialStackCheck;
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
       non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;

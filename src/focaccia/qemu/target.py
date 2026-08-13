@@ -35,6 +35,10 @@ logger = logging.getLogger("focaccia-qemu-target")
 debug = logger.debug
 info = logger.info
 
+_X86_SYSCALL_OPCODE = b"\x0f\x05"
+_X86_SETUP_IMAGE_MAX_SIZE = 1 << 20
+_X86_SETUP_SCAN_CHUNK_SIZE = 4096
+
 
 def _is_synchronization_candidate(event: Event) -> bool:
     # Pair post-events are consumed transactionally and are never synchronization
@@ -256,29 +260,69 @@ class GDBServerConnector:
     def write_target_memory(self, address: int, data: bytes) -> None:
         self._process.write_memory(address, data)
 
+    def _find_x86_syscall_instruction(self, image_address: int) -> int:
+        mappings = [
+            mapping
+            for mapping in self.get_sections()
+            if mapping.start_address <= image_address < mapping.end_address
+        ]
+        if len(mappings) != 1:
+            raise UnsupportedReplayEffect(
+                f"Initial setup address {image_address:#x} belongs to "
+                f"{len(mappings)} live mappings."
+            )
+        mapping = mappings[0]
+        if image_address != mapping.start_address:
+            raise UnsupportedReplayEffect(
+                "Initial setup address is not the start of its live image mapping."
+            )
+        if mapping.mmap_prot & 0x5 != 0x5:
+            raise UnsupportedReplayEffect("Initial setup image is not readable and executable.")
+        if mapping.length <= 0 or mapping.length > _X86_SETUP_IMAGE_MAX_SIZE:
+            raise UnsupportedReplayEffect(
+                f"Initial setup image has unsupported size {mapping.length:#x}."
+            )
+        if self.current_state().read_memory(image_address, 4) != b"\x7fELF":
+            raise UnsupportedReplayEffect("Initial setup image has no ELF header.")
+
+        overlap = b""
+        for offset in range(0, mapping.length, _X86_SETUP_SCAN_CHUNK_SIZE):
+            size = min(_X86_SETUP_SCAN_CHUNK_SIZE, mapping.length - offset)
+            address = mapping.start_address + offset
+            data = self.current_state().read_memory(address, size)
+            search = overlap + data
+            position = search.find(_X86_SYSCALL_OPCODE)
+            if position >= 0:
+                return address - len(overlap) + position
+            overlap = search[-1:]
+        raise UnsupportedReplayEffect("Initial setup image has no x86 SYSCALL instruction.")
+
     def map_target_memory(
         self,
         address: int,
         length: int,
         protection: int,
         flags: int,
+        syscall_image_address: int,
     ) -> None:
         if self.arch.archname != "x86_64":
             raise UnsupportedReplayEffect(
                 "Initial target-memory setup is implemented only for x86-64."
             )
-        if address < 0 or length <= 0 or address & 0xFFF or length & 0xFFF:
-            raise UnsupportedReplayEffect("Initial target mapping is not page aligned.")
+        if (
+            address < 0
+            or length <= 0
+            or address + length > 1 << 64
+            or address & 0xFFF
+            or length & 0xFFF
+        ):
+            raise UnsupportedReplayEffect("Initial target mapping is not a valid page range.")
         if protection & ~0x7 or flags not in (0x100022, 0x100122):
             raise UnsupportedReplayEffect("Initial target mapping has unsupported flags.")
 
-        state = self.current_state()
-        entry = state.read_pc()
-        original = state.read_memory(entry, 4)
-        # Execute one isolated syscall followed by INT3. The original entry bytes,
-        # complete register state, and PC are restored by startup replay before any
-        # program instruction executes.
-        self.write_target_memory(entry, b"\x0f\x05\xcc\xcc")
+        setup_pc = self._find_x86_syscall_instruction(syscall_image_address)
+        if self.current_state().read_memory(setup_pc, 2) != _X86_SYSCALL_OPCODE:
+            raise UnsupportedReplayEffect("Initial setup SYSCALL bytes changed before execution.")
         inputs = {
             "rax": 9,
             "rdi": address,
@@ -291,23 +335,27 @@ class GDBServerConnector:
         try:
             for register, value in inputs.items():
                 self.write_target_register(register, value)
-            gdb.execute("continue", to_string=True)
+            self.skip(setup_pc)
+            self._terminal_reason = None
+            gdb.execute("si", to_string=True)
+            if self._terminal_reason is not None or self.is_exited():
+                raise UnsupportedReplayEffect("Initial mmap did not complete normally.")
             stopped_pc = int(gdb.selected_frame().read_register("pc"))
-            if stopped_pc != entry + 3:
+            if stopped_pc != setup_pc + 2:
                 raise UnsupportedReplayEffect(
-                    f"Initial mmap stopped at {stopped_pc:#x}, expected setup trap "
-                    f"{entry + 3:#x}."
+                    f"Initial mmap stopped at {stopped_pc:#x}, expected {setup_pc + 2:#x}."
                 )
             result = int(gdb.selected_frame().read_register("rax")) & ((1 << 64) - 1)
             if result != address:
                 raise UnsupportedReplayEffect(
                     f"Initial fixed mmap returned {result:#x}, expected {address:#x}."
                 )
-        finally:
-            self.write_target_memory(entry, original)
-            self.skip(entry)
-        if self.current_state().read_memory(entry, len(original)) != original:
-            raise UnsupportedReplayEffect("Initial setup did not restore ELF entry bytes.")
+            if self.current_state().read_memory(setup_pc, 2) != _X86_SYSCALL_OPCODE:
+                raise UnsupportedReplayEffect("Initial setup changed its SYSCALL bytes.")
+        except (RegisterAccessError, MemoryAccessError, RuntimeError, ValueError, gdb.error) as error:
+            if isinstance(error, UnsupportedReplayEffect):
+                raise
+            raise UnsupportedReplayEffect(f"Initial mmap setup failed: {error}.") from error
 
     def write_signal_handler_extra_registers(
         self,
@@ -408,6 +456,16 @@ class GDBServerConnector:
             size = int(parts[2], 16)
             offset = int(parts[3], 16)
             perms = parts[4]
+            if len(perms) < 3 or any(
+                value not in allowed
+                for value, allowed in zip(perms[:3], ("r-", "w-", "x-"), strict=True)
+            ):
+                continue
+            protection = (
+                (1 if perms[0] == "r" else 0)
+                | (2 if perms[1] == "w" else 0)
+                | (4 if perms[2] == "x" else 0)
+            )
 
             file_or_tag = None
             is_special = False
@@ -423,7 +481,16 @@ class GDBServerConnector:
                     # Might be a filename or absent
                     file_or_tag = tail
 
-            mapping = MemoryMapping(0, start, end, "debugger", offset, 0, 0)
+            mapping = MemoryMapping(
+                0,
+                start,
+                end,
+                "debugger",
+                offset,
+                protection,
+                0,
+                file_or_tag,
+            )
             mappings.append(mapping)
 
         return mappings

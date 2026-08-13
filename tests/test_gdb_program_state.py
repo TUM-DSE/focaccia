@@ -596,6 +596,93 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
+def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch):
+    target = load_target_module(monkeypatch)
+    fake_gdb = cast(Any, sys.modules["gdb"])
+    entry = 0x401000
+    vdso = 0x700000
+    syscall_pc = vdso + 0x123
+    memory = {
+        **{address: 0x90 for address in range(vdso, vdso + 0x1000)},
+        vdso: 0x7F,
+        vdso + 1: ord("E"),
+        vdso + 2: ord("L"),
+        vdso + 3: ord("F"),
+        syscall_pc: 0x0F,
+        syscall_pc + 1: 0x05,
+    }
+    inferior = FakeInferior(memory)
+    registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue] = {
+        "pc": FakeValue(entry, 8),
+        "rax": FakeValue(0, 8),
+    }
+    frame = FakeFrame(registers)
+    connector = object.__new__(target.GDBServerConnector)
+    connector.arch = x86.ArchX86()
+    connector._process = inferior
+    connector._frame = frame
+    connector._terminal_reason = None
+    connector.get_sections = lambda: [
+        target.MemoryMapping(0, vdso, vdso + 0x1000, "debugger", 0, 5, 0, "[vdso]")
+    ]
+    connector.is_exited = lambda: False
+    writes: list[tuple[int, bytes]] = []
+    register_writes: list[tuple[str, int]] = []
+
+    def write_register(register: str, value: int) -> None:
+        register_writes.append((register, value))
+        if register == "rip":
+            registers["pc"] = FakeValue(value, 8)
+        elif register == "rax":
+            registers["rax"] = FakeValue(value, 8)
+
+    connector.write_target_register = write_register
+    connector.write_target_memory = lambda address, data: writes.append((address, data))
+    connector.skip = lambda pc: write_register("rip", pc)
+    fake_gdb.selected_frame = lambda: frame
+
+    def execute(command: str, **_kwargs: object) -> None:
+        assert command == "si"
+        registers["pc"] = FakeValue(syscall_pc + 2, 8)
+        registers["rax"] = FakeValue(0x3000, 8)
+
+    fake_gdb.execute = execute
+
+    connector.map_target_memory(0x3000, 0x2000, 3, 0x100122, vdso)
+
+    assert writes == []
+    assert register_writes[-1] == ("rip", syscall_pc)
+    observed_pc = frame.read_register("pc")
+    assert isinstance(observed_pc, FakeValue)
+    assert int(observed_pc) == syscall_pc + 2
+    assert inferior.memory[syscall_pc] == 0x0F
+    assert inferior.memory[syscall_pc + 1] == 0x05
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_startup_mmap_rejects_image_without_syscall_before_mutation(monkeypatch):
+    target = load_target_module(monkeypatch)
+    connector = object.__new__(target.GDBServerConnector)
+    connector.arch = x86.ArchX86()
+    connector._terminal_reason = None
+    vdso = 0x700000
+    state = ProgramState(connector.arch)
+    state.write_register("rip", 0x401000)
+    state.write_memory(vdso, b"\x7fELF" + b"\x90" * (0x1000 - 4))
+    connector.current_state = lambda: state
+    connector.get_sections = lambda: [
+        target.MemoryMapping(0, vdso, vdso + 0x1000, "debugger", 0, 5, 0, "[vdso]")
+    ]
+    mutations: list[object] = []
+    connector.write_target_register = lambda *_args: mutations.append(_args)
+
+    with pytest.raises(UnsupportedReplayEffect, match="no x86 SYSCALL"):
+        connector.map_target_memory(0x3000, 0x2000, 3, 0x100122, vdso)
+
+    assert mutations == []
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
 def test_gdb_signal_replay_writes_and_verifies_legacy_x86_vector_state(monkeypatch):
     target = load_target_module(monkeypatch)
     fake_gdb = cast(Any, sys.modules["gdb"])
