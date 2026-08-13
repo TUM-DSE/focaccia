@@ -588,14 +588,27 @@ class SymbolicTransform:
                 raise SymbolicCompositionError(
                     f"Missing accessor for validation output {regname}."
                 )
-            base = canonical_outputs.get(accessor.base_reg)
-            if base is None:
-                continue
-            expression = (
-                base
-                if accessor.start == 0 and accessor.end == base.size
-                else expr_simp(ExprSlice(base, accessor.start, accessor.end))
-            )
+            overlapping = [
+                changed_name
+                for changed_name in self.changed_regs
+                if (
+                    (changed := self.arch.get_reg_accessor(changed_name)) is not None
+                    and changed.base_reg == accessor.base_reg
+                    and changed.mask & accessor.mask
+                )
+            ]
+            direct = self.changed_regs.get(regname)
+            if direct is not None and overlapping == [regname]:
+                expression = direct
+            else:
+                base = canonical_outputs.get(accessor.base_reg)
+                if base is None:
+                    continue
+                expression = (
+                    base
+                    if accessor.start == 0 and accessor.end == base.size
+                    else expr_simp(ExprSlice(base, accessor.start, accessor.end))
+                )
             if not _contains_architectural_unknown(expression):
                 outputs[regname] = expression
         return outputs

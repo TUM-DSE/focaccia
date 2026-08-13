@@ -1493,6 +1493,17 @@
       ];
     };
 
+    narrowVectorValidationEvaluationCheck = mkStaticUnitCheck {
+      name = "narrow-vector-validation-evaluation";
+      ruffTargets = [
+        "src/focaccia/symbolic.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_snapshot.py::test_vector_validation_evaluation_preserves_narrow_aliases"
+      ];
+    };
+
     wideRegisterStateSerializationCheck = mkStaticUnitCheck {
       name = "wide-register-state-serialization";
       ruffTargets = [
@@ -2977,6 +2988,7 @@
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       narrow-vector-dependency-planning = narrowVectorDependencyPlanningCheck;
+      narrow-vector-validation-evaluation = narrowVectorValidationEvaluationCheck;
       qemu-mmx-observation = qemuMmxObservationCheck;
       undefined-shift-flag-semantics = undefinedShiftFlagSemanticsCheck;
       wide-register-state-serialization = wideRegisterStateSerializationCheck;

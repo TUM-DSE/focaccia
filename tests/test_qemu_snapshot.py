@@ -131,6 +131,28 @@ def test_vector_source_planning_preserves_narrow_aliases():
     assert "ZMM2" not in plan.registers
 
 
+def test_vector_validation_evaluation_preserves_narrow_aliases():
+    left = 0x00112233445566778899AABBCCDDEEFF
+    right = 0xFFEEDDCCBBAA99887766554433221100
+    source = state(0x1000, XMM1=left, XMM2=right)
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprId("XMM1", 128): ExprId("XMM1", 128) ^ ExprId("XMM2", 128),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1004,
+    )
+
+    assert transform.eval_validation_register_transforms(source) == {
+        "XMM1": left ^ right
+    }
+    with pytest.raises(RegisterAccessError):
+        source.read_register("ZMM1")
+
+
 def test_mmx_source_planning_does_not_request_simd_state():
     current = state(0x1000)
     transform = SymbolicTransform(
