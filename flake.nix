@@ -2070,6 +2070,20 @@
       ];
     };
 
+    absentVdsoStartupReplayCheck = mkStaticUnitCheck {
+      name = "x86-startup-without-vdso";
+      ruffTargets = [
+        "src/focaccia/qemu/replay.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_x86_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_x86_replay.py::test_initial_exec_neutralizes_recorded_vdso_when_live_stack_has_none"
+        "tests/test_gdb_program_state.py::test_startup_mmap_uses_static_executable_without_vdso"
+      ];
+    };
+
     protectedEntryStartupReplayCheck = mkStaticUnitCheck {
       name = "protected-entry-startup-replay";
       ruffTargets = [
@@ -3017,6 +3031,7 @@
       x86-signal-return = x86SignalReturnCheck;
       replay-effect-coverage = replayEffectCoverageCheck;
       qemu-replay-start-synchronization = qemuReplayStartSynchronizationCheck;
+      x86-startup-without-vdso = absentVdsoStartupReplayCheck;
       protected-entry-startup-replay = protectedEntryStartupReplayCheck;
       recorded-x86-initial-stack = recordedX86InitialStackCheck;
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;

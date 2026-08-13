@@ -123,7 +123,9 @@ def initial_stack_bytes(
     executable: bytes,
     argument: bytes = b"workload.lua",
     environment: bytes = b"MODE=recorded",
-    vdso: int = 0x700000,
+    vdso: int | None = 0x700000,
+    entry: int = 0x401000,
+    phdr: int = 0x400040,
     random_bytes: bytes = bytes(range(16)),
 ) -> bytes:
     data = bytearray(0x1000)
@@ -132,6 +134,26 @@ def initial_stack_bytes(
     environment_address = stack_pointer + 0x3C0
     random_address = stack_pointer + 0x400
     platform_address = stack_pointer + 0x420
+    auxiliary_words = [
+        3,
+        phdr,
+        4,
+        56,
+        5,
+        8,
+        7,
+        0,
+        9,
+        entry,
+        25,
+        random_address,
+        31,
+        executable_address,
+        15,
+        platform_address,
+    ]
+    if vdso is not None:
+        auxiliary_words = [33, vdso, *auxiliary_words]
     words = [
         2,
         executable_address,
@@ -139,14 +161,7 @@ def initial_stack_bytes(
         0,
         environment_address,
         0,
-        33,
-        vdso,
-        25,
-        random_address,
-        31,
-        executable_address,
-        15,
-        platform_address,
+        *auxiliary_words,
         0,
         0,
     ]
@@ -354,6 +369,96 @@ def test_initial_exec_establishes_recorded_stack_with_live_vdso():
     assert established.auxiliary_value(33) == 0x900000
     assert b"MODE=recorded\0" in established.data
     assert b"MODE=qemu\0" not in established.data
+
+
+def test_initial_exec_neutralizes_recorded_vdso_when_live_stack_has_none():
+    arch = x86.ArchX86()
+    source_rsp = 0x8000
+    recorded_rsp = 0x4000
+    source_stack = initial_stack_bytes(
+        source_rsp,
+        executable=b"/qemu/app",
+        vdso=None,
+    )
+    recorded_mapping = bytearray(0x2000)
+    recorded_mapping[0x1000:] = initial_stack_bytes(
+        recorded_rsp,
+        executable=b"/rr/app",
+        vdso=0x700000,
+    )
+    post_registers = {
+        name: 0
+        for name in (
+            "r15",
+            "r14",
+            "r13",
+            "r12",
+            "rbp",
+            "rbx",
+            "r11",
+            "r10",
+            "r9",
+            "r8",
+            "rax",
+            "rcx",
+            "rdx",
+            "rsi",
+            "rdi",
+        )
+    }
+    post_registers.update(
+        {
+            "rip": 0x401000,
+            "rsp": recorded_rsp,
+            "rflags": 0x246,
+            "fs_base": 0,
+            "gs_base": 0,
+        }
+    )
+    pre = SyscallEvent(
+        0xDEAD,
+        1,
+        arch,
+        {"rip": 0xDEAD, "rax": 59},
+        (),
+        arch,
+        59,
+        "entering",
+        False,
+        event_count=13,
+    )
+    post = SyscallEvent(
+        0x401000,
+        1,
+        arch,
+        post_registers,
+        (full_write(1, 0x3000, bytes(recorded_mapping)),),
+        arch,
+        59,
+        "exiting",
+        False,
+        event_count=14,
+    )
+    mapping = MemoryMapping(14, 0x3000, 0x5000, "trace", 0, 3, 258, b"[stack]")
+    target = FakeReplayTarget({"rip": 0x401000, "rsp": source_rsp, "rflags": 0x202})
+    target.state.write_memory(source_rsp, source_stack)
+
+    state = X86ReplayEngine(arch).replay_initial_exec(target, pre, post, (mapping,))
+    established = X86InitialStackImage.read(recorded_rsp, state.read_memory)
+
+    assert target.mappings == [(0x3000, 0x2000, 3, 0x100122, 0x400000)]
+    assert established.optional_auxiliary_value(33) is None
+    assert established.auxiliary_value(1) == 0
+    assert established.arguments == (b"/rr/app", b"workload.lua")
+    assert len(established.data) == len(
+        X86InitialStackImage.read(
+            recorded_rsp,
+            lambda address, size: bytes(recorded_mapping)[
+                address - 0x3000 : address - 0x3000 + size
+            ],
+            maximum_end=0x5000,
+        ).data
+    )
 
 
 def test_initial_exec_rejects_different_workload_arguments_before_mapping():

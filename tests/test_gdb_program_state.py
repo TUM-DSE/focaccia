@@ -601,6 +601,7 @@ def x86_elf_image(
     *,
     syscall_offset: int | None,
     virtual_base: int = 0,
+    elf_type: int = 3,
 ) -> bytes:
     size = 0x1000
     image = bytearray(b"\x90" * size)
@@ -610,7 +611,7 @@ def x86_elf_image(
         image,
         0,
         ident,
-        3,
+        elf_type,
         62,
         1,
         0,
@@ -708,6 +709,69 @@ def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch)
     observed_pc = frame.read_register("pc")
     assert isinstance(observed_pc, FakeValue)
     assert int(observed_pc) == syscall_pc + 2
+    assert inferior.memory[syscall_pc] == 0x0F
+    assert inferior.memory[syscall_pc + 1] == 0x05
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_startup_mmap_uses_static_executable_without_vdso(monkeypatch):
+    target = load_target_module(monkeypatch)
+    fake_gdb = cast(Any, sys.modules["gdb"])
+    image_address = 0x400000
+    entry = image_address + 0x200
+    syscall_pc = image_address + 0x123
+    image = x86_elf_image(
+        syscall_offset=syscall_pc - image_address,
+        virtual_base=image_address,
+        elf_type=2,
+    )
+    memory = {image_address + offset: byte for offset, byte in enumerate(image)}
+    inferior = FakeInferior(memory)
+    registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue] = {
+        "pc": FakeValue(entry, 8),
+        "rax": FakeValue(0, 8),
+    }
+    frame = FakeFrame(registers)
+    connector = object.__new__(target.GDBServerConnector)
+    connector.arch = x86.ArchX86()
+    connector._process = inferior
+    connector._frame = frame
+    connector._terminal_reason = None
+    connector.is_exited = lambda: False
+
+    def write_register(register: str, value: int) -> None:
+        if register == "rip":
+            registers["pc"] = FakeValue(value, 8)
+        elif register == "rax":
+            registers["rax"] = FakeValue(value, 8)
+
+    connector.write_target_register = write_register
+    connector.skip = lambda pc: write_register("rip", pc)
+    fake_gdb.selected_frame = lambda: frame
+
+    class TemporaryBreakpoint:
+        def __init__(self, specification: str, *, temporary: bool):
+            assert specification == f"*{syscall_pc + 2:#x}"
+            assert temporary
+            self.valid = True
+
+        def is_valid(self) -> bool:
+            return self.valid
+
+        def delete(self) -> None:
+            self.valid = False
+
+    fake_gdb.Breakpoint = TemporaryBreakpoint
+
+    def execute(command: str, **_kwargs: object) -> None:
+        assert command == "continue"
+        registers["pc"] = FakeValue(syscall_pc + 2, 8)
+        registers["rax"] = FakeValue(0x800000, 8)
+
+    fake_gdb.execute = execute
+
+    connector.map_target_memory(0x800000, 0x2000, 3, 0x100122, image_address)
+
     assert inferior.memory[syscall_pc] == 0x0F
     assert inferior.memory[syscall_pc + 1] == 0x05
     sys.modules.pop("focaccia.qemu.target", None)

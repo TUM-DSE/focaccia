@@ -104,7 +104,14 @@ _MAP_ANONYMOUS = 0x20
 _MAP_GROWSDOWN = 0x100
 _MAP_FIXED_NOREPLACE = 0x100000
 _X86_STACK_POINTER_AUXV_TYPES = frozenset((15, 24, 25, 31))
+_X86_AT_IGNORE = 1
+_X86_AT_PHDR = 3
+_X86_AT_PHENT = 4
+_X86_AT_PHNUM = 5
+_X86_AT_BASE = 7
+_X86_AT_ENTRY = 9
 _X86_AT_RANDOM = 25
+_X86_AT_SYSINFO_EHDR = 33
 _X86_INITIAL_STACK_MAX_SIZE = 1 << 20
 _X86_INITIAL_STACK_MAX_ENTRIES = 1 << 14
 _X86_INITIAL_STACK_MAX_STRING = 1 << 16
@@ -255,13 +262,21 @@ class X86InitialStackImage:
             random_bytes,
         )
 
-    def auxiliary_value(self, aux_type: int) -> int:
+    def optional_auxiliary_value(self, aux_type: int) -> int | None:
         matches = tuple(value for kind, _offset, value in self.auxiliary_values if kind == aux_type)
-        if len(matches) != 1:
+        if len(matches) > 1:
             raise ReplayEventError(
                 f"Initial stack has {len(matches)} auxiliary entries of type {aux_type}."
             )
-        return matches[0]
+        return matches[0] if matches else None
+
+    def auxiliary_value(self, aux_type: int) -> int:
+        value = self.optional_auxiliary_value(aux_type)
+        if value is None:
+            raise ReplayEventError(
+                f"Initial stack has 0 auxiliary entries of type {aux_type}."
+            )
+        return value
 
     def replace_auxiliary_value(self, aux_type: int, value: int) -> bytes:
         matches = tuple(
@@ -277,6 +292,45 @@ class X86InitialStackImage:
         offset = matches[0]
         updated[offset : offset + 8] = value.to_bytes(8, "little")
         return bytes(updated)
+
+    def ignore_auxiliary_value(self, aux_type: int) -> bytes:
+        matches = tuple(
+            offset for kind, offset, _previous in self.auxiliary_values if kind == aux_type
+        )
+        if len(matches) != 1:
+            raise ReplayEventError(
+                f"Initial stack has {len(matches)} auxiliary entries of type {aux_type}."
+            )
+        updated = bytearray(self.data)
+        value_offset = matches[0]
+        updated[value_offset - 8 : value_offset] = _X86_AT_IGNORE.to_bytes(8, "little")
+        updated[value_offset : value_offset + 8] = bytes(8)
+        return bytes(updated)
+
+    def main_executable_syscall_image(self, expected_entry: int) -> int:
+        entry = self.auxiliary_value(_X86_AT_ENTRY)
+        if entry != expected_entry:
+            raise ReplayEventError(
+                f"Live initial AT_ENTRY is {entry:#x}, expected {expected_entry:#x}."
+            )
+        base = self.optional_auxiliary_value(_X86_AT_BASE)
+        if base not in (None, 0):
+            raise ReplayEventError(
+                "A vDSO-less startup syscall fallback requires a static executable."
+            )
+        phdr = self.auxiliary_value(_X86_AT_PHDR)
+        phent = self.auxiliary_value(_X86_AT_PHENT)
+        phnum = self.auxiliary_value(_X86_AT_PHNUM)
+        if phent != 56 or phnum <= 0 or phnum > 128:
+            raise ReplayEventError("Live initial ELF program-header metadata is invalid.")
+        table_size = phent * phnum
+        if phdr < 64 or phdr + table_size < phdr:
+            raise ReplayEventError("Live initial ELF program-header address is invalid.")
+        # Static ET_EXEC images used by the supported workloads map their ELF
+        # header at the page-aligned base immediately preceding AT_PHDR's file
+        # offset. The target adapter cross-validates the in-memory ELF headers,
+        # program table, and entry before executing any setup instruction.
+        return phdr & ~0xFFF
 
     def relocate(self, stack_pointer: int, random_bytes: bytes) -> bytes:
         if len(random_bytes) != 16:
@@ -549,10 +603,27 @@ class X86ReplayEngine:
                 raise ReplayEventError(
                     "QEMU application arguments differ from the recorded execve arguments."
                 )
-            source_vdso = source_stack.auxiliary_value(33)
+            source_vdso = source_stack.optional_auxiliary_value(_X86_AT_SYSINFO_EHDR)
+            recorded_vdso = recorded_stack.optional_auxiliary_value(_X86_AT_SYSINFO_EHDR)
             if source_vdso == 0:
-                raise ReplayEventError("QEMU initial stack has no mapped vDSO pointer.")
-            relocated = recorded_stack.replace_auxiliary_value(33, source_vdso)
+                raise ReplayEventError("QEMU initial stack has a null vDSO pointer.")
+            if source_vdso is not None:
+                if recorded_vdso is None:
+                    raise ReplayEventError(
+                        "QEMU initial stack has a vDSO entry absent from the recorded stack."
+                    )
+                relocated = recorded_stack.replace_auxiliary_value(
+                    _X86_AT_SYSINFO_EHDR,
+                    source_vdso,
+                )
+                syscall_image = source_vdso
+            else:
+                relocated = (
+                    recorded_stack.ignore_auxiliary_value(_X86_AT_SYSINFO_EHDR)
+                    if recorded_vdso is not None
+                    else recorded_stack.data
+                )
+                syscall_image = source_stack.main_executable_syscall_image(post_event.pc)
             stack_offset = recorded_stack.stack_pointer - mapping.start_address
             destination_end = stack_offset + len(relocated)
             if stack_offset < 0 or destination_end > mapping.length:
@@ -576,7 +647,7 @@ class X86ReplayEngine:
                 mapping.length,
                 mapping.mmap_prot,
                 mapping.mmap_flags | _MAP_ANONYMOUS | _MAP_FIXED_NOREPLACE,
-                source_vdso,
+                syscall_image,
             )
             target.write_target_memory(mapping.start_address, established_mapping)
             established = target.current_state().read_memory(mapping.start_address, mapping.length)

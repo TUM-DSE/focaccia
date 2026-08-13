@@ -37,11 +37,13 @@ debug = logger.debug
 info = logger.info
 
 _X86_SYSCALL_OPCODE = b"\x0f\x05"
-_X86_SETUP_IMAGE_MAX_SIZE = 1 << 20
+_X86_SETUP_IMAGE_MAX_SPAN = 1 << 32
+_X86_SETUP_SCAN_MAX_BYTES = 1 << 20
 _X86_SETUP_SCAN_CHUNK_SIZE = 4096
 _X86_ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 _X86_ELF_PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
 _X86_ELF_MAX_PROGRAM_HEADERS = 128
+_ELF_ET_EXEC = 2
 _ELF_ET_DYN = 3
 _ELF_EM_X86_64 = 62
 _ELF_PT_LOAD = 1
@@ -293,8 +295,8 @@ class GDBServerConnector:
         ) = _X86_ELF_HEADER.unpack(encoded_header)
         if ident[:7] != b"\x7fELF\x02\x01\x01":
             raise UnsupportedReplayEffect("Initial setup image is not little-endian ELF64.")
-        if elf_type != _ELF_ET_DYN or machine != _ELF_EM_X86_64 or version != 1:
-            raise UnsupportedReplayEffect("Initial setup image is not x86-64 ET_DYN ELF.")
+        if elf_type not in (_ELF_ET_EXEC, _ELF_ET_DYN) or machine != _ELF_EM_X86_64 or version != 1:
+            raise UnsupportedReplayEffect("Initial setup image is not x86-64 ELF.")
         if header_size != _X86_ELF_HEADER.size:
             raise UnsupportedReplayEffect("Initial setup image has an invalid ELF header size.")
         if (
@@ -310,7 +312,7 @@ class GDBServerConnector:
         if (
             program_header_offset < header_size
             or table_end < program_header_offset
-            or table_end > _X86_SETUP_IMAGE_MAX_SIZE
+            or table_end > _X86_SETUP_SCAN_MAX_BYTES
         ):
             raise UnsupportedReplayEffect(
                 "Initial setup ELF program-header table is outside the bounded image."
@@ -353,6 +355,8 @@ class GDBServerConnector:
                 "Initial setup ELF headers are not covered by one readable load segment."
             )
         load_bias = image_address - header_segments[0][2]
+        if elf_type == _ELF_ET_EXEC and load_bias != 0:
+            raise UnsupportedReplayEffect("Initial ET_EXEC setup image has a nonzero load bias.")
         executable_ranges: list[tuple[int, int]] = []
         for segment_flags, _file_offset, virtual_address, file_size, memory_size in load_segments:
             runtime_start = load_bias + virtual_address
@@ -360,8 +364,8 @@ class GDBServerConnector:
             if (
                 runtime_start < 0
                 or runtime_end < runtime_start
-                or runtime_start < image_address - _X86_SETUP_IMAGE_MAX_SIZE
-                or runtime_end > image_address + _X86_SETUP_IMAGE_MAX_SIZE
+                or runtime_start < image_address - _X86_SETUP_IMAGE_MAX_SPAN
+                or runtime_end > image_address + _X86_SETUP_IMAGE_MAX_SPAN
             ):
                 raise UnsupportedReplayEffect(
                     "Initial setup ELF load segment is outside the bounded runtime image."
@@ -381,14 +385,16 @@ class GDBServerConnector:
         mapping_end: int,
     ) -> int:
         executable_ranges = self._x86_executable_image_ranges(image_address)
+        remaining_scan = _X86_SETUP_SCAN_MAX_BYTES
         for start, size in executable_ranges:
             if mapping_start < start + size and mapping_end > start:
                 raise UnsupportedReplayEffect(
                     "Initial target mapping overlaps the setup executable image."
                 )
             overlap = b""
-            for offset in range(0, size, _X86_SETUP_SCAN_CHUNK_SIZE):
-                chunk_size = min(_X86_SETUP_SCAN_CHUNK_SIZE, size - offset)
+            scan_size = min(size, remaining_scan)
+            for offset in range(0, scan_size, _X86_SETUP_SCAN_CHUNK_SIZE):
+                chunk_size = min(_X86_SETUP_SCAN_CHUNK_SIZE, scan_size - offset)
                 address = start + offset
                 data = self.current_state().read_memory(address, chunk_size)
                 search = overlap + data
@@ -396,6 +402,9 @@ class GDBServerConnector:
                 if position >= 0:
                     return address - len(overlap) + position
                 overlap = search[-1:]
+            remaining_scan -= scan_size
+            if remaining_scan == 0:
+                break
         raise UnsupportedReplayEffect("Initial setup image has no x86 SYSCALL instruction.")
 
     def map_target_memory(
