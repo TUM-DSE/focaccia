@@ -1,5 +1,6 @@
 import gdb
 import logging
+import struct
 from focaccia.deterministic import (
     DeterministicLog,
     Event,
@@ -38,6 +39,14 @@ info = logger.info
 _X86_SYSCALL_OPCODE = b"\x0f\x05"
 _X86_SETUP_IMAGE_MAX_SIZE = 1 << 20
 _X86_SETUP_SCAN_CHUNK_SIZE = 4096
+_X86_ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
+_X86_ELF_PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
+_X86_ELF_MAX_PROGRAM_HEADERS = 128
+_ELF_ET_DYN = 3
+_ELF_EM_X86_64 = 62
+_ELF_PT_LOAD = 1
+_ELF_PF_X = 1
+_ELF_PF_R = 4
 
 
 def _is_synchronization_candidate(event: Event) -> bool:
@@ -260,41 +269,124 @@ class GDBServerConnector:
     def write_target_memory(self, address: int, data: bytes) -> None:
         self._process.write_memory(address, data)
 
-    def _find_x86_syscall_instruction(self, image_address: int) -> int:
-        mappings = [
-            mapping
-            for mapping in self.get_sections()
-            if mapping.start_address <= image_address < mapping.end_address
-        ]
-        if len(mappings) != 1:
+    def _x86_executable_image_ranges(
+        self,
+        image_address: int,
+    ) -> tuple[tuple[int, int], ...]:
+        state = self.current_state()
+        encoded_header = state.read_memory(image_address, _X86_ELF_HEADER.size)
+        (
+            ident,
+            elf_type,
+            machine,
+            version,
+            _entry,
+            program_header_offset,
+            _section_header_offset,
+            _flags,
+            header_size,
+            program_header_size,
+            program_header_count,
+            _section_header_size,
+            _section_header_count,
+            _section_name_index,
+        ) = _X86_ELF_HEADER.unpack(encoded_header)
+        if ident[:7] != b"\x7fELF\x02\x01\x01":
+            raise UnsupportedReplayEffect("Initial setup image is not little-endian ELF64.")
+        if elf_type != _ELF_ET_DYN or machine != _ELF_EM_X86_64 or version != 1:
+            raise UnsupportedReplayEffect("Initial setup image is not x86-64 ET_DYN ELF.")
+        if header_size != _X86_ELF_HEADER.size:
+            raise UnsupportedReplayEffect("Initial setup image has an invalid ELF header size.")
+        if (
+            program_header_size != _X86_ELF_PROGRAM_HEADER.size
+            or program_header_count <= 0
+            or program_header_count > _X86_ELF_MAX_PROGRAM_HEADERS
+        ):
             raise UnsupportedReplayEffect(
-                f"Initial setup address {image_address:#x} belongs to "
-                f"{len(mappings)} live mappings."
+                "Initial setup image has an invalid ELF program-header table."
             )
-        mapping = mappings[0]
-        if image_address != mapping.start_address:
+        table_size = program_header_size * program_header_count
+        table_end = program_header_offset + table_size
+        if (
+            program_header_offset < header_size
+            or table_end < program_header_offset
+            or table_end > _X86_SETUP_IMAGE_MAX_SIZE
+        ):
             raise UnsupportedReplayEffect(
-                "Initial setup address is not the start of its live image mapping."
+                "Initial setup ELF program-header table is outside the bounded image."
             )
-        if mapping.mmap_prot & 0x5 != 0x5:
-            raise UnsupportedReplayEffect("Initial setup image is not readable and executable.")
-        if mapping.length <= 0 or mapping.length > _X86_SETUP_IMAGE_MAX_SIZE:
-            raise UnsupportedReplayEffect(
-                f"Initial setup image has unsupported size {mapping.length:#x}."
-            )
-        if self.current_state().read_memory(image_address, 4) != b"\x7fELF":
-            raise UnsupportedReplayEffect("Initial setup image has no ELF header.")
+        encoded_program_headers = state.read_memory(
+            image_address + program_header_offset,
+            table_size,
+        )
 
-        overlap = b""
-        for offset in range(0, mapping.length, _X86_SETUP_SCAN_CHUNK_SIZE):
-            size = min(_X86_SETUP_SCAN_CHUNK_SIZE, mapping.length - offset)
-            address = mapping.start_address + offset
-            data = self.current_state().read_memory(address, size)
-            search = overlap + data
-            position = search.find(_X86_SYSCALL_OPCODE)
-            if position >= 0:
-                return address - len(overlap) + position
-            overlap = search[-1:]
+        header_is_loaded = False
+        executable_ranges: list[tuple[int, int]] = []
+        for index in range(program_header_count):
+            start = index * program_header_size
+            (
+                segment_type,
+                segment_flags,
+                file_offset,
+                virtual_address,
+                _physical_address,
+                file_size,
+                memory_size,
+                _alignment,
+            ) = _X86_ELF_PROGRAM_HEADER.unpack_from(encoded_program_headers, start)
+            if segment_type != _ELF_PT_LOAD:
+                continue
+            if (
+                file_size > memory_size
+                or virtual_address + memory_size < virtual_address
+                or virtual_address + memory_size > _X86_SETUP_IMAGE_MAX_SIZE
+            ):
+                raise UnsupportedReplayEffect(
+                    "Initial setup ELF has an invalid load segment."
+                )
+            if (
+                file_offset == 0
+                and virtual_address == 0
+                and file_size >= table_end
+                and segment_flags & _ELF_PF_R
+            ):
+                header_is_loaded = True
+            if file_size and segment_flags & (_ELF_PF_R | _ELF_PF_X) == (
+                _ELF_PF_R | _ELF_PF_X
+            ):
+                executable_ranges.append(
+                    (image_address + virtual_address, file_size)
+                )
+        if not header_is_loaded:
+            raise UnsupportedReplayEffect(
+                "Initial setup ELF headers are not covered by a readable load segment."
+            )
+        if not executable_ranges:
+            raise UnsupportedReplayEffect("Initial setup ELF has no executable load segment.")
+        return tuple(executable_ranges)
+
+    def _find_x86_syscall_instruction(
+        self,
+        image_address: int,
+        mapping_start: int,
+        mapping_end: int,
+    ) -> int:
+        executable_ranges = self._x86_executable_image_ranges(image_address)
+        for start, size in executable_ranges:
+            if mapping_start < start + size and mapping_end > start:
+                raise UnsupportedReplayEffect(
+                    "Initial target mapping overlaps the setup executable image."
+                )
+            overlap = b""
+            for offset in range(0, size, _X86_SETUP_SCAN_CHUNK_SIZE):
+                chunk_size = min(_X86_SETUP_SCAN_CHUNK_SIZE, size - offset)
+                address = start + offset
+                data = self.current_state().read_memory(address, chunk_size)
+                search = overlap + data
+                position = search.find(_X86_SYSCALL_OPCODE)
+                if position >= 0:
+                    return address - len(overlap) + position
+                overlap = search[-1:]
         raise UnsupportedReplayEffect("Initial setup image has no x86 SYSCALL instruction.")
 
     def map_target_memory(
@@ -320,7 +412,11 @@ class GDBServerConnector:
         if protection & ~0x7 or flags not in (0x100022, 0x100122):
             raise UnsupportedReplayEffect("Initial target mapping has unsupported flags.")
 
-        setup_pc = self._find_x86_syscall_instruction(syscall_image_address)
+        setup_pc = self._find_x86_syscall_instruction(
+            syscall_image_address,
+            address,
+            address + length,
+        )
         if self.current_state().read_memory(setup_pc, 2) != _X86_SYSCALL_OPCODE:
             raise UnsupportedReplayEffect("Initial setup SYSCALL bytes changed before execution.")
         inputs = {
@@ -456,16 +552,6 @@ class GDBServerConnector:
             size = int(parts[2], 16)
             offset = int(parts[3], 16)
             perms = parts[4]
-            if len(perms) < 3 or any(
-                value not in allowed
-                for value, allowed in zip(perms[:3], ("r-", "w-", "x-"), strict=True)
-            ):
-                continue
-            protection = (
-                (1 if perms[0] == "r" else 0)
-                | (2 if perms[1] == "w" else 0)
-                | (4 if perms[2] == "x" else 0)
-            )
 
             file_or_tag = None
             is_special = False
@@ -481,16 +567,7 @@ class GDBServerConnector:
                     # Might be a filename or absent
                     file_or_tag = tail
 
-            mapping = MemoryMapping(
-                0,
-                start,
-                end,
-                "debugger",
-                offset,
-                protection,
-                0,
-                file_or_tag,
-            )
+            mapping = MemoryMapping(0, start, end, "debugger", offset, 0, 0)
             mappings.append(mapping)
 
         return mappings

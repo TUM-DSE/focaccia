@@ -1,4 +1,5 @@
 import importlib
+import struct
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
@@ -596,21 +597,55 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
+def x86_elf_image(*, syscall_offset: int | None) -> bytes:
+    size = 0x1000
+    image = bytearray(b"\x90" * size)
+    ident = b"\x7fELF\x02\x01\x01" + bytes(9)
+    struct.pack_into(
+        "<16sHHIQQQIHHHHHH",
+        image,
+        0,
+        ident,
+        3,
+        62,
+        1,
+        0,
+        64,
+        0,
+        0,
+        64,
+        56,
+        1,
+        0,
+        0,
+        0,
+    )
+    struct.pack_into(
+        "<IIQQQQQQ",
+        image,
+        64,
+        1,
+        5,
+        0,
+        0,
+        0,
+        size,
+        size,
+        0x1000,
+    )
+    if syscall_offset is not None:
+        image[syscall_offset : syscall_offset + 2] = b"\x0f\x05"
+    return bytes(image)
+
+
 def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch):
     target = load_target_module(monkeypatch)
     fake_gdb = cast(Any, sys.modules["gdb"])
     entry = 0x401000
     vdso = 0x700000
     syscall_pc = vdso + 0x123
-    memory = {
-        **{address: 0x90 for address in range(vdso, vdso + 0x1000)},
-        vdso: 0x7F,
-        vdso + 1: ord("E"),
-        vdso + 2: ord("L"),
-        vdso + 3: ord("F"),
-        syscall_pc: 0x0F,
-        syscall_pc + 1: 0x05,
-    }
+    image = x86_elf_image(syscall_offset=syscall_pc - vdso)
+    memory = {vdso + offset: byte for offset, byte in enumerate(image)}
     inferior = FakeInferior(memory)
     registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue] = {
         "pc": FakeValue(entry, 8),
@@ -622,9 +657,6 @@ def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch)
     connector._process = inferior
     connector._frame = frame
     connector._terminal_reason = None
-    connector.get_sections = lambda: [
-        target.MemoryMapping(0, vdso, vdso + 0x1000, "debugger", 0, 5, 0, "[vdso]")
-    ]
     connector.is_exited = lambda: False
     writes: list[tuple[int, bytes]] = []
     register_writes: list[tuple[str, int]] = []
@@ -668,11 +700,8 @@ def test_startup_mmap_rejects_image_without_syscall_before_mutation(monkeypatch)
     vdso = 0x700000
     state = ProgramState(connector.arch)
     state.write_register("rip", 0x401000)
-    state.write_memory(vdso, b"\x7fELF" + b"\x90" * (0x1000 - 4))
+    state.write_memory(vdso, x86_elf_image(syscall_offset=None))
     connector.current_state = lambda: state
-    connector.get_sections = lambda: [
-        target.MemoryMapping(0, vdso, vdso + 0x1000, "debugger", 0, 5, 0, "[vdso]")
-    ]
     mutations: list[object] = []
     connector.write_target_register = lambda *_args: mutations.append(_args)
 
