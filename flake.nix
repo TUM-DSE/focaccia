@@ -27,7 +27,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=03a7087215752eb8ec17887b7a2c83df2bff81cf&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=83e4033ef58f5eb377807e6449115ec9d801d314&submodules=1";
       flake = true;
     };
 
@@ -1628,7 +1628,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "03a7087215752eb8ec17887b7a2c83df2bff81cf";
+      assert qemu-submodule.rev == "83e4033ef58f5eb377807e6449115ec9d801d314";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -2842,6 +2842,7 @@
       qemu-plugin = qemu-submodule.packages.${system}.default;
       qemu-plugin-2248-injected =
         qemu-submodule.packages.${system}.with-focaccia-plugin-2248;
+      qemu-plugin-source = qemu-submodule.packages.${system}.plugin-source;
 
       rr = rrTool;
 
