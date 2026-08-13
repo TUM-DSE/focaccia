@@ -597,7 +597,11 @@ def test_run_until_replays_an_event_already_at_the_initial_pc(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
-def x86_elf_image(*, syscall_offset: int | None) -> bytes:
+def x86_elf_image(
+    *,
+    syscall_offset: int | None,
+    virtual_base: int = 0,
+) -> bytes:
     size = 0x1000
     image = bytearray(b"\x90" * size)
     ident = b"\x7fELF\x02\x01\x01" + bytes(9)
@@ -627,7 +631,7 @@ def x86_elf_image(*, syscall_offset: int | None) -> bytes:
         1,
         5,
         0,
-        0,
+        virtual_base,
         0,
         size,
         size,
@@ -644,7 +648,10 @@ def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch)
     entry = 0x401000
     vdso = 0x700000
     syscall_pc = vdso + 0x123
-    image = x86_elf_image(syscall_offset=syscall_pc - vdso)
+    image = x86_elf_image(
+        syscall_offset=syscall_pc - vdso,
+        virtual_base=vdso,
+    )
     memory = {vdso + offset: byte for offset, byte in enumerate(image)}
     inferior = FakeInferior(memory)
     registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue] = {

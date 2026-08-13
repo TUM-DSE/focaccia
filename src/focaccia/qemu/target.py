@@ -320,8 +320,7 @@ class GDBServerConnector:
             table_size,
         )
 
-        header_is_loaded = False
-        executable_ranges: list[tuple[int, int]] = []
+        load_segments: list[tuple[int, int, int, int, int]] = []
         for index in range(program_header_count):
             start = index * program_header_size
             (
@@ -336,31 +335,41 @@ class GDBServerConnector:
             ) = _X86_ELF_PROGRAM_HEADER.unpack_from(encoded_program_headers, start)
             if segment_type != _ELF_PT_LOAD:
                 continue
-            if (
-                file_size > memory_size
-                or virtual_address + memory_size < virtual_address
-                or virtual_address + memory_size > _X86_SETUP_IMAGE_MAX_SIZE
-            ):
+            if file_size > memory_size or virtual_address + memory_size < virtual_address:
                 raise UnsupportedReplayEffect(
                     "Initial setup ELF has an invalid load segment."
                 )
+            load_segments.append(
+                (segment_flags, file_offset, virtual_address, file_size, memory_size)
+            )
+
+        header_segments = [
+            segment
+            for segment in load_segments
+            if segment[1] == 0 and segment[3] >= table_end and segment[0] & _ELF_PF_R
+        ]
+        if len(header_segments) != 1:
+            raise UnsupportedReplayEffect(
+                "Initial setup ELF headers are not covered by one readable load segment."
+            )
+        load_bias = image_address - header_segments[0][2]
+        executable_ranges: list[tuple[int, int]] = []
+        for segment_flags, _file_offset, virtual_address, file_size, memory_size in load_segments:
+            runtime_start = load_bias + virtual_address
+            runtime_end = runtime_start + memory_size
             if (
-                file_offset == 0
-                and virtual_address == 0
-                and file_size >= table_end
-                and segment_flags & _ELF_PF_R
+                runtime_start < 0
+                or runtime_end < runtime_start
+                or runtime_start < image_address - _X86_SETUP_IMAGE_MAX_SIZE
+                or runtime_end > image_address + _X86_SETUP_IMAGE_MAX_SIZE
             ):
-                header_is_loaded = True
+                raise UnsupportedReplayEffect(
+                    "Initial setup ELF load segment is outside the bounded runtime image."
+                )
             if file_size and segment_flags & (_ELF_PF_R | _ELF_PF_X) == (
                 _ELF_PF_R | _ELF_PF_X
             ):
-                executable_ranges.append(
-                    (image_address + virtual_address, file_size)
-                )
-        if not header_is_loaded:
-            raise UnsupportedReplayEffect(
-                "Initial setup ELF headers are not covered by a readable load segment."
-            )
+                executable_ranges.append((runtime_start, file_size))
         if not executable_ranges:
             raise UnsupportedReplayEffect("Initial setup ELF has no executable load segment.")
         return tuple(executable_ranges)
