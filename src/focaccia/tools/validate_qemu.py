@@ -146,6 +146,10 @@ observe guest state and validate it against a symbolic native trace.
         help="Write a versioned JSON validation and replay-coverage report.",
     )
     parser.add_argument(
+        "--profile-report",
+        help="Write opt-in QEMU validation component timings as JSON.",
+    )
+    parser.add_argument(
         "--run-manifest",
         help="Verify this content-bound RR/QEMU run manifest before validation.",
     )
@@ -325,6 +329,7 @@ def main() -> None:
                 args.trace_type,
                 args.skip_unmatched,
                 args.report,
+                args.profile_report,
             )
         except Exception as error:
             if args.report is not None and not Path(args.report).is_file():

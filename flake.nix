@@ -920,6 +920,20 @@
       ];
     };
 
+    qemuValidationProfileComponentsCheck = mkStaticUnitCheck {
+      name = "qemu-validation-profile-components";
+      ruffTargets = [
+        "src/focaccia/qemu/profiling.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_trace_output.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_trace_output.py::test_plugin_validation_writes_component_profile"
+      ];
+    };
+
     persistenceTimingSeparationCheck = mkStaticUnitCheck {
       name = "persistence-timing-separation";
       ruffTargets = [
@@ -2999,6 +3013,7 @@
       opt-in-capture-profiling = optInCaptureProfilingCheck;
       lldb-lock-prefix-disassembly = lldbLockPrefixDisassemblyCheck;
       persistence-timing-separation = persistenceTimingSeparationCheck;
+      qemu-validation-profile-components = qemuValidationProfileComponentsCheck;
       x86-syscall-entry-matching = x86SyscallEntryMatchingCheck;
       native-terminal-syscall = nativeTerminalSyscallCheck;
       rr-lldb-syscall-boundary = rrLldbSyscallBoundaryCheck;

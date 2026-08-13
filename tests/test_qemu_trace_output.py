@@ -51,6 +51,71 @@ class FakePluginIterator:
         self.aborted = True
 
 
+def test_plugin_validation_writes_component_profile(
+    tmp_path,
+    monkeypatch,
+):
+    oracle = tmp_path / "oracle.json"
+    oracle.write_text("{}")
+    environment = make_plugin_trace_environment("aarch64l")
+    symbolic = SimpleNamespace(env=environment)
+    matched = SimpleNamespace(
+        trace=None,
+        diagnostics=(),
+        pending_transform=None,
+        complete=True,
+    )
+    iterator = FakePluginIterator()
+
+    monkeypatch.setattr(
+        validation_server.parser,
+        "parse_transformations",
+        lambda _file: symbolic,
+    )
+    monkeypatch.setattr(
+        validation_server,
+        "PluginStateIterator",
+        lambda *_args, **_kwargs: iterator,
+    )
+    monkeypatch.setattr(
+        validation_server,
+        "collect_conc_trace",
+        lambda *_args, **_kwargs: matched,
+    )
+    monkeypatch.setattr(
+        validation_server,
+        "compare_symbolic",
+        lambda *_args, **_kwargs: ValidationReport(),
+    )
+
+    profile = tmp_path / "profile.json"
+    validation_server.start_validation_server(
+        str(oracle),
+        None,
+        str(tmp_path / "plugin.sock"),
+        "aarch64l",
+        environment,
+        ErrorTypes.INFO,
+        is_quiet=True,
+        profile_path=str(profile),
+    )
+
+    import json
+
+    document = json.loads(profile.read_text())
+    assert document["schema"] == "focaccia-qemu-validation-profile-v1"
+    assert document["status"] == "passed"
+    assert set(document["timings"]) == {
+        "executionSeconds",
+        "tracingSeconds",
+        "validationSeconds",
+        "serializationSeconds",
+        "totalSeconds",
+        "unattributedSeconds",
+    }
+    assert all(value >= 0 for value in document["timings"].values())
+
+
 def test_quiet_plugin_validation_still_writes_structured_report(
     tmp_path,
     monkeypatch,

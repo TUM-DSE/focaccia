@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from contextlib import nullcontext
 
 import focaccia.parser as parser
 from focaccia.arch import Arch, supported_architectures
@@ -19,6 +20,10 @@ from focaccia.qemu.snapshot import (
     snapshot_diagnostics,
 )
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
+from focaccia.qemu.profiling import (
+    QEMUValidationProfiler,
+    write_qemu_validation_profile,
+)
 from focaccia.qemu.report import write_validation_report
 from focaccia.qemu.transport import PluginListener, PluginTransport
 from focaccia.snapshot import ProgramState, ReadableProgramState, RegisterAccessError
@@ -199,6 +204,7 @@ def collect_conc_trace(
     strace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     *,
     skip_unmatched: bool = False,
+    profiler: QEMUValidationProfiler | None = None,
 ) -> MatchResult:
     """Collect a cardinality-valid concrete transition trace from the plugin."""
     matcher = TransitionMatcher(strace, skip_unmatched=skip_unmatched)
@@ -209,7 +215,11 @@ def collect_conc_trace(
 
     while not matcher.done:
         try:
-            current_state = next(state_iterator)
+            measurement = (
+                profiler.measure("execution") if profiler is not None else nullcontext()
+            )
+            with measurement:
+                current_state = next(state_iterator)
             pc = current_state.read_pc()
         except StopIteration:
             break
@@ -280,6 +290,7 @@ def start_validation_server(
     trace_type: str = "json",
     skip_unmatched: bool = False,
     report_path: str | None = None,
+    profile_path: str | None = None,
 ) -> MatchResult:
     architecture = supported_architectures.get(guest_arch)
     if architecture is None:
@@ -289,6 +300,10 @@ def start_validation_server(
             f"Plugin environment architecture {env.architecture} does not match "
             f"guest architecture {architecture.key}."
         )
+
+    profiler = QEMUValidationProfiler() if profile_path is not None else None
+    if profiler is not None:
+        profiler.start_total()
 
     if trace_type == "msgpack":
         trace_file = open(symb_trace, "rb")
@@ -302,15 +317,26 @@ def start_validation_server(
     with trace_file:
         with PluginStateIterator(socket_path, architecture) as qemu:
             try:
-                matched = collect_conc_trace(
-                    qemu,
-                    symb_transforms,
-                    skip_unmatched=skip_unmatched,
+                tracing_measurement = (
+                    profiler.measure("tracing") if profiler is not None else nullcontext()
                 )
-                validation_report = compare_symbolic(
-                    matched.trace,
-                    diagnostics=matched.diagnostics,
+                with tracing_measurement:
+                    matched = collect_conc_trace(
+                        qemu,
+                        symb_transforms,
+                        skip_unmatched=skip_unmatched,
+                        profiler=profiler,
+                    )
+                validation_measurement = (
+                    profiler.measure("validation")
+                    if profiler is not None
+                    else nullcontext()
                 )
+                with validation_measurement:
+                    validation_report = compare_symbolic(
+                        matched.trace,
+                        diagnostics=matched.diagnostics,
+                    )
                 if not matched.complete:
                     raise RuntimeError(
                         "Plugin validation did not produce a complete transition trace."
@@ -319,9 +345,19 @@ def start_validation_server(
                 if output:
                     from focaccia.parser import serialize_snapshots
 
-                    states = matched.trace.state_boundaries if matched.trace is not None else ()
-                    with open(output, "w") as output_file:
-                        serialize_snapshots(MaterializedTrace(states, env), output_file)
+                    serialization_measurement = (
+                        profiler.measure("serialization")
+                        if profiler is not None
+                        else nullcontext()
+                    )
+                    with serialization_measurement:
+                        states = (
+                            matched.trace.state_boundaries
+                            if matched.trace is not None
+                            else ()
+                        )
+                        with open(output, "w") as output_file:
+                            serialize_snapshots(MaterializedTrace(states, env), output_file)
 
                 if report_path:
                     write_validation_report(
@@ -330,6 +366,10 @@ def start_validation_server(
                         None,
                         matched,
                     )
+
+                if profiler is not None:
+                    profiler.finish_total()
+                    write_qemu_validation_profile(profile_path, profiler.snapshot())
 
                 # FINISH is sent only after every requested structured artifact
                 # has been persisted. The guest then continues naturally.

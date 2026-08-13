@@ -9,6 +9,7 @@ work to do.
 import argparse
 import logging
 import os
+from contextlib import nullcontext
 
 import focaccia.parser as parser
 from focaccia.compare import compare_symbolic, Error, ErrorTypes
@@ -32,6 +33,10 @@ from focaccia.tools.validate_qemu import (
 from focaccia.qemu.integration import (
     load_replay_run_manifest,
     validate_replay_run_manifest,
+)
+from focaccia.qemu.profiling import (
+    QEMUValidationProfiler,
+    write_qemu_validation_profile,
 )
 from focaccia.qemu.report import (
     TerminalReason,
@@ -58,6 +63,7 @@ def collect_conc_trace(
     *,
     skip_unmatched: bool = False,
     cutpoint_addresses: tuple[int, ...] = (),
+    profiler: QEMUValidationProfiler | None = None,
 ) -> MatchResult:
     """Collect matched concrete boundaries while preserving the terminal state."""
     matcher = TransitionMatcher(strace, skip_unmatched=skip_unmatched)
@@ -162,11 +168,15 @@ def collect_conc_trace(
         if matcher.done:
             break
         try:
-            current_state = (
-                state_iterator.run_until(declared_destination)
-                if declared_destination is not None
-                else next(state_iterator)
+            measurement = (
+                profiler.measure("execution") if profiler is not None else nullcontext()
             )
+            with measurement:
+                current_state = (
+                    state_iterator.run_until(declared_destination)
+                    if declared_destination is not None
+                    else next(state_iterator)
+                )
         except StopIteration:
             break
 
@@ -240,6 +250,9 @@ def main() -> None:
 
     gdb_server: GDBServerStateIterator | None = None
     report_written = False
+    profiler = QEMUValidationProfiler() if args.profile_report is not None else None
+    if profiler is not None:
+        profiler.start_total()
 
     # Keep streaming trace input open until collection consumes it.
     mode = "r" if args.trace_type == "json" else "rb"
@@ -266,18 +279,27 @@ def main() -> None:
             gdb_server = GDBServerStateIterator(args.remote, detlog)
             executable = gdb_server.binary if args.executable is None else args.executable
             env = make_gdb_trace_environment(executable)
-            matched = collect_conc_trace(
-                gdb_server,
-                symb_transforms,
-                skip_unmatched=args.skip_unmatched,
-                cutpoint_addresses=tuple(args.cutpoint_address),
+            tracing_measurement = (
+                profiler.measure("tracing") if profiler is not None else nullcontext()
             )
+            with tracing_measurement:
+                matched = collect_conc_trace(
+                    gdb_server,
+                    symb_transforms,
+                    skip_unmatched=args.skip_unmatched,
+                    cutpoint_addresses=tuple(args.cutpoint_address),
+                    profiler=profiler,
+                )
 
         terminal_reason = gdb_server.terminal_reason()
-        validation_report = compare_symbolic(
-            matched.trace,
-            diagnostics=matched.diagnostics,
+        validation_measurement = (
+            profiler.measure("validation") if profiler is not None else nullcontext()
         )
+        with validation_measurement:
+            validation_report = compare_symbolic(
+                matched.trace,
+                diagnostics=matched.diagnostics,
+            )
         if matched.pending_transform is not None:
             source = matched.trace.state_boundaries[-1] if matched.trace is not None else None
             validation_report = validation_report.with_entry(
@@ -303,27 +325,37 @@ def main() -> None:
         if args.output:
             from focaccia.parser import serialize_snapshots
 
-            states = matched.trace.state_boundaries if matched.trace is not None else ()
-            output_env = env
-            if states:
-                output_env = env.with_architecture(states[0].arch.key)
-            elif symb_transforms.env.architecture is not None:
-                output_env = env.with_architecture(symb_transforms.env.architecture)
-            output_path = os.fspath(args.output)
-            output_directory = os.path.dirname(output_path) or "."
-            temporary_output = os.path.join(
-                output_directory,
-                f".{os.path.basename(output_path)}.tmp",
+            serialization_measurement = (
+                profiler.measure("serialization")
+                if profiler is not None
+                else nullcontext()
             )
-            try:
-                with open(temporary_output, "w") as file:
-                    serialize_snapshots(MaterializedTrace(states, output_env), file)
-                os.replace(temporary_output, output_path)
-            finally:
+            with serialization_measurement:
+                states = matched.trace.state_boundaries if matched.trace is not None else ()
+                output_env = env
+                if states:
+                    output_env = env.with_architecture(states[0].arch.key)
+                elif symb_transforms.env.architecture is not None:
+                    output_env = env.with_architecture(symb_transforms.env.architecture)
+                output_path = os.fspath(args.output)
+                output_directory = os.path.dirname(output_path) or "."
+                temporary_output = os.path.join(
+                    output_directory,
+                    f".{os.path.basename(output_path)}.tmp",
+                )
                 try:
-                    os.unlink(temporary_output)
-                except FileNotFoundError:
-                    pass
+                    with open(temporary_output, "w") as file:
+                        serialize_snapshots(MaterializedTrace(states, output_env), file)
+                    os.replace(temporary_output, output_path)
+                finally:
+                    try:
+                        os.unlink(temporary_output)
+                    except FileNotFoundError:
+                        pass
+
+        if profiler is not None:
+            profiler.finish_total()
+            write_qemu_validation_profile(args.profile_report, profiler.snapshot())
 
         if not args.quiet:
             print_result(validation_report, verbosity[args.error_level])
