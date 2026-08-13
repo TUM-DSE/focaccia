@@ -250,6 +250,38 @@ def test_exact_fragment_emission_preserves_bytes_and_uses_only_validation_inputs
     assert "%zmm0" not in source.lower()
 
 
+def test_condition_code_seed_is_emitted_after_inputs_and_rejects_flag_dependencies():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register("RAX", 1)
+    symbolic = FakeSymbolicInputs(registers=("RAX",))
+    reproducer = Reproducer(
+        "/tmp/oracle",
+        [],
+        snapshot,
+        cast(SymbolicTransform, symbolic),
+        fragment=ExecutableFragment(0x4000, 0x4001, b"\x90"),
+        condition_code_seed=1,
+    )
+
+    restoration = reproducer.get_regs()
+
+    assert restoration.index("%rax") < restoration.index("cmpq $0x1, %r11")
+    assert restoration.index("cmpq $0x1, %r11") < restoration.index("jmp _bb_0x4000")
+
+    snapshot.write_register("RFLAGS", 1)
+    flag_symbolic = FakeSymbolicInputs(registers=("CF",))
+    with pytest.raises(ReproducerRegisterError, match="overwrite required input flags"):
+        Reproducer(
+            "/tmp/oracle",
+            [],
+            snapshot,
+            cast(SymbolicTransform, flag_symbolic),
+            fragment=ExecutableFragment(0x4000, 0x4001, b"\x90"),
+            condition_code_seed=1,
+        ).get_regs()
+
+
 def test_exact_fragment_rejects_snapshot_or_symbolic_range_mismatch():
     snapshot = ProgramState(x86.ArchX86())
     snapshot.write_register("RIP", 0x4000)

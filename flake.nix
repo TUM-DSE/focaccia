@@ -694,7 +694,7 @@
       pytestTargets = [
         "tests/test_reproducer.py"
         "-k"
-        "exact_fragment or entry_prefix or single_transition"
+        "exact_fragment or entry_prefix or single_transition or condition_code_seed"
       ];
     };
 

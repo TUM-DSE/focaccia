@@ -440,6 +440,7 @@ class Reproducer:
         fragment: ExecutableFragment | None = None,
         entry_prefix: EntryPrefix | None = None,
         required_registers: Iterable[str] = (),
+        condition_code_seed: int | None = None,
     ) -> None:
         self.pc = snap.read_register("pc")
         self.snap = snap
@@ -447,6 +448,15 @@ class Reproducer:
         self.fragment = fragment
         self.entry_prefix = entry_prefix
         self.required_registers = tuple(required_registers)
+        if condition_code_seed is not None and not 0 <= condition_code_seed <= 0x7FFFFFFF:
+            raise ReproducerRegisterError(
+                "The x86 condition-code seed must fit in a non-negative signed immediate."
+            )
+        if condition_code_seed is not None and entry_prefix is not None:
+            raise ReproducerRegisterError(
+                "A condition-code seed cannot be inserted into an exact entry prefix."
+            )
+        self.condition_code_seed = condition_code_seed
 
         if fragment is not None:
             if fragment.start != self.pc:
@@ -556,6 +566,12 @@ class Reproducer:
             )
         for restore in plan.registers:
             lines.append(f"movabsq ${restore.value:#x}, %{restore.register.lower()}")
+        if self.condition_code_seed is not None:
+            if plan.flags_mask:
+                raise ReproducerRegisterError(
+                    "A condition-code seed would overwrite required input flags."
+                )
+            lines.append(f"cmpq ${self.condition_code_seed:#x}, %r11")
         if plan.stack_pointer is not None:
             lines.append(
                 f"movabsq ${plan.stack_pointer.value:#x}, "
