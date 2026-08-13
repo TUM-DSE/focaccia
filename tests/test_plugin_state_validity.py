@@ -16,6 +16,8 @@ class FakeTransport:
         self.register_reads: list[str] = []
         self.memory_reads: list[tuple[int, int]] = []
         self.steps = 0
+        self.finished = False
+        self.aborted = False
         self.closed = False
 
     def read_register(self, name: str) -> RegisterObservation:
@@ -34,6 +36,14 @@ class FakeTransport:
 
     def step(self) -> None:
         self.steps += 1
+
+    def finish(self) -> None:
+        self.finished = True
+        self.closed = True
+
+    def abort(self) -> None:
+        self.aborted = True
+        self.closed = True
 
     def close(self) -> None:
         self.closed = True
@@ -173,6 +183,32 @@ def test_missing_plugin_values_remain_unknown():
 def test_plugin_backend_has_no_module_global_connection_state():
     assert not hasattr(validation_server, "CONN")
     assert not hasattr(validation_server, "SOCK")
+
+
+def test_plugin_iterator_finish_uses_explicit_terminal_command():
+    transport = FakeTransport()
+
+    with PluginStateIterator.from_transport(
+        cast(Any, transport),
+        x86.ArchX86(),
+    ) as iterator:
+        iterator.finish()
+
+    assert transport.finished
+    assert transport.closed
+
+
+def test_plugin_iterator_abort_uses_explicit_failure_command():
+    transport = FakeTransport()
+
+    with PluginStateIterator.from_transport(
+        cast(Any, transport),
+        x86.ArchX86(),
+    ) as iterator:
+        iterator.abort()
+
+    assert transport.aborted
+    assert transport.closed
 
 
 def test_plugin_iterator_context_manager_closes_injected_transport():

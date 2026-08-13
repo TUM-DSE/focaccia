@@ -219,6 +219,7 @@ def test_gdb_validation_persists_artifacts_before_renderer_failure(
     server = SimpleNamespace(
         binary="/guest",
         replay_coverage_report=lambda: None,
+        terminal_reason=lambda: None,
     )
     arguments = [
         "--symb-trace",

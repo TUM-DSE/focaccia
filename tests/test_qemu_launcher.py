@@ -59,6 +59,24 @@ def test_plugin_backend_requires_guest_arch_and_rejects_remote():
         validate_backend_options(parser, ambiguous)
 
 
+def test_plugin_report_is_supported_without_enabling_replay_options():
+    parser = make_argparser()
+    plugin = parser.parse_args(
+        [
+            "--symb-trace",
+            "/tmp/trace",
+            "--use-socket",
+            "/tmp/plugin",
+            "--guest-arch",
+            "aarch64l",
+            "--report",
+            "/tmp/report",
+        ]
+    )
+
+    validate_backend_options(parser, plugin)
+
+
 def test_run_manifest_requires_gdb_replay_artifacts():
     parser = make_argparser()
     missing = parser.parse_args(
@@ -102,8 +120,8 @@ def test_run_manifest_requires_gdb_replay_artifacts():
             "/tmp/plugin",
             "--guest-arch",
             "x86_64",
-            "--report",
-            "/tmp/report",
+            "--run-manifest",
+            "/tmp/manifest",
         ]
     )
     with pytest.raises(SystemExit):

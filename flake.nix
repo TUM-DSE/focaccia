@@ -27,7 +27,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=3b2a0fb80eb9b6b5f216fa69069e66210466f5eb&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=03a7087215752eb8ec17887b7a2c83df2bff81cf&submodules=1";
       flake = true;
     };
 
@@ -1392,6 +1392,23 @@
       pytestTargets = [ "tests/test_qemu_transport.py" ];
     };
 
+    pluginStructuredReportCheck = mkStaticUnitCheck {
+      name = "plugin-structured-validation-report";
+      ruffTargets = [
+        "src/focaccia/qemu/report.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_launcher.py"
+        "tests/test_qemu_trace_output.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_launcher.py::test_plugin_report_is_supported_without_enabling_replay_options"
+        "tests/test_qemu_trace_output.py::test_quiet_plugin_validation_still_writes_structured_report"
+        "tests/test_qemu_trace_output.py::test_plugin_validation_rejects_incomplete_trace_before_finish"
+        "tests/test_qemu_trace_output.py::test_plugin_validation_aborts_peer_on_collection_failure"
+      ];
+    };
+
     pluginRegisterCacheCheck = mkStaticUnitCheck {
       name = "plugin-register-cache";
       ruffTargets = [
@@ -1611,7 +1628,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "3b2a0fb80eb9b6b5f216fa69069e66210466f5eb";
+      assert qemu-submodule.rev == "03a7087215752eb8ec17887b7a2c83df2bff81cf";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -2823,6 +2840,8 @@
       dev = devEnv;
 
       qemu-plugin = qemu-submodule.packages.${system}.default;
+      qemu-plugin-2248-injected =
+        qemu-submodule.packages.${system}.with-focaccia-plugin-2248;
 
       rr = rrTool;
 
@@ -3000,6 +3019,7 @@
       materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
       plugin-framed-transport = pluginFramedTransportCheck;
+      plugin-structured-validation-report = pluginStructuredReportCheck;
       plugin-register-cache = pluginRegisterCacheCheck;
       plugin-connection-ownership = pluginConnectionOwnershipCheck;
       uv-sync-lock-integrity = uvSyncLockIntegrityCheck;

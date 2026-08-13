@@ -9,7 +9,7 @@ from collections.abc import Iterable
 
 import focaccia.parser as parser
 from focaccia.arch import Arch, supported_architectures
-from focaccia.compare import ErrorTypes, compare_symbolic
+from focaccia.compare import compare_symbolic
 from focaccia.match import MatchResult, TransitionMatcher
 from focaccia.qemu.snapshot import (
     collect_snapshot_plan,
@@ -19,6 +19,7 @@ from focaccia.qemu.snapshot import (
     snapshot_diagnostics,
 )
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
+from focaccia.qemu.report import write_validation_report
 from focaccia.qemu.transport import PluginListener, PluginTransport
 from focaccia.snapshot import ProgramState, ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTraceItem
@@ -27,7 +28,7 @@ from focaccia.trace import (
     TraceEnvironment,
     TransformStream,
 )
-from focaccia.utils import print_result
+from focaccia.utils import ErrorSeverity, print_result
 
 
 logger = logging.getLogger("focaccia-qemu-validation-server")
@@ -76,10 +77,12 @@ class PluginProgramState(CachedBackendProgramState):
                 )
             return RegisterObservation(base_reg, backing.value & ((1 << 64) - 1), 64)
 
+        selected_name = requested_reg if use_narrow_alias else base_reg
+        assert selected_name is not None
         wire_name = (
             self.flag_backend_names[self.arch.archname]
             if self._flags_base is not None and base_reg == self._flags_base
-            else (requested_reg if use_narrow_alias else base_reg).lower()
+            else selected_name.lower()
         )
         return self.transport.read_register(wire_name)
 
@@ -156,6 +159,24 @@ class PluginStateIterator:
             self.state.step()
             new_pc = self.state.read_pc()
         return self.state
+
+    def finish(self) -> None:
+        """Detach the plugin after the terminal snapshot is durable."""
+        if not self._closed:
+            self.transport.finish()
+            self._closed = True
+            if self._listener is not None:
+                self._listener.close()
+
+    def abort(self) -> None:
+        """Fail the plugin peer closed after a validation-side error."""
+        if not self._closed:
+            try:
+                self.transport.abort()
+            finally:
+                self._closed = True
+                if self._listener is not None:
+                    self._listener.close()
 
     def close(self) -> None:
         if self._closed:
@@ -254,10 +275,11 @@ def start_validation_server(
     socket_path: str,
     guest_arch: str,
     env: TraceEnvironment,
-    verbosity: ErrorTypes,
+    verbosity: ErrorSeverity,
     is_quiet: bool = False,
     trace_type: str = "json",
     skip_unmatched: bool = False,
+    report_path: str | None = None,
 ) -> MatchResult:
     architecture = supported_architectures.get(guest_arch)
     if architecture is None:
@@ -268,34 +290,58 @@ def start_validation_server(
             f"guest architecture {architecture.key}."
         )
 
-    mode = "rb" if trace_type == "msgpack" else "r"
-    with open(symb_trace, mode) as trace_file:
-        if trace_type == "msgpack":
-            symb_transforms = parser.stream_transformation(trace_file)
-        elif trace_type == "json":
-            symb_transforms = parser.parse_transformations(trace_file)
-        else:
-            raise ValueError(f"Unsupported symbolic trace type {trace_type!r}.")
+    if trace_type == "msgpack":
+        trace_file = open(symb_trace, "rb")
+        symb_transforms = parser.stream_transformation(trace_file)
+    elif trace_type == "json":
+        trace_file = open(symb_trace, "r")
+        symb_transforms = parser.parse_transformations(trace_file)
+    else:
+        raise ValueError(f"Unsupported symbolic trace type {trace_type!r}.")
 
+    with trace_file:
         with PluginStateIterator(socket_path, architecture) as qemu:
-            matched = collect_conc_trace(
-                qemu,
-                symb_transforms,
-                skip_unmatched=skip_unmatched,
-            )
+            try:
+                matched = collect_conc_trace(
+                    qemu,
+                    symb_transforms,
+                    skip_unmatched=skip_unmatched,
+                )
+                validation_report = compare_symbolic(
+                    matched.trace,
+                    diagnostics=matched.diagnostics,
+                )
+                if not matched.complete:
+                    raise RuntimeError(
+                        "Plugin validation did not produce a complete transition trace."
+                    )
+
+                if output:
+                    from focaccia.parser import serialize_snapshots
+
+                    states = matched.trace.state_boundaries if matched.trace is not None else ()
+                    with open(output, "w") as output_file:
+                        serialize_snapshots(MaterializedTrace(states, env), output_file)
+
+                if report_path:
+                    write_validation_report(
+                        report_path,
+                        validation_report,
+                        None,
+                        matched,
+                    )
+
+                # FINISH is sent only after every requested structured artifact
+                # has been persisted. The guest then continues naturally.
+                qemu.finish()
+            except Exception:
+                try:
+                    qemu.abort()
+                except Exception:
+                    logger.exception("Unable to abort QEMU plugin peer cleanly.")
+                raise
 
     if not is_quiet:
-        report = compare_symbolic(
-            matched.trace,
-            diagnostics=matched.diagnostics,
-        )
-        print_result(report, verbosity)
-
-    if output:
-        from focaccia.parser import serialize_snapshots
-
-        states = matched.trace.state_boundaries if matched.trace is not None else ()
-        with open(output, "w") as output_file:
-            serialize_snapshots(MaterializedTrace(states, env), output_file)
+        print_result(validation_report, verbosity)
 
     return matched

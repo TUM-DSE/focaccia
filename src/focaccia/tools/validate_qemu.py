@@ -19,6 +19,7 @@ import focaccia
 import focaccia.qemu
 from focaccia.arch import supported_architectures
 from focaccia.compare import ErrorTypes
+from focaccia.qemu.report import write_validation_failure_report
 from focaccia.qemu.validation_server import start_validation_server
 from focaccia.trace import TraceEnvironment
 
@@ -167,8 +168,8 @@ def validate_backend_options(
             parser.error("--remote and --use-socket select different backends")
         if args.guest_arch is None:
             parser.error("--guest-arch is required with --use-socket")
-        if args.report is not None or args.run_manifest is not None or args.run_input:
-            parser.error("--report and run-manifest verification currently require the GDB backend")
+        if args.run_manifest is not None or args.run_input:
+            parser.error("run-manifest verification currently requires the GDB backend")
         if args.cutpoint_address:
             parser.error("--cutpoint-address currently requires the GDB backend")
     elif args.remote is None:
@@ -312,17 +313,28 @@ def main() -> None:
         logging_level = getattr(logging, args.error_level.upper(), logging.INFO)
         logging.basicConfig(level=logging_level, force=True)
         trace_env = make_plugin_trace_environment(args.guest_arch)
-        start_validation_server(
-            args.symb_trace,
-            args.output,
-            args.use_socket,
-            args.guest_arch,
-            trace_env,
-            verbosity[args.error_level],
-            args.quiet,
-            args.trace_type,
-            args.skip_unmatched,
-        )
+        try:
+            start_validation_server(
+                args.symb_trace,
+                args.output,
+                args.use_socket,
+                args.guest_arch,
+                trace_env,
+                verbosity[args.error_level],
+                args.quiet,
+                args.trace_type,
+                args.skip_unmatched,
+                args.report,
+            )
+        except Exception as error:
+            if args.report is not None and not Path(args.report).is_file():
+                write_validation_failure_report(
+                    args.report,
+                    error,
+                    None,
+                    stage="plugin-validation",
+                )
+            raise
         return
 
     forwarded_arguments = list(sys.argv[1:])
