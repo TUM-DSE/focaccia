@@ -34,6 +34,7 @@ from focaccia.qemu.integration import (
     validate_replay_run_manifest,
 )
 from focaccia.qemu.report import (
+    TerminalReason,
     write_validation_failure_report,
     write_validation_report,
 )
@@ -177,6 +178,31 @@ def collect_conc_trace(
     )
 
 
+def _pending_transition_error(reason: TerminalReason | None) -> Error:
+    if reason is not None and reason.kind == "signal" and reason.pc is not None:
+        return Error(
+            ErrorTypes.CONFIRMED,
+            f"QEMU guest stopped with signal {reason.signal} at {reason.pc:#x} "
+            "before the pending transition produced a destination state.",
+            code="unexpected-guest-signal",
+            subject=reason.signal,
+        )
+    if reason is not None and reason.kind == "signal":
+        return Error(
+            ErrorTypes.INCOMPLETE,
+            f"QEMU guest stopped with signal {reason.signal}, but its faulting "
+            "program counter is unavailable.",
+            code="unlocalized-guest-signal",
+            subject=reason.signal,
+        )
+    return Error(
+        ErrorTypes.INCOMPLETE,
+        "QEMU stopped before the pending transition produced a destination "
+        "state, but no terminal reason is available.",
+        code="terminal-reason-unavailable",
+    )
+
+
 def _parse_run_inputs(values: list[str]) -> dict[str, str]:
     inputs: dict[str, str] = {}
     for value in values:
@@ -247,6 +273,7 @@ def main() -> None:
                 cutpoint_addresses=tuple(args.cutpoint_address),
             )
 
+        terminal_reason = gdb_server.terminal_reason()
         validation_report = compare_symbolic(
             matched.trace,
             diagnostics=matched.diagnostics,
@@ -258,13 +285,7 @@ def main() -> None:
                     "pc": matched.pending_transform.addr,
                     "txl": None,
                     "ref": matched.pending_transform,
-                    "errors": [
-                        Error(
-                            ErrorTypes.CONFIRMED,
-                            "QEMU stopped before the pending transition "
-                            "produced a destination state.",
-                        )
-                    ],
+                    "errors": [_pending_transition_error(terminal_reason)],
                     "snap": source,
                 }
             )
@@ -275,6 +296,7 @@ def main() -> None:
                 validation_report,
                 replay_coverage,
                 matched,
+                terminal_reason,
             )
             report_written = True
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,25 @@ from focaccia.qemu.syscall import ReplayCoverageReport
 
 
 QEMU_VALIDATION_REPORT_SCHEMA = "focaccia-qemu-validation-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalReason:
+    """Structured reason why concrete execution stopped before a boundary."""
+
+    kind: str
+    signal: str
+    pc: int | None
+
+
+def _terminal_reason_document(reason: TerminalReason | None) -> dict[str, object] | None:
+    if reason is None:
+        return None
+    return {
+        "kind": reason.kind,
+        "signal": reason.signal,
+        "pc": reason.pc,
+    }
 
 
 def _error_document(error: object) -> dict[str, object]:
@@ -79,6 +99,7 @@ def validation_report_document(
     report: ValidationReport,
     replay_coverage: ReplayCoverageReport | None,
     match_result: MatchResult | None = None,
+    terminal_reason: TerminalReason | None = None,
 ) -> dict[str, Any]:
     """Convert validation and replay results to the stable JSON schema."""
     severity_counts: Counter[str] = Counter()
@@ -123,6 +144,7 @@ def validation_report_document(
         },
         "replay": replay,
         "trace": _trace_document(match_result),
+        "terminal_reason": _terminal_reason_document(terminal_reason),
     }
 
 
@@ -232,11 +254,17 @@ def write_validation_report(
     report: ValidationReport,
     replay_coverage: ReplayCoverageReport | None,
     match_result: MatchResult | None = None,
+    terminal_reason: TerminalReason | None = None,
 ) -> None:
     """Atomically persist validation, replay, and terminal trace evidence."""
     _write_document(
         path,
-        validation_report_document(report, replay_coverage, match_result),
+        validation_report_document(
+            report,
+            replay_coverage,
+            match_result,
+            terminal_reason,
+        ),
     )
 
 

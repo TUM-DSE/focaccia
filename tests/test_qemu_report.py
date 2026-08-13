@@ -13,6 +13,7 @@ from focaccia.compare import Error, ErrorTypes, ValidationReport
 from focaccia.match import MatchResult
 from focaccia.qemu.report import (
     QEMU_VALIDATION_REPORT_SCHEMA,
+    TerminalReason,
     validation_failure_document,
     validation_report_document,
     write_validation_report,
@@ -281,6 +282,41 @@ def test_structured_qemu_report_records_terminal_trace_evidence():
         "expected_terminal_pc": 0x401010,
         "terminal_reached": True,
     }
+    assert document["terminal_reason"] is None
+
+
+def test_structured_qemu_report_records_guest_signal_and_fault_pc():
+    reason = TerminalReason(kind="signal", signal="SIGSEGV", pc=0x401014)
+
+    document = validation_report_document(
+        ValidationReport(),
+        None,
+        terminal_reason=reason,
+    )
+
+    assert document["terminal_reason"] == {
+        "kind": "signal",
+        "signal": "SIGSEGV",
+        "pc": 0x401014,
+    }
+
+
+def test_pending_transition_requires_localized_signal_for_confirmed_mismatch(monkeypatch):
+    qemu_tool = load_qemu_tool(monkeypatch)
+    localized = qemu_tool._pending_transition_error(
+        TerminalReason(kind="signal", signal="SIGSEGV", pc=0x401014)
+    )
+    unclassified = qemu_tool._pending_transition_error(None)
+
+    assert localized.severity == ErrorTypes.CONFIRMED
+    assert localized.code == "unexpected-guest-signal"
+    assert localized.subject == "SIGSEGV"
+    assert "0x401014" in localized.error_msg
+    assert unclassified.severity == ErrorTypes.INCOMPLETE
+    assert unclassified.code == "terminal-reason-unavailable"
+
+    sys.modules.pop("focaccia.qemu._qemu_tool", None)
+    sys.modules.pop("focaccia.qemu.target", None)
 
 
 def test_structured_qemu_failure_preserves_rejected_coverage():

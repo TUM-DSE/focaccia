@@ -23,6 +23,7 @@ from focaccia.qemu.replay import (
     X86ReplayEngine,
     make_replay_engine,
 )
+from focaccia.qemu.report import TerminalReason
 from focaccia.qemu.state import CachedBackendProgramState, RegisterObservation
 from focaccia.qemu.syscall import (
     ReplayCoverageReport,
@@ -207,6 +208,8 @@ class GDBProgramState(CachedBackendProgramState):
 
 class GDBServerConnector:
     def __init__(self, remote: str):
+        self._terminal_reason: TerminalReason | None = None
+        gdb.events.stop.connect(self._record_stop_event)
         gdb.execute("set pagination 0")
         gdb.execute("set sysroot")
         gdb.execute("set python print-stack full")  # enable complete Python tracebacks
@@ -223,6 +226,22 @@ class GDBServerConnector:
 
         self.arch = supported_architectures[archname]
         self.binary = self._process.progspace.filename
+
+    def _record_stop_event(self, event: object) -> None:
+        if not isinstance(event, gdb.SignalEvent):
+            return
+        try:
+            pc = int(gdb.selected_frame().read_register("pc"))
+        except (RuntimeError, ValueError, gdb.error):
+            pc = None
+        self._terminal_reason = TerminalReason(
+            kind="signal",
+            signal=str(event.stop_signal),
+            pc=pc,
+        )
+
+    def terminal_reason(self) -> TerminalReason | None:
+        return self._terminal_reason
 
     def current_state(self) -> ReadableProgramState:
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)
@@ -345,8 +364,9 @@ class GDBServerConnector:
         pc = gdb.selected_frame().read_register("pc")
         new_pc = pc
         while pc == new_pc:  # Skip instruction chains from REP STOS etc.
+            self._terminal_reason = None
             gdb.execute("si", to_string=True)
-            if self.is_exited():
+            if self._terminal_reason is not None or self.is_exited():
                 raise StopIteration
             new_pc = gdb.selected_frame().read_register("pc")
         return self.current_state()
@@ -663,9 +683,13 @@ class GDBServerStateIterator(GDBServerConnector):
         for addr in addresses:
             breakpoints.append(gdb.Breakpoint(f"*{addr:#x}"))
 
-        gdb.execute("continue")
+        self._terminal_reason = None
+        try:
+            gdb.execute("continue")
+        finally:
+            for bp in breakpoints:
+                bp.delete()
 
-        for bp in breakpoints:
-            bp.delete()
-
+        if self._terminal_reason is not None or self.is_exited():
+            raise StopIteration
         return GDBProgramState(self._process, gdb.selected_frame(), self.arch)

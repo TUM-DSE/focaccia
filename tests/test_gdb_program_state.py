@@ -286,6 +286,38 @@ def test_gdb_state_uses_sparse_exact_memory_cache(monkeypatch):
     sys.modules.pop("focaccia.qemu.target", None)
 
 
+def test_gdb_step_stops_at_first_guest_signal(monkeypatch):
+    target = load_target_module(monkeypatch)
+    fake_gdb = cast(Any, sys.modules["gdb"])
+
+    class FakeSignalEvent:
+        stop_signal = "SIGSEGV"
+
+    fake_gdb.SignalEvent = FakeSignalEvent
+    fake_gdb.selected_frame = lambda: FakeFrame({"pc": FakeValue(0x401014, 8)})
+    connector = object.__new__(target.GDBServerConnector)
+    connector._terminal_reason = None
+    connector.is_exited = lambda: False
+    commands: list[str] = []
+
+    def execute(command: str, **_kwargs: object) -> None:
+        commands.append(command)
+        connector._record_stop_event(FakeSignalEvent())
+
+    fake_gdb.execute = execute
+
+    with pytest.raises(StopIteration):
+        connector._step()
+
+    assert commands == ["si"]
+    assert connector.terminal_reason() == target.TerminalReason(
+        kind="signal",
+        signal="SIGSEGV",
+        pc=0x401014,
+    )
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
 def test_qemu_iterator_accepts_explicit_empty_event_log(monkeypatch):
     target = load_target_module(monkeypatch)
 

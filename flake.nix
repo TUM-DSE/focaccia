@@ -2507,6 +2507,22 @@
       ];
     };
 
+    guestSignalLocalizationCheck = mkStaticUnitCheck {
+      name = "guest-signal-localization";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py::test_gdb_step_stops_at_first_guest_signal"
+        "tests/test_qemu_report.py::test_structured_qemu_report_records_guest_signal_and_fault_pc"
+        "tests/test_qemu_report.py::test_pending_transition_requires_localized_signal_for_confirmed_mismatch"
+      ];
+    };
+
     terminalTransitionValidationCheck = mkStaticUnitCheck {
       name = "terminal-transition-validation";
       ruffTargets = [
@@ -3029,6 +3045,7 @@
       opt-in-unmatched-transform-skipping = optInUnmatchedTransformSkippingCheck;
       complete-cutpoint-source-snapshot = completeCutpointSourceSnapshotCheck;
       linear-cutpoint-composition = linearCutpointCompositionCheck;
+      guest-signal-localization = guestSignalLocalizationCheck;
       terminal-transition-validation = terminalTransitionValidationCheck;
       adaptive-cutpoint-composition = adaptiveCutpointCompositionCheck;
       comparison-shape-diagnostics = comparisonShapeDiagnosticsCheck;
