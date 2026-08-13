@@ -396,6 +396,61 @@ def test_gdb_collector_uses_shared_matcher_and_keeps_terminal_state(monkeypatch)
     assert result.trace[-1].destination.read_pc() == 0x1002
 
 
+def test_gdb_collector_composes_to_declared_cutpoint(monkeypatch):
+    fake_gdb = ModuleType("gdb")
+    for name in ("Breakpoint", "Frame", "Inferior", "Value"):
+        setattr(fake_gdb, name, object)
+    setattr(fake_gdb, "MemoryError", RuntimeError)
+    monkeypatch.setitem(sys.modules, "gdb", fake_gdb)
+    sys.modules.pop("focaccia.qemu.target", None)
+    sys.modules.pop("focaccia.qemu._qemu_tool", None)
+    qemu_tool = importlib.import_module("focaccia.qemu._qemu_tool")
+
+    class FakeGDBStates:
+        class Events:
+            events = ()
+
+        _events = Events()
+
+        def __init__(self):
+            self._initial = True
+            self.run_until_calls = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not self._initial:
+                raise AssertionError("declared cutpoint must avoid intermediate stepping")
+            self._initial = False
+            return state(0x1000)
+
+        def run_until(self, address: int):
+            self.run_until_calls.append(address)
+            return state(address)
+
+        def next_cutpoint_pc(self, matcher):
+            return matcher.current_destination_pc
+
+    gdb_states = FakeGDBStates()
+    try:
+        result = qemu_tool.collect_conc_trace(
+            gdb_states,
+            trace(transform(0x1000, 0x1001), transform(0x1001, 0x1002)),
+            cutpoint_addresses=(0x1002,),
+        )
+    finally:
+        sys.modules.pop("focaccia.qemu._qemu_tool", None)
+        sys.modules.pop("focaccia.qemu.target", None)
+
+    assert gdb_states.run_until_calls == [0x1002]
+    assert result.trace is not None
+    assert result.complete
+    assert len(result.trace) == 1
+    assert result.trace.transforms[0].range == (0x1000, 0x1002)
+    assert "symbolic-transforms-composed" in codes(result)
+
+
 def test_gdb_no_skip_collector_plans_declared_long_block_once(monkeypatch):
     fake_gdb = ModuleType("gdb")
     for name in ("Breakpoint", "Frame", "Inferior", "Value"):

@@ -56,6 +56,7 @@ def collect_conc_trace(
     strace: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
     *,
     skip_unmatched: bool = False,
+    cutpoint_addresses: tuple[int, ...] = (),
 ) -> MatchResult:
     """Collect matched concrete boundaries while preserving the terminal state."""
     matcher = TransitionMatcher(strace, skip_unmatched=skip_unmatched)
@@ -88,12 +89,24 @@ def collect_conc_trace(
         f"{hex(strace.env.stop_address) if strace.env.stop_address is not None else 'end'}"
     )
 
+    cutpoint_index = 0
     while not matcher.done:
         try:
             pc = current_state.read_pc()
         except RegisterAccessError as error:
             matcher.fail_concrete_state(len(retained_states), error)
             break
+
+        while (
+            cutpoint_index < len(cutpoint_addresses)
+            and cutpoint_addresses[cutpoint_index] == pc
+        ):
+            cutpoint_index += 1
+        declared_destination = (
+            cutpoint_addresses[cutpoint_index]
+            if cutpoint_index < len(cutpoint_addresses)
+            else None
+        )
 
         boundary = matcher.observe(pc)
         if boundary is not None:
@@ -107,9 +120,16 @@ def collect_conc_trace(
             ]
             if boundary.outgoing is not None and not skip_unmatched:
                 next_cutpoint = getattr(state_iterator, "next_cutpoint_pc", None)
-                destination_pc = next_cutpoint(matcher) if next_cutpoint is not None else None
+                destination_pc = declared_destination
+                if destination_pc is None and next_cutpoint is not None:
+                    destination_pc = next_cutpoint(matcher)
                 if destination_pc is not None:
                     planned = matcher.plan_destination(destination_pc)
+                    if planned is None and declared_destination is not None:
+                        raise ValueError(
+                            f"Declared cutpoint {hex(destination_pc)} is not a reachable "
+                            "symbolic destination."
+                        )
                     if planned is not None:
                         plans.append(
                             plan_minimal_snapshot(
@@ -141,7 +161,11 @@ def collect_conc_trace(
         if matcher.done:
             break
         try:
-            current_state = next(state_iterator)
+            current_state = (
+                state_iterator.run_until(declared_destination)
+                if declared_destination is not None
+                else next(state_iterator)
+            )
         except StopIteration:
             break
 
@@ -220,6 +244,7 @@ def main() -> None:
                 gdb_server,
                 symb_transforms,
                 skip_unmatched=args.skip_unmatched,
+                cutpoint_addresses=tuple(args.cutpoint_address),
             )
 
         validation_report = compare_symbolic(

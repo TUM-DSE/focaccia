@@ -130,6 +130,17 @@ observe guest state and validate it against a symbolic native trace.
         ),
     )
     parser.add_argument(
+        "--cutpoint-address",
+        action="append",
+        default=[],
+        type=lambda value: int(value, 0),
+        metavar="ADDRESS",
+        help=(
+            "Run directly to this ordered concrete cutpoint while composing all "
+            "intermediate symbolic transforms (GDB backend; repeatable)."
+        ),
+    )
+    parser.add_argument(
         "--report",
         help="Write a versioned JSON validation and replay-coverage report.",
     )
@@ -158,6 +169,8 @@ def validate_backend_options(
             parser.error("--guest-arch is required with --use-socket")
         if args.report is not None or args.run_manifest is not None or args.run_input:
             parser.error("--report and run-manifest verification currently require the GDB backend")
+        if args.cutpoint_address:
+            parser.error("--cutpoint-address currently requires the GDB backend")
     elif args.remote is None:
         parser.error("--remote is required unless --use-socket is specified")
     if args.run_manifest is not None:

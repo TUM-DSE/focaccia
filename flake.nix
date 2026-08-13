@@ -1465,6 +1465,18 @@
       ];
     };
 
+    declaredValidationCutpointsCheck = mkStaticUnitCheck {
+      name = "declared-validation-cutpoints";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py::test_gdb_collector_composes_to_declared_cutpoint"
+      ];
+    };
+
     narrowVectorObservationCheck = mkStaticUnitCheck {
       name = "narrow-vector-observation";
       ruffTargets = [
@@ -2986,6 +2998,7 @@
       linear-successor-planning = linearSuccessorPlanningCheck;
       bounded-no-skip-collector-planning = boundedNoSkipCollectorPlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
+      declared-validation-cutpoints = declaredValidationCutpointsCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       narrow-vector-dependency-planning = narrowVectorDependencyPlanningCheck;
       narrow-vector-validation-evaluation = narrowVectorValidationEvaluationCheck;
