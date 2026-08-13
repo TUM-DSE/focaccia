@@ -1481,6 +1481,18 @@
       ];
     };
 
+    narrowVectorDependencyPlanningCheck = mkStaticUnitCheck {
+      name = "narrow-vector-dependency-planning";
+      ruffTargets = [
+        "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_qemu_snapshot.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_snapshot.py::test_vector_source_planning_preserves_narrow_aliases"
+      ];
+    };
+
     wideRegisterStateSerializationCheck = mkStaticUnitCheck {
       name = "wide-register-state-serialization";
       ruffTargets = [
@@ -2964,6 +2976,7 @@
       bounded-no-skip-collector-planning = boundedNoSkipCollectorPlanningCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
+      narrow-vector-dependency-planning = narrowVectorDependencyPlanningCheck;
       qemu-mmx-observation = qemuMmxObservationCheck;
       undefined-shift-flag-semantics = undefinedShiftFlagSemanticsCheck;
       wide-register-state-serialization = wideRegisterStateSerializationCheck;

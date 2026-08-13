@@ -515,6 +515,43 @@ class SymbolicTransform:
                     accessed_regs.add(canonical)
         return list(accessed_regs)
 
+    def get_validation_input_registers(self) -> list[str]:
+        """Return source aliases needed to validate defined outputs and writes.
+
+        Composition uses canonical base-register equations, but concrete backends
+        should not be asked for an unavailable ZMM register when a retained XMM
+        or YMM expression needs only that narrower architectural alias.
+        """
+        validation_accessors = [
+            accessor
+            for name in self.validation_register_outputs()
+            if (accessor := self.arch.get_reg_accessor(name)) is not None
+        ]
+        expressions = [
+            expression
+            for name, expression in self.changed_regs.items()
+            if (
+                (changed := self.arch.get_reg_accessor(name)) is not None
+                and any(
+                    changed.base_reg == output.base_reg
+                    and changed.mask & output.mask
+                    for output in validation_accessors
+                )
+            )
+        ]
+        expressions.extend(write.address for write in self.memory_writes)
+        expressions.extend(write.value for write in self.memory_writes)
+
+        registers: set[str] = set()
+        for expression in expressions:
+            for node in iter_expression_dag(expression):
+                if not isinstance(node, ExprId) or not isinstance(node.name, str):
+                    continue
+                canonical = self.arch.to_regname(node.name)
+                if canonical is not None:
+                    registers.add(canonical)
+        return sorted(registers)
+
     def get_used_memory_addresses(self) -> list[ExprMem]:
         """Find all memory inputs using an iterative DAG traversal."""
         accessed_mem: dict[tuple[int, int], ExprMem] = {}

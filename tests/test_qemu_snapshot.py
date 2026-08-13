@@ -111,6 +111,26 @@ def test_unavailable_snapshot_values_remain_unknown_with_diagnostics():
         collection.state.read_memory(0x3000, 8)
 
 
+def test_vector_source_planning_preserves_narrow_aliases():
+    current = state(0x1000)
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprId("XMM1", 128): ExprId("XMM1", 128) + ExprId("XMM2", 128),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1004,
+    )
+
+    plan = plan_minimal_snapshot(current, None, transform)
+
+    assert set(plan.registers) == {"XMM1", "XMM2"}
+    assert "ZMM1" not in plan.registers
+    assert "ZMM2" not in plan.registers
+
+
 def test_mmx_source_planning_does_not_request_simd_state():
     current = state(0x1000)
     transform = SymbolicTransform(

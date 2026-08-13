@@ -121,7 +121,7 @@ def plan_minimal_snapshot(
         )
 
     if isinstance(outgoing, SymbolicTransform):
-        registers.update(outgoing.get_used_registers())
+        registers.update(outgoing.get_validation_input_registers())
         memory.extend(
             MemoryDependency(expression, "current")
             for expression in outgoing.get_used_memory_addresses()
