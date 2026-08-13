@@ -442,7 +442,12 @@ class GDBServerConnector:
                 self.write_target_register(register, value)
             self.skip(setup_pc)
             self._terminal_reason = None
-            gdb.execute("si", to_string=True)
+            successor = gdb.Breakpoint(f"*{setup_pc + 2:#x}", temporary=True)
+            try:
+                gdb.execute("continue", to_string=True)
+            finally:
+                if successor.is_valid():
+                    successor.delete()
             if self._terminal_reason is not None or self.is_exited():
                 raise UnsupportedReplayEffect("Initial mmap did not complete normally.")
             stopped_pc = int(gdb.selected_frame().read_register("pc"))

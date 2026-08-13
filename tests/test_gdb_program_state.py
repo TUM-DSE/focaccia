@@ -680,8 +680,22 @@ def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch)
     connector.skip = lambda pc: write_register("rip", pc)
     fake_gdb.selected_frame = lambda: frame
 
+    class TemporaryBreakpoint:
+        def __init__(self, specification: str, *, temporary: bool):
+            assert specification == f"*{syscall_pc + 2:#x}"
+            assert temporary
+            self.valid = True
+
+        def is_valid(self) -> bool:
+            return self.valid
+
+        def delete(self) -> None:
+            self.valid = False
+
+    fake_gdb.Breakpoint = TemporaryBreakpoint
+
     def execute(command: str, **_kwargs: object) -> None:
-        assert command == "si"
+        assert command == "continue"
         registers["pc"] = FakeValue(syscall_pc + 2, 8)
         registers["rax"] = FakeValue(0x3000, 8)
 
