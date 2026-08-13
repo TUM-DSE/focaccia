@@ -60,6 +60,7 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     server = SimpleNamespace(
         binary="/guest",
         replay_coverage_report=lambda: None,
+        terminal_reason=lambda: None,
     )
     comparison = ValidationReport()
     writes = []
@@ -95,7 +96,9 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     monkeypatch.setattr(
         qemu_tool,
         "write_validation_report",
-        lambda path, report, coverage, matched: writes.append((path, report, coverage, matched)),
+        lambda path, report, coverage, matched, reason: writes.append(
+            (path, report, coverage, matched, reason)
+        ),
     )
 
     try:
@@ -108,6 +111,7 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     assert len(writes) == 1
     assert writes[0][:3] == (str(output), comparison, None)
     assert writes[0][3].trace is None
+    assert writes[0][4] is None
 
 
 def test_structured_qemu_report_preserves_validation_and_replay_coverage(tmp_path):

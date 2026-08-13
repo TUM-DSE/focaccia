@@ -2518,6 +2518,7 @@
       ];
       pytestTargets = [
         "tests/test_gdb_program_state.py::test_gdb_step_stops_at_first_guest_signal"
+        "tests/test_qemu_report.py::test_gdb_validation_avoids_timing_output_and_writes_report"
         "tests/test_qemu_report.py::test_structured_qemu_report_records_guest_signal_and_fault_pc"
         "tests/test_qemu_report.py::test_pending_transition_requires_localized_signal_for_confirmed_mismatch"
       ];
