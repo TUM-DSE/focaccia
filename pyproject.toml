@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = "==3.12.*"
 description = "Symbolic Tester for QEMU"
 readme = {file = "README.md", content-type = "text/markdown"}
+license = "BSD-3-Clause"
 authors = [
 	{name = "Theofilos Augoustis", email = "theofilos.augoustis@gmail.com"},
 	{name = "Christian Krinitsin", email="christian.krinitsin@tum.de"},

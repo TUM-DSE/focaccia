@@ -3,6 +3,10 @@
 This repository contains the source code for Focaccia, a comprehensive validator for CPU emulators
 and binary translators.
 
+## License
+
+Focaccia is distributed under the BSD 3-Clause license. See [`LICENSE`](LICENSE).
+
 ## Requirements
 
 Python dependencies are handled via pyproject and uv. We provide first-class support for Nix via our
