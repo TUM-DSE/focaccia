@@ -1,6 +1,6 @@
 """Architecture-specific configuration."""
 
-from .arch import Arch, RegisterDescription as _Reg, SyscallInfo as _Sc
+from .arch import Arch, RegisterDescription as _Reg
 
 archname = 'x86_64'
 
@@ -15,14 +15,14 @@ registers = [
     _Reg(('RDI', 0, 64), ('EDI', 0, 32), ('DI', 0, 16), ('DIL', 0, 8)),
     _Reg(('RBP', 0, 64), ('EBP', 0, 32), ('BP', 0, 16), ('BPL', 0, 8)),
     _Reg(('RSP', 0, 64), ('ESP', 0, 32), ('SP', 0, 16), ('SPL', 0, 8)),
-    _Reg(('R8',  0, 64)),
-    _Reg(('R9',  0, 64)),
-    _Reg(('R10', 0, 64)),
-    _Reg(('R11', 0, 64)),
-    _Reg(('R12', 0, 64)),
-    _Reg(('R13', 0, 64)),
-    _Reg(('R14', 0, 64)),
-    _Reg(('R15', 0, 64)),
+    _Reg(('R8',  0, 64), ('R8D',  0, 32), ('R8W',  0, 16), ('R8B',  0, 8)),
+    _Reg(('R9',  0, 64), ('R9D',  0, 32), ('R9W',  0, 16), ('R9B',  0, 8)),
+    _Reg(('R10', 0, 64), ('R10D', 0, 32), ('R10W', 0, 16), ('R10B', 0, 8)),
+    _Reg(('R11', 0, 64), ('R11D', 0, 32), ('R11W', 0, 16), ('R11B', 0, 8)),
+    _Reg(('R12', 0, 64), ('R12D', 0, 32), ('R12W', 0, 16), ('R12B', 0, 8)),
+    _Reg(('R13', 0, 64), ('R13D', 0, 32), ('R13W', 0, 16), ('R13B', 0, 8)),
+    _Reg(('R14', 0, 64), ('R14D', 0, 32), ('R14W', 0, 16), ('R14B', 0, 8)),
+    _Reg(('R15', 0, 64), ('R15D', 0, 32), ('R15W', 0, 16), ('R15B', 0, 8)),
 
     # RFLAGS
     _Reg(('RFLAGS', 0, 64), ('EFLAGS', 0, 32), ('FLAGS', 0, 16),
@@ -68,15 +68,25 @@ registers = [
     _Reg(('ST6', 0, 80)),
     _Reg(('ST7', 0, 80)),
 
+    # MMX registers alias the physical x87 register file, not the SIMD file.
+    _Reg(('MM0', 0, 64)),
+    _Reg(('MM1', 0, 64)),
+    _Reg(('MM2', 0, 64)),
+    _Reg(('MM3', 0, 64)),
+    _Reg(('MM4', 0, 64)),
+    _Reg(('MM5', 0, 64)),
+    _Reg(('MM6', 0, 64)),
+    _Reg(('MM7', 0, 64)),
+
     # Vector registers
-    _Reg(('ZMM0',  0, 512), ('YMM0',  0, 256), ('XMM0',  0, 128), ('MM0', 0, 64)),
-    _Reg(('ZMM1',  0, 512), ('YMM1',  0, 256), ('XMM1',  0, 128), ('MM1', 0, 64)),
-    _Reg(('ZMM2',  0, 512), ('YMM2',  0, 256), ('XMM2',  0, 128), ('MM2', 0, 64)),
-    _Reg(('ZMM3',  0, 512), ('YMM3',  0, 256), ('XMM3',  0, 128), ('MM3', 0, 64)),
-    _Reg(('ZMM4',  0, 512), ('YMM4',  0, 256), ('XMM4',  0, 128), ('MM4', 0, 64)),
-    _Reg(('ZMM5',  0, 512), ('YMM5',  0, 256), ('XMM5',  0, 128), ('MM5', 0, 64)),
-    _Reg(('ZMM6',  0, 512), ('YMM6',  0, 256), ('XMM6',  0, 128), ('MM6', 0, 64)),
-    _Reg(('ZMM7',  0, 512), ('YMM7',  0, 256), ('XMM7',  0, 128), ('MM7', 0, 64)),
+    _Reg(('ZMM0',  0, 512), ('YMM0',  0, 256), ('XMM0',  0, 128)),
+    _Reg(('ZMM1',  0, 512), ('YMM1',  0, 256), ('XMM1',  0, 128)),
+    _Reg(('ZMM2',  0, 512), ('YMM2',  0, 256), ('XMM2',  0, 128)),
+    _Reg(('ZMM3',  0, 512), ('YMM3',  0, 256), ('XMM3',  0, 128)),
+    _Reg(('ZMM4',  0, 512), ('YMM4',  0, 256), ('XMM4',  0, 128)),
+    _Reg(('ZMM5',  0, 512), ('YMM5',  0, 256), ('XMM5',  0, 128)),
+    _Reg(('ZMM6',  0, 512), ('YMM6',  0, 256), ('XMM6',  0, 128)),
+    _Reg(('ZMM7',  0, 512), ('YMM7',  0, 256), ('XMM7',  0, 128)),
     _Reg(('ZMM8',  0, 512), ('YMM8',  0, 256), ('XMM8',  0, 128)),
     _Reg(('ZMM9',  0, 512), ('YMM9',  0, 256), ('XMM9',  0, 128)),
     _Reg(('ZMM10', 0, 512), ('YMM10', 0, 256), ('XMM10', 0, 128)),
@@ -110,78 +120,38 @@ regnames = [desc.base.base_reg for desc in registers]
 # A dictionary mapping aliases to standard register names.
 regname_aliases = {
     'PC': 'RIP',
-    'NF': 'SF',   # negative flag == sign flag in Miasm?
+    'NF': 'SF',
+    'I_F': 'IF',
+    'IOPL_F': 'IOPL',
+    'I_D': 'ID',
 }
 
+rflag_names = [
+    'CF', 'PF', 'AF', 'ZF', 'SF', 'TF', 'IF', 'DF', 'OF', 'IOPL', 'NT',
+    'RF', 'VM', 'AC', 'VIF', 'VIP', 'ID',
+]
+
 def decompose_rflags(rflags: int) -> dict[str, int]:
-    """Decompose the RFLAGS register's value into its separate flags.
-
-    Uses flag name abbreviation conventions from
-    `https://en.wikipedia.org/wiki/FLAGS_register`.
-
-    :param rflags: The RFLAGS register value.
-    :return: A dictionary mapping Miasm's flag names to their values.
-    """
-    return {
-        # FLAGS
-        'CF':     (rflags & 0x0001) != 0,
-                          # 0x0002   reserved
-        'PF':     (rflags & 0x0004) != 0,
-                          # 0x0008   reserved
-        'AF':     (rflags & 0x0010) != 0,
-                          # 0x0020   reserved
-        'ZF':     (rflags & 0x0040) != 0,
-        'SF':     (rflags & 0x0080) != 0,
-        'TF':     (rflags & 0x0100) != 0,
-        'IF':     (rflags & 0x0200) != 0,
-        'DF':     (rflags & 0x0400) != 0,
-        'OF':     (rflags & 0x0800) != 0,
-        'IOPL':   (rflags & 0x3000) != 0,
-        'NT':     (rflags & 0x4000) != 0,
-
-        # EFLAGS
-        'RF':     (rflags & 0x00010000) != 0,
-        'VM':     (rflags & 0x00020000) != 0,
-        'AC':     (rflags & 0x00040000) != 0,
-        'VIF':    (rflags & 0x00080000) != 0,
-        'VIP':    (rflags & 0x00100000) != 0,
-        'ID':     (rflags & 0x00200000) != 0,
-    }
+    """Decompose RFLAGS fields using the architecture register accessors."""
+    return ArchX86().decompose_register('RFLAGS', rflags, rflag_names)
 
 def compose_rflags(rflags: dict[str, int]) -> int:
-    """Compose separate flags into RFLAGS register's value.
+    """Compose RFLAGS fields using their declared bit widths."""
+    fields = {name: rflags.get(name, 0) for name in rflag_names}
+    return ArchX86().compose_register('RFLAGS', fields)
 
-    Uses flag name abbreviation conventions from
-    `https://en.wikipedia.org/wiki/FLAGS_register`.
 
-    :param rflags: A dictionary mapping Miasm's flag names to their alues.
-    :return: The RFLAGS register value.
-    """
-    return (
-        # FLAGS
-        (0x0001 if rflags.get('CF', 0)   else 0) |
-                        # 0x0002   reserved
-        (0x0004 if rflags.get('PF', 0)   else 0) |
-                        # 0x0008   reserved
-        (0x0010 if rflags.get('AF', 0)   else 0) |
-                        # 0x0020   reserved
-        (0x0040 if rflags.get('ZF', 0)   else 0) |
-        (0x0080 if rflags.get('SF', 0)   else 0) |
-        (0x0100 if rflags.get('TF', 0)   else 0) |
-        (0x0200 if rflags.get('IF', 0)   else 0) |
-        (0x0400 if rflags.get('DF', 0)   else 0) |
-        (0x0800 if rflags.get('OF', 0)   else 0) |
-        (0x3000 if rflags.get('IOPL', 0) else 0) |
-        (0x4000 if rflags.get('NT', 0)   else 0) |
+def mmx_logical_st_name(regname: str, fstat: int) -> str:
+    """Map a physical MMX register to QEMU/GDB's logical x87 stack name."""
+    normalized = regname.upper()
+    if len(normalized) != 3 or not normalized.startswith("MM") or not normalized[2].isdigit():
+        raise ValueError(f"Not an MMX register name: {regname!r}.")
+    index = int(normalized[2])
+    if index >= 8:
+        raise ValueError(f"Not an MMX register name: {regname!r}.")
+    top = fstat >> 11 & 0x7
+    return f"st{(index - top) & 0x7}"
 
-        # EFLAGS
-        (0x00010000 if rflags.get('RF', 0)  else 0) |
-        (0x00020000 if rflags.get('VM', 0)  else 0) |
-        (0x00040000 if rflags.get('AC', 0)  else 0) |
-        (0x00080000 if rflags.get('VIF', 0) else 0) |
-        (0x00100000 if rflags.get('VIP', 0) else 0) |
-        (0x00200000 if rflags.get('ID', 0)  else 0)
-    )
 
 class ArchX86(Arch):
     def __init__(self):
@@ -203,6 +173,19 @@ class ArchX86(Arch):
         # Apply custom register alias rules
         return regname_aliases.get(name.upper(), None)
 
+    def register_write_zero_extends(self, regname: str) -> bool:
+        accessor = self.get_reg_accessor(regname)
+        if accessor is None or accessor.start != 0 or accessor.num_bits != 32:
+            return False
+        return accessor.base_reg in {
+            'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+            'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
+        }
+
+    def register_observation_zero_extends(self, regname: str) -> bool:
+        canonical = self.to_regname(regname)
+        return canonical == 'EFLAGS'
+
     def is_instr_uarch_dep(self, instr: str) -> bool:
         if "XGETBV" in instr.upper():
             return True
@@ -214,13 +197,4 @@ class ArchX86(Arch):
         if instr.upper().startswith("INT"):
             return True
         return False
-
-    def get_em_syscalls(self) -> dict[int, str]:
-        return emulatedSyscalls
-
-    def get_pasthru_syscalls(self) -> dict[int, str]:
-        return passthruSyscalls
-
-    def get_syscall_reg(self) -> str:
-        return 'rax'
 

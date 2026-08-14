@@ -2,19 +2,16 @@
 
 import argparse
 import platform
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Protocol
 
 import focaccia.parser as parser
 from focaccia.arch import supported_architectures, Arch
 from focaccia.compare import compare_simple, compare_symbolic, ErrorTypes
-from focaccia.lldb_target import LLDBConcreteTarget
-from focaccia.match import fold_traces, match_traces
+from focaccia.match import MatchResult, match_transitions
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import collect_symbolic_trace, SymbolicTransform
-from focaccia.utils import print_result, get_envp
-from focaccia.reproducer import Reproducer
-from focaccia.compare import ErrorSeverity
-from focaccia.trace import Trace, TraceEnvironment
+from focaccia.symbolic import SymbolicTraceItem, TraceGap
+from focaccia.utils import ErrorSeverity, print_result, get_envp
+from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 verbosity = {
     'info':    ErrorTypes.INFO,
@@ -30,18 +27,49 @@ concrete_trace_parsers = {
 }
 
 _MatchingAlgorithm = Callable[
-    [list[ProgramState], list[SymbolicTransform]],
-    tuple[list[ProgramState], list[SymbolicTransform]]
+    [
+        Iterable[ProgramState],
+        MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
+    ],
+    MatchResult,
 ]
 
+# Retain the command-line spellings while routing every path through the one
+# order-preserving matcher. The old implementations disagreed on cardinality.
 matching_algorithms: dict[str, _MatchingAlgorithm] = {
-    'none':   lambda c, s: (c, s),
-    'simple': match_traces,
-    'fold':   fold_traces,
+    'none': match_transitions,
+    'simple': match_transitions,
+    'fold': match_transitions,
 }
 
-def collect_concrete_trace(env: TraceEnvironment, breakpoints: Iterable[int]) \
-        -> list[ProgramState]:
+class _ConcreteTraceTarget(Protocol):
+    def set_breakpoint(self, address: int) -> None: ...
+    def is_exited(self) -> bool: ...
+    def record_snapshot(self) -> ProgramState: ...
+    def run(self) -> None: ...
+
+class _SymbolicTraceCollector(Protocol):
+    def trace(self) -> MaterializedTrace[SymbolicTraceItem]: ...
+
+_ConcreteTargetFactory = Callable[[str, list[str], list[str]], _ConcreteTraceTarget]
+_SymbolicTracerFactory = Callable[[TraceEnvironment], _SymbolicTraceCollector]
+
+def _make_local_target(binary: str,
+                       argv: list[str],
+                       envp: list[str]) -> _ConcreteTraceTarget:
+    from focaccia.native.lldb_target import LLDBLocalTarget
+
+    return LLDBLocalTarget(binary, argv, envp)
+
+def _make_symbolic_tracer(env: TraceEnvironment) -> _SymbolicTraceCollector:
+    from focaccia.native.tracer import SymbolicTracer
+
+    return SymbolicTracer(env)
+
+def collect_concrete_trace(
+        env: TraceEnvironment,
+        breakpoints: Iterable[int],
+        target_factory: _ConcreteTargetFactory | None = None) -> list[ProgramState]:
     """Gather snapshots from a native execution via an external debugger.
 
     :param env: Program to execute and the environment in which to execute it.
@@ -50,7 +78,11 @@ def collect_concrete_trace(env: TraceEnvironment, breakpoints: Iterable[int]) \
 
     :return: A list of snapshots gathered from the execution.
     """
-    target = LLDBConcreteTarget(env.binary_name, env.argv, env.envp)
+    if target_factory is None:
+        target_factory = _make_local_target
+    if env.binary_name is None:
+        raise ValueError('A binary is required to collect a concrete trace.')
+    target = target_factory(env.binary_name, list(env.argv), list(env.envp))
 
     # Set breakpoints
     for address in breakpoints:
@@ -63,6 +95,14 @@ def collect_concrete_trace(env: TraceEnvironment, breakpoints: Iterable[int]) \
         target.run()
 
     return snapshots
+
+def collect_symbolic_trace(
+        env: TraceEnvironment,
+        tracer_factory: _SymbolicTracerFactory | None = None,
+) -> MaterializedTrace[SymbolicTraceItem]:
+    if tracer_factory is None:
+        tracer_factory = _make_symbolic_tracer
+    return tracer_factory(env).trace()
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -104,10 +144,9 @@ them to the verifier with the --oracle-trace argument.
     parser.add_argument('--match',
                         choices=list(matching_algorithms.keys()),
                         default='simple',
-                        help='Select an algorithm to match the test trace to'
-                             ' the truth trace. Only applicable if --symbolic'
-                             ' is enabled.'
-                             ' [Default: simple]')
+                        help='Select a matching mode for symbolic validation.'
+                             ' Legacy mode names use the shared transition'
+                             ' matcher. [Default: simple]')
     parser.add_argument('--symbolic',
                         action='store_true',
                         default=False,
@@ -141,15 +180,17 @@ them to the verifier with the --oracle-trace argument.
     return parser.parse_args()
 
 def print_reproducer(result, min_severity: ErrorSeverity, oracle, oracle_args):
+    from focaccia.reproducer import Reproducer
+
     for res in result:
         errs = [e for e in res['errors'] if e.severity >= min_severity]
         #breakpoint()
-        if errs:
+        if errs and not isinstance(res['ref'], TraceGap):
             rep = Reproducer(oracle, oracle_args, res['snap'], res['ref'])
             print(rep.asm())
             return
 
-def get_test_trace(args, arch: Arch) -> Trace[ProgramState]:
+def get_test_trace(args, arch: Arch) -> MaterializedTrace[ProgramState]:
     path = args.test_trace
     parser = concrete_trace_parsers[args.test_trace_type]
     with open(path, 'r') as txl_file:
@@ -164,15 +205,18 @@ def get_truth_env(args) -> TraceEnvironment:
         oracle_env = get_envp()
     return TraceEnvironment(oracle, oracle_args, oracle_env)
 
-def get_symbolic_trace(args):
+def get_symbolic_trace(
+        args,
+        tracer_factory: _SymbolicTracerFactory | None = None,
+) -> MaterializedTrace[SymbolicTraceItem]:
     if args.oracle_program:
         env = get_truth_env(args)
         print('Tracing', env)
-        return collect_symbolic_trace(env)
-    elif args.oracle_trace:
+        return collect_symbolic_trace(env, tracer_factory)
+    if args.oracle_trace:
         with open(args.oracle_trace, 'r') as file:
             return parser.parse_transformations(file)
-    raise AssertionError()
+    raise ValueError('Either an oracle program or oracle trace is required.')
 
 def main():
     args = parse_arguments()
@@ -187,14 +231,18 @@ def main():
 
     # Parse reference trace
     test_trace = get_test_trace(args, arch)
+    test_states = list(test_trace)
 
     # Compare reference trace to a truth
     if args.symbolic:
         symb_trace = get_symbolic_trace(args)
         match = matching_algorithms[args.match]
-        conc, symb = match(test_trace.states, symb_trace.states)
+        matched = match(test_states, symb_trace)
 
-        result = compare_symbolic(conc, symb)
+        result = compare_symbolic(
+            matched.trace,
+            diagnostics=matched.diagnostics,
+        )
         oracle_env = symb_trace.env
     else:
         if not args.oracle_program:
@@ -203,11 +251,11 @@ def main():
             exit(1)
 
         # Record truth states from a concrete execution of the oracle
-        breakpoints = [state.read_register('PC') for state in test_trace]
+        breakpoints = [state.read_register('PC') for state in test_states]
         env = get_truth_env(args)
         truth_trace = collect_concrete_trace(env, breakpoints)
 
-        result = compare_simple(test_trace.states, truth_trace)
+        result = compare_simple(test_states, truth_trace)
         oracle_env = env
 
     if not args.no_verifier:
@@ -217,7 +265,7 @@ def main():
         print_reproducer(result,
                          verbosity[args.error_level],
                          oracle_env.binary_name,
-                         oracle_env.argv)
+                         list(oracle_env.argv))
 
 if __name__ == '__main__':
     main()

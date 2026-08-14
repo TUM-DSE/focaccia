@@ -16,7 +16,9 @@ dependencies = [
 	"miasm",
 	"orjson",
 	"brotli",
+	'msgpack',
 	"pycapnp",
+	"pyroaring",
 	"setuptools",
 	"cpuid @ git+https://github.com/taugoust/cpuid.py.git@master",
 ]
@@ -28,12 +30,16 @@ dev = [
 	"pytest",
 	"pyright",
 ]
+experimental-scheduler = [
+	"python-ptrace",
+]
 
 [project.scripts]
 focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
 validate-qemu = "focaccia.tools.validate_qemu:main"
 capture-transforms = "focaccia.tools.capture_transforms:main"
+rr-qemu-smoke = "focaccia.tools.rr_qemu_smoke:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -46,7 +52,7 @@ environments = [
 ]
 
 [tool.uv.sources]
-miasm = { path = "./miasm" }
+miasm = { git = "https://github.com/taugoust/miasm.git", rev = "3717f96f2f61739768e5e311ac415e7df95911ff" }
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -65,18 +71,157 @@ target-version = ["py312"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py312"
 exclude = ["__pycache__", "result"]
 src = ["src"]
 
+[tool.ruff.lint]
+select = ["F401", "F821"]
+
 [tool.pyright]
 typeCheckingMode = "standard"
-reportMissingImports = true
+include = ["tests"]
+reportCallIssue = "error"
+reportMissingImports = "error"
 reportMissingTypeStubs = false
+reportUndefinedVariable = "error"
+reportUnusedImport = "error"
 useLibraryCodeForTypes = true
 executionEnvironments = [ {root = "src"} ]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not integration'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+markers = [
+	"integration: requires a debugger, emulator, RR replay, or a running guest program; run only from a dedicated flake check",
+]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["focaccia"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_empty = true
+
+[tool.coverage.json]
+pretty_print = true
+
+[tool.focaccia.coverage]
+core_modules = [
+    "src/focaccia/__init__.py",
+    "src/focaccia/arch/__init__.py",
+    "src/focaccia/arch/aarch64.py",
+    "src/focaccia/arch/arch.py",
+    "src/focaccia/arch/x86.py",
+    "src/focaccia/compare.py",
+    "src/focaccia/deterministic.py",
+    "src/focaccia/match.py",
+    "src/focaccia/miasm_util.py",
+    "src/focaccia/persistence.py",
+    "src/focaccia/reproducer.py",
+    "src/focaccia/snapshot.py",
+    "src/focaccia/symbolic.py",
+    "src/focaccia/trace.py",
+    "src/focaccia/utils.py",
+]
+integration_prefixes = [
+    "src/focaccia/cli.py",
+    "src/focaccia/native/",
+    "src/focaccia/parser.py",
+    "src/focaccia/qemu/",
+    "src/focaccia/rr/",
+    "src/focaccia/tools/",
+]
+experimental_prefixes = ["src/focaccia/experimental/"]
+
+[tool.focaccia.coverage.ratchets."src/focaccia/__init__.py"]
+statements = 100
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/__init__.py"]
+statements = 100
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/aarch64.py"]
+statements = 96
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/arch.py"]
+statements = 89
+branches = 70
+
+[tool.focaccia.coverage.ratchets."src/focaccia/arch/x86.py"]
+statements = 92
+branches = 70
+
+[tool.focaccia.coverage.ratchets."src/focaccia/compare.py"]
+statements = 100
+branches = 100
+
+[tool.focaccia.coverage.ratchets."src/focaccia/deterministic.py"]
+statements = 84
+branches = 65
+
+[tool.focaccia.coverage.ratchets."src/focaccia/match.py"]
+statements = 91
+branches = 88
+
+[tool.focaccia.coverage.ratchets."src/focaccia/miasm_util.py"]
+statements = 69
+branches = 55
+
+[tool.focaccia.coverage.ratchets."src/focaccia/persistence.py"]
+statements = 86
+branches = 75
+
+[tool.focaccia.coverage.ratchets."src/focaccia/reproducer.py"]
+statements = 83
+branches = 73
+
+[tool.focaccia.coverage.ratchets."src/focaccia/snapshot.py"]
+statements = 94
+branches = 89
+
+[tool.focaccia.coverage.ratchets."src/focaccia/symbolic.py"]
+statements = 81
+branches = 67
+
+[tool.focaccia.coverage.ratchets."src/focaccia/trace.py"]
+statements = 96
+branches = 84
+
+[tool.focaccia.coverage.ratchets."src/focaccia/utils.py"]
+statements = 58
+branches = 44
+
+[tool.focaccia.mutation]
+minimum_score = 97
+maximum_no_tests = 0
+maximum_skipped = 0
+
+[tool.mutmut]
+# Copy the package so relative imports remain intact, but keep the pilot to one module.
+source_paths = ["src/focaccia"]
+only_mutate = ["src/focaccia/compare.py"]
+# Ensure tests import mutmut's copied source instead of the Nix-installed package.
+pytest_add_cli_args = ["-m", "not integration", "-o", "pythonpath=src"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_compare.py",
+    "tests/test_environment_symbols.py",
+    "tests/test_qemu_report.py",
+    "tests/test_trace_gaps.py",
+]
+use_git_change_detection = false
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.165.2",
+    "mutmut>=3.7.0",
+    "pytest-cov>=7.1.0",
+]
 

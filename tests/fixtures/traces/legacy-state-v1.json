@@ -1,0 +1,22 @@
+{
+  "architecture": "x86_64",
+  "env": {
+    "binary_name": "/tmp/legacy-program",
+    "binary_hash": "legacy-hash",
+    "argv": [],
+    "envp": []
+  },
+  "snapshots": [
+    {
+      "registers": {
+        "RIP": 4096
+      },
+      "memory": [
+        {
+          "range": [8192, 8194],
+          "data": "AQI="
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "env": {
+    "binary_name": "/tmp/legacy-program",
+    "binary_hash": "legacy-hash",
+    "argv": ["argument"],
+    "envp": ["NAME=value"],
+    "start_address": 4096,
+    "stop_address": 4097
+  },
+  "addrs": [4096],
+  "states": [
+    {
+      "arch": "x86_64",
+      "tid": 1,
+      "from_addr": 4096,
+      "to_addr": 4097,
+      "instructions": [],
+      "regs": {},
+      "mem": {}
+    }
+  ]
+}

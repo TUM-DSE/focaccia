@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 
-import sys
 import argparse
 import logging
+from collections.abc import Callable
+from typing import TypeVar, overload
 
 from focaccia import parser, utils
 from focaccia.trace import TraceEnvironment
+from focaccia.native.profiling import (
+    CaptureProfile,
+    TraceProfiler,
+    write_capture_profile,
+)
 from focaccia.native.tracer import SymbolicTracer
 from focaccia.deterministic import DeterministicLog
 
-def main():
+def make_argparser() -> argparse.ArgumentParser:
     prog = argparse.ArgumentParser()
     prog.description = 'Trace an executable concolically to capture symbolic' \
                        ' transformations among instructions.'
@@ -24,7 +30,7 @@ def main():
                       action='store_true',
                       help='Cross-validate symbolic equations with concrete values')
     prog.add_argument('-r', '--remote',
-                      default=False,
+                      default=None,
                       help='Remote target to trace (e.g. 127.0.0.1:12345)')
     prog.add_argument('-l', '--deterministic-log',
                       help='Path of the directory storing the deterministic log produced by RR')
@@ -51,7 +57,82 @@ def main():
                       type=utils.to_num,
                       help='Set a time limit for executing an instruction symbolically, skip'
                            'instruction when limit is exceeded')
-    args = prog.parse_args()
+    prog.add_argument('--out-type',
+                      default='json',
+                      choices=['json', 'msgpack'],
+                      help='Symbolic trace output format')
+    prog.add_argument('--profile-report',
+                      default=None,
+                      help='Write opt-in evaluation timings as JSON')
+    return prog
+
+TracerT = TypeVar('TracerT')
+
+
+@overload
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., SymbolicTracer] = SymbolicTracer,
+    profiler: TraceProfiler | None = None,
+) -> SymbolicTracer: ...
+
+
+@overload
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., TracerT],
+    profiler: TraceProfiler | None = None,
+) -> TracerT: ...
+
+
+def create_symbolic_tracer(
+    args,
+    env: TraceEnvironment,
+    tracer_factory: Callable[..., object] = SymbolicTracer,
+    profiler: TraceProfiler | None = None,
+) -> object:
+    """Create a tracer from CLI options.
+
+    ``--debug`` controls logging only; semantic cross-validation is enabled
+    exclusively by ``--cross-validate``.
+    """
+    return tracer_factory(
+        env,
+        remote=args.remote,
+        cross_validate=args.cross_validate,
+        force=args.force,
+        profiler=profiler,
+    )
+
+
+def _capture_and_serialize(
+    args,
+    tracer,
+    profiler: TraceProfiler | None,
+) -> CaptureProfile | None:
+    trace_started = profiler.start("trace") if profiler is not None else None
+    try:
+        trace = tracer.trace(time_limit=args.insn_time_limit)
+    finally:
+        if profiler is not None:
+            profiler.finish("trace", trace_started)
+
+    serialization_started = (
+        profiler.start("serialization") if profiler is not None else None
+    )
+    try:
+        parser.serialize_transformations(trace, args.output, args.out_type)
+    finally:
+        if profiler is not None:
+            profiler.finish("serialization", serialization_started)
+
+    return None if profiler is None else profiler.snapshot()
+
+
+def main():
+    args = make_argparser().parse_args()
 
     if args.debug:
         logging.basicConfig(level=logging.DEBUG) # will be override by --log-level
@@ -63,20 +144,19 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    detlog = DeterministicLog(args.deterministic_log)
-    if args.deterministic_log and detlog.base_directory is None:
-        raise NotImplementedError(f'Deterministic log {args.deterministic_log} specified but '
-                                   'Focaccia built without deterministic log support')
+    detlog = None
+    if args.deterministic_log:
+        detlog = DeterministicLog(args.deterministic_log)
 
     env = TraceEnvironment(args.binary, args.args, utils.get_envp(), 
                            nondeterminism_log=detlog,
                            start_address=args.start_address,
                            stop_address=args.stop_address)
-    tracer = SymbolicTracer(env, remote=args.remote, cross_validate=args.debug,
-                            force=args.force)
+    profiler = TraceProfiler() if args.profile_report is not None else None
+    tracer = create_symbolic_tracer(args, env, profiler=profiler)
 
-    trace = tracer.trace(time_limit=args.insn_time_limit)
-
-    with open(args.output, 'w') as file:
-        parser.serialize_transformations(trace, file)
+    profile = _capture_and_serialize(args, tracer, profiler)
+    if args.profile_report is not None:
+        assert profile is not None
+        write_capture_profile(args.profile_report, profile)
 

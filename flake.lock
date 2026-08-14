@@ -133,11 +133,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1746540146,
-        "narHash": "sha256-QxdHGNpbicIrw5t6U3x+ZxeY/7IEJ6lYbvsjXmcxFIM=",
+        "lastModified": 1784591072,
+        "narHash": "sha256-zP/WaDxrRu8GANZM61+V2LT/7ycEEdoyLWn7M6WzU7M=",
         "owner": "pyproject-nix",
         "repo": "pyproject.nix",
-        "rev": "e09c10c24ebb955125fda449939bfba664c467fd",
+        "rev": "e3b599ca2e7fcf93d4edf65d7f19bbf6491724f3",
         "type": "github"
       },
       "original": {
@@ -154,14 +154,21 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "path": "qemu/",
-        "type": "path"
+        "lastModified": 1786641041,
+        "narHash": "sha256-brpRRahW8i9zfiwB4EbGerNJsIngNzlt0/HGKwvTTU0=",
+        "ref": "refs/heads/master",
+        "rev": "83e4033ef58f5eb377807e6449115ec9d801d314",
+        "revCount": 120190,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
       },
       "original": {
-        "path": "qemu/",
-        "type": "path"
-      },
-      "parent": []
+        "rev": "83e4033ef58f5eb377807e6449115ec9d801d314",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
+      }
     },
     "root": {
       "inputs": {
@@ -170,7 +177,25 @@
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
         "qemu-submodule": "qemu-submodule",
+        "rr-submodule": "rr-submodule",
         "uv2nix": "uv2nix"
+      }
+    },
+    "rr-submodule": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1716204584,
+        "narHash": "sha256-FudAAkWIe6gv4NYFoe9E0hlgTM70lymBE5Fw/vbehps=",
+        "ref": "refs/heads/master",
+        "rev": "f248913aa51ccf61932145a67e08a1e811953a2b",
+        "revCount": 6801,
+        "type": "git",
+        "url": "https://github.com/rr-debugger/rr.git"
+      },
+      "original": {
+        "rev": "f248913aa51ccf61932145a67e08a1e811953a2b",
+        "type": "git",
+        "url": "https://github.com/rr-debugger/rr.git"
       }
     },
     "systems": {

@@ -11,7 +11,9 @@ out-*/
 __pycache__/
 
 # Dev environment
+.direnv/
 .gdbinit
+mutants/
 
 # Focaccia files
 *.sym

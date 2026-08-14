@@ -11,6 +11,16 @@ flake, which integrates with our Python uv environment via uv2nix.
 We do not support any other build system officially but Focaccia has been known to work on various
 other systems also, as long as its Python dependencies are provided.
 
+For development, the checked-in `.envrc` enters the flake's default development
+shell through nix-direnv. From a checkout with direnv and nix-direnv installed,
+authorize it once:
+
+```bash
+direnv allow
+```
+
+Using `nix develop` directly remains equivalent.
+
 ## How To Use
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.
@@ -21,10 +31,16 @@ A number of additional tools are included to simplify use when validating QEMU:
 `capture-transforms`, `convert-log`, `validate-qemu`, `validation_server`. They enable the following workflow.
 
 ```bash
-capture-transforms -o oracle.trace bug.out
-qemu-x86_64 -g 12345 bug.out &
-validate-qemu --symb-trace oracle.trace --remote localhost:12345
+nix run .#capture-transforms -- -o oracle.trace ./bug.out
+nix run .#qemu-x86_64 -- -g 12345 ./bug.out &
+nix run .#validate-qemu -- --symb-trace oracle.trace --remote localhost:12345
 ```
+
+Focaccia does not collect or print benchmark timings during normal operation. Evaluation harnesses
+that need native component measurements can explicitly pass `--profile-report profile.json` to
+`capture-transforms`; the resulting plain JSON file contains concrete, symbolic, validation, total
+trace, and serialization durations. Trace and serialization wall times are reported separately so
+persistence cost is not included in the measured trace runtime.
 
 The above workflow works for reproducing most QEMU bugs but cannot handle the following two cases:
 
@@ -32,8 +48,13 @@ The above workflow works for reproducing most QEMU bugs but cannot handle the fo
 
 2. Bugs in non-deterministic programs
 
-We provide alternative approaches for dealing with optimization bugs. Focaccia currently does not
-handle bugs in non-deterministic programs.
+We provide alternative approaches for optimization bugs and a bounded, fail-closed x86-64 replay
+path for selected RR-recorded effects. That replay path is narrower than general non-deterministic
+program support.
+
+Concurrent validation is not supported. The historical scheduler source is preserved under
+`focaccia.experimental` for possible redesign, but it has no CLI or flake entry point and is not part
+of the supported QEMU validation path.
 
 ### QEMU Optimization bugs 
 
@@ -44,7 +65,7 @@ the Nix flake.
 It is used as follows:
 
 ```bash
-validate-qemu --symb-trace oracle.trace --use-socket=/tmp/focaccia.sock --guest_arch=arch
+nix run .#validate-qemu -- --symb-trace oracle.trace --use-socket=/tmp/focaccia.sock --guest-arch=arch
 ```
 
 Once the server prints `Listening for QEMU Plugin connection at /tmp/focaccia.sock...`, QEMU can be
@@ -63,9 +84,11 @@ Focaccia includes support for tracing non-deterministic programs using the RR de
 similar workflow:
 
 ```bash
-rr record -o bug.rr.out
-rr replay -s 12345 bug.rr.out
-capture-transforms --remote localhost:12345 --deterministic-log bug.rr.out -o oracle.trace bug.out
+nix run .#rr -- record -n -o bug.rr.out ./bug.out
+nix run .#rr -- replay -s 12345 bug.rr.out
+nix run .#capture-transforms -- \
+  --remote localhost:12345 --deterministic-log bug.rr.out \
+  -o oracle.trace ./bug.out
 ```
 
 Note: the `rr replay` call prints the correct binary name to use when invoking `capture-transforms`,
@@ -75,7 +98,54 @@ Note: `rr record` may fail on Zen and Zen+ AMD CPUs. It is generally possible to
 by specifying flag `-F` but keep in mind that replaying may fail unexpectedly sometimes on such
 CPUs.
 
-Note: we currently do not support validating such programs on QEMU.
+The project now has fixture-backed, fail-closed **x86-64 and AArch64
+single-thread replay engines** for this workflow. Every encountered syscall/RR
+effect is classified as recorded replay, execute-and-reconcile, narrowly safe
+passthrough, or rejection; an unclassified call is never executed on the live
+host. Both engines cover bounded direct and `iovec` outputs, virtual
+descriptors, common file/socket effects, anonymous mapping reconciliation, and
+terminal calls. Both engines validate Linux signal frames, replay recorded
+handler-entry FP/vector state through a typed backend boundary, and have fixture
+models of `rt_sigreturn`; AArch64 coverage is limited to the base FPSIMD context
+and rejects SVE/SME extension records. Variant-dependent `ioctl`, nested
+`recvmsg`/descriptor passing, file-backed mappings, task creation,
+interrupted-syscall restart, and unknown RR events are rejected. Live GDB
+signal-handler delivery on both ISAs also rejects before mutation because the
+current QEMU remote backend cannot atomically establish the complete recorded
+extra-register state.
+
+The flake exposes RR 5.8.0 on both x86-64 and AArch64. This version is
+intentional: RR 5.9's standalone `replay -s` path forces GDB protocol behavior
+even when an external LLDB client connects, while Focaccia's native tracer is
+an LLDB client. RR 5.8 retains trace schema/version 85 and does not contain that
+standalone-server regression. Native AArch64 recording requires an RR-supported
+microarchitecture such as Arm Neoverse. The `qemu-x86_64` app and the bounded
+smoke harness use a static, non-PIE, single-thread x86-64
+`openat`/`read`/`write`/`close` fixture. Inspect that harness's exact plan without
+launching a target:
+
+```bash
+nix run .#rr-qemu-smoke -- \
+  --run-directory "$PWD/focaccia-smoke" --dry-run
+```
+
+On a separately approved native x86-64 tracing runner, omit `--dry-run` to run
+the bounded workflow. The output directory retains the exact command plan,
+RR trace, symbolic oracle, content-bound run manifest, logs, structured
+validation/replay-coverage report, and final result. Existing directories are
+never overwritten. `validate-qemu --report FILE` also persists structured
+coverage for a manual GDB validation; `--run-manifest` plus repeated
+`--run-input NAME=PATH` verifies producer/consumer identities before connecting
+to QEMU.
+
+This harness has not yet been executed as an authoritative project check, so it
+is not an end-to-end support claim. Its x86 fixture build check and the live
+smoke run remain pending on the designated native x86-64 runner. Native
+AArch64 RR record/replay is exposed for oracle capture, and its QEMU-side
+syscall replay baseline is covered by synthetic RR/fake-target checks. No live
+AArch64 RR-to-QEMU run has passed, so this is not an end-to-end AArch64 support
+claim. Live signal-handler delivery, AArch64 SVE/SME signal contexts, concurrent
+replay, and general application replay remain unsupported.
 
 ### Box64
 

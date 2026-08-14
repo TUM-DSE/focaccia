@@ -1,0 +1,26 @@
+{
+  "aarch64_event_count": 2,
+  "format": "synthetic-rr-v85",
+  "schema_id": "0xcaa0b1486c12c629",
+  "x86_event_count": 4,
+  "x86_holes": [
+    [
+      2,
+      2
+    ],
+    [
+      6,
+      1
+    ],
+    [
+      0,
+      1
+    ]
+  ],
+  "x86_known_data": [
+    "4142",
+    "4344",
+    "45",
+    "58595a"
+  ]
+}

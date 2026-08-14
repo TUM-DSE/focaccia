@@ -1,0 +1,45 @@
+{
+  "abi": "linux-x86_64-rt-signal",
+  "sources": [
+    "Linux include/uapi/asm/sigcontext.h",
+    "Linux include/uapi/asm-generic/ucontext.h",
+    "pinned QEMU linux-user/i386/signal.c"
+  ],
+  "pretcode_offset": 0,
+  "ucontext_offset": 8,
+  "ucontext_stack_offset": 16,
+  "ucontext_mcontext_offset": 40,
+  "sigcontext_size": 256,
+  "ucontext_sigmask_offset": 296,
+  "kernel_sigset_size": 8,
+  "siginfo_size": 128,
+  "sigcontext_register_offsets": {
+    "r8": 0,
+    "r9": 8,
+    "r10": 16,
+    "r11": 24,
+    "r12": 32,
+    "r13": 40,
+    "r14": 48,
+    "r15": 56,
+    "rdi": 64,
+    "rsi": 72,
+    "rbp": 80,
+    "rbx": 88,
+    "rdx": 96,
+    "rax": 104,
+    "rcx": 112,
+    "rsp": 120,
+    "rip": 128,
+    "rflags": 136
+  },
+  "sigcontext_segment_offsets": {
+    "cs": 144,
+    "gs": 146,
+    "fs": 148,
+    "ss": 150
+  },
+  "sigcontext_fpstate_offset": 184,
+  "fpstate_min_size": 512,
+  "fpstate_sw_reserved_offset": 464
+}
