@@ -118,6 +118,12 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
     return int(res)
 
 
+def _miasm_mode(arch: Arch) -> int | str:
+    if arch.archname == "aarch64":
+        return arch.endianness[0]
+    return arch.ptr_size
+
+
 class Instruction:
     """An instruction."""
 
@@ -142,14 +148,14 @@ class Instruction:
         """Disassemble an instruction."""
         machine = make_machine(arch)
         assert machine.mn is not None
-        _instr = machine.mn.dis(asm, arch.ptr_size)
+        _instr = machine.mn.dis(asm, _miasm_mode(arch))
         return Instruction(_instr, machine, arch, None)
 
     @staticmethod
     def from_string(s: str, arch: Arch, offset: int = 0, length: int = 0) -> Instruction:
         machine = make_machine(arch)
         assert machine.mn is not None
-        _instr = machine.mn.fromstring(s, LocationDB(), arch.ptr_size)
+        _instr = machine.mn.fromstring(s, LocationDB(), _miasm_mode(arch))
         _instr.offset = offset
         _instr.l = length
         return Instruction(_instr, machine, arch, None)

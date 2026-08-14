@@ -1667,9 +1667,9 @@
         self_kib=$(du -sk ${self} | cut -f1)
         test "$self_kib" -lt 65536
 
-        grep -F 'miasm = { git = "https://github.com/taugoust/miasm.git", rev = "3717f96f2f61739768e5e311ac415e7df95911ff" }' \
+        grep -F 'miasm = { git = "https://github.com/taugoust/miasm.git", rev = "b5e1de0d0a81ec34646d7c0b0b3cc476ef3b9c7f" }' \
           ${self}/pyproject.toml
-        grep -F 'source = { git = "https://github.com/taugoust/miasm.git?rev=3717f96f2f61739768e5e311ac415e7df95911ff#3717f96f2f61739768e5e311ac415e7df95911ff" }' \
+        grep -F 'source = { git = "https://github.com/taugoust/miasm.git?rev=b5e1de0d0a81ec34646d7c0b0b3cc476ef3b9c7f#b5e1de0d0a81ec34646d7c0b0b3cc476ef3b9c7f" }' \
           ${self}/uv.lock
 
         mkdir -p "$out"

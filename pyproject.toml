@@ -53,7 +53,7 @@ environments = [
 ]
 
 [tool.uv.sources]
-miasm = { git = "https://github.com/taugoust/miasm.git", rev = "3717f96f2f61739768e5e311ac415e7df95911ff" }
+miasm = { git = "https://github.com/taugoust/miasm.git", rev = "b5e1de0d0a81ec34646d7c0b0b3cc476ef3b9c7f" }
 
 [tool.hatch.metadata]
 allow-direct-references = true
