@@ -154,20 +154,13 @@ def parse_arancini(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState
     return MaterializedTrace(states, _make_unknown_env(arch))
 
 def parse_box64(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
-    def parse_box64_flags(state: ProgramState, flags_dump: str):
-        flags = ['O', 'D', 'S', 'Z', 'A', 'P', 'C']
-        for i, flag in enumerate(flags):
-            if flag == flags_dump[i]: # Flag is set
-                state.write_register(arch.to_regname(flag + 'F'), 1)
-            elif '-' == flags_dump[i]: # Flag is not set
-                state.write_register(arch.to_regname(flag + 'F'), 0)
-
     trace_string = stream.read()
 
     blocks = re.split(r'(?=\nES=)', trace_string.strip())[1:]
     blocks = [block.strip() for block in blocks if block.strip()]
 
     states = []
+    instructions: list[str] = []
     pattern = (
         r'([A-Z0-9]{2,3}|flags|FLAGS)='
         r'([0-9a-fxODSZAPC?\-]+?)'
@@ -175,16 +168,46 @@ def parse_box64(stream: TextIO, arch: Arch) -> MaterializedTrace[ProgramState]:
     )
     for block in blocks:
         states.append(ProgramState(arch))
+        instruction = re.search(
+            r"\bRIP=[0-9a-f]+(?:\s+[0-9A-F]{2})+\s+([a-z][a-z0-9]*)\b",
+            block,
+        )
+        instructions.append(instruction.group(1) if instruction else "")
         matches = re.findall(pattern, block)
 
         for regname, value in matches:
-            if regname.lower() == "flags":
-                parse_box64_flags(states[-1], value)
+            if regname in {"flags", "FLAGS"}:
+                # Neither legacy form carries boundary-valid flag state.
+                # Uppercase bits may be stale when omitted by the dynarec;
+                # lowercase '?' conflates clear and unavailable bits, and even
+                # emitted letters need not correspond to the printed PC when
+                # hooks observe a fused block. Preserve the unknown state.
                 continue
 
             regname = arch.to_regname(regname)
             if regname is not None:
                 states[-1].write_register(regname, int(value, 16))
 
+    # Box64's dynarec can execute two adjacent pushes before either trace hook
+    # sees the cached RSP. In that specific, directly observable pattern the
+    # second printed record is not an architectural boundary: the first keeps
+    # the pre-pair RSP while the second already contains the post-pair RSP.
+    # Retain the first and successor records so the matcher composes both
+    # transforms across one coarse cutpoint. Do not invent the unavailable
+    # intermediate state.
+    discard: set[int] = set()
+    for index in range(len(states) - 2):
+        if instructions[index : index + 2] != ["push", "push"]:
+            continue
+        rsp_states = states[index : index + 3]
+        if not all(state.test_register("RSP") for state in rsp_states):
+            continue
+        first, second, successor = (
+            state.read_register("RSP") for state in rsp_states
+        )
+        if first == second + 16 and second == successor:
+            discard.add(index + 1)
+
+    states = [state for index, state in enumerate(states) if index not in discard]
     return MaterializedTrace(states, _make_unknown_env(arch))
 

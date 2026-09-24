@@ -1,9 +1,10 @@
 """Versioned trace persistence with strict JSON and streaming MessagePack readers.
 
-Schema-v3 MessagePack files begin with ``MSGPACK_MAGIC`` and encode each map as
+Schema-v3 and newer MessagePack files begin with ``MSGPACK_MAGIC`` and encode each map as
 an unsigned 64-bit big-endian length followed by one MessagePack payload.  This
 framing makes truncation and trailing data distinguishable while retaining
-one-transform-at-a-time decoding.
+one-transform-at-a-time decoding. Schema v5 adds trace-local scope and terminal
+completion evidence; v2/v3/v4 inputs remain usable without inferring completion.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import binascii
 import copy
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from itertools import chain
 from os import PathLike
 from struct import Struct
@@ -26,6 +27,13 @@ from miasm.expression.parser import str_to_expr
 
 from .arch import Arch, supported_architectures
 from .arch.arch import ArchitectureKey
+from .completion import TraceCompletion, TraceScope, validate_trace_metadata
+from .execution import ExecutionOutcome, ExecutionState
+from .no_replay import (
+    ExitAction, ExitScope, NoReplayActionDescriptor, NoReplayActionKind,
+    NoReplayMmapBoundary, NoReplayMprotectBoundary,
+    NoReplaySetFsBoundary, NoReplaySetTidBoundary,
+)
 from .snapshot import ProgramState, RegisterAccessError
 from .symbolic import (
     GapReason,
@@ -38,8 +46,8 @@ from .symbolic import (
 )
 from .trace import MaterializedTrace, TraceEnvironment, TransformStream
 
-SCHEMA_VERSION = 4
-SUPPORTED_SCHEMA_VERSIONS = (2, 3, SCHEMA_VERSION)
+SCHEMA_VERSION = 5
+SUPPORTED_SCHEMA_VERSIONS = (2, 3, 4, SCHEMA_VERSION)
 TraceKind = Literal["states", "transforms"]
 
 MAX_JSON_CHARS = 64 * 1024 * 1024
@@ -128,6 +136,231 @@ class _TraceHeader:
     environment: TraceEnvironment
     addresses: tuple[int, ...] | None
     item_count: int
+    scope: TraceScope = TraceScope.UNSPECIFIED
+    completion: TraceCompletion | None = None
+
+
+def _parse_completion(value: object) -> TraceCompletion | None:
+    if value is None:
+        return None
+    document = _mapping(value, "trace.completion")
+    expected = {"final_pc", "transform_count", "state_count", "outcome", "terminal_action"}
+    if not expected <= set(document) or set(document) - expected - {"no_replay_exit", "no_replay_set_fs", "no_replay_set_tid", "no_replay_mmap", "no_replay_mprotect"}:
+        raise FieldTypeError("Invalid completion fields.")
+    outcome = _mapping(document["outcome"], "trace.completion.outcome")
+    if set(outcome) != {
+        "state", "exit_status", "termination_signal", "stop_signal",
+        "description", "backend_status",
+    }:
+        raise FieldTypeError("Invalid completion outcome fields.")
+    try:
+        parsed = ExecutionOutcome(**{**outcome, "state": ExecutionState(outcome["state"])})
+        action = None
+        if document["terminal_action"] is not None:
+            action_document = _mapping(
+                document["terminal_action"], "trace.completion.terminal_action"
+            )
+            if set(action_document) != {"architecture", "pc", "kind"}:
+                raise FieldTypeError("Invalid terminal action descriptor fields.")
+            action_architecture = _architecture_from_id(
+                action_document["architecture"], "terminal action architecture"
+            )
+            action = NoReplayActionDescriptor(
+                action_architecture.key, action_document["pc"],
+                NoReplayActionKind(action_document["kind"]),
+            )
+        no_replay_exit = None
+        if document.get("no_replay_exit") is not None:
+            exit_document = _mapping(
+                document["no_replay_exit"], "trace.completion.no_replay_exit"
+            )
+            if set(exit_document) != {"argument", "scope"}:
+                raise FieldTypeError("Invalid no-replay exit evidence fields.")
+            no_replay_exit = ExitAction(
+                exit_document["argument"], ExitScope(exit_document["scope"])
+            )
+        boundaries = document.get("no_replay_set_fs", [])
+        if not isinstance(boundaries, list):
+            raise FieldTypeError("No-replay SET_FS evidence must be a list.")
+        set_fs = []
+        for boundary in boundaries:
+            boundary_document = _mapping(boundary, "trace.completion.no_replay_set_fs[]")
+            if set(boundary_document) != {"transform_index", "descriptor", "base"}:
+                raise FieldTypeError("Invalid no-replay SET_FS boundary fields.")
+            descriptor = _mapping(boundary_document["descriptor"], "SET_FS descriptor")
+            if set(descriptor) != {"architecture", "pc", "kind"}:
+                raise FieldTypeError("Invalid no-replay SET_FS descriptor fields.")
+            architecture = _architecture_from_id(descriptor["architecture"], "SET_FS architecture")
+            set_fs.append(NoReplaySetFsBoundary(
+                boundary_document["transform_index"],
+                NoReplayActionDescriptor(architecture.key, descriptor["pc"], NoReplayActionKind(descriptor["kind"])),
+                boundary_document["base"],
+            ))
+        boundaries = document.get("no_replay_set_tid", [])
+        if not isinstance(boundaries, list):
+            raise FieldTypeError("No-replay SET_TID_ADDRESS evidence must be a list.")
+        set_tid = []
+        for boundary in boundaries:
+            boundary_document = _mapping(boundary, "trace.completion.no_replay_set_tid[]")
+            if set(boundary_document) != {"transform_index", "descriptor", "address", "expected_tid"}:
+                raise FieldTypeError("Invalid no-replay SET_TID_ADDRESS boundary fields.")
+            descriptor = _mapping(boundary_document["descriptor"], "SET_TID_ADDRESS descriptor")
+            if set(descriptor) != {"architecture", "pc", "kind"}:
+                raise FieldTypeError("Invalid no-replay SET_TID_ADDRESS descriptor fields.")
+            architecture = _architecture_from_id(descriptor["architecture"], "SET_TID_ADDRESS architecture")
+            set_tid.append(NoReplaySetTidBoundary(
+                boundary_document["transform_index"],
+                NoReplayActionDescriptor(architecture.key, descriptor["pc"], NoReplayActionKind(descriptor["kind"])),
+                boundary_document["address"], boundary_document["expected_tid"],
+            ))
+        boundaries = document.get("no_replay_mmap", [])
+        if not isinstance(boundaries, list):
+            raise FieldTypeError("No-replay mmap evidence must be a list.")
+        mmap = []
+        for boundary in boundaries:
+            boundary_document = _mapping(boundary, "trace.completion.no_replay_mmap[]")
+            if set(boundary_document) != {"transform_index", "descriptor", "length", "occurrence"}:
+                raise FieldTypeError("Invalid no-replay mmap boundary fields.")
+            descriptor = _mapping(boundary_document["descriptor"], "mmap descriptor")
+            if set(descriptor) != {"architecture", "pc", "kind"}:
+                raise FieldTypeError("Invalid no-replay mmap descriptor fields.")
+            architecture = _architecture_from_id(descriptor["architecture"], "mmap architecture")
+            mmap.append(NoReplayMmapBoundary(
+                boundary_document["transform_index"],
+                NoReplayActionDescriptor(architecture.key, descriptor["pc"], NoReplayActionKind(descriptor["kind"])),
+                boundary_document["length"], boundary_document["occurrence"],
+            ))
+        boundaries = document.get("no_replay_mprotect", [])
+        if not isinstance(boundaries, list):
+            raise FieldTypeError("No-replay mprotect evidence must be a list.")
+        mprotect = []
+        for boundary in boundaries:
+            item = _mapping(boundary, "trace.completion.no_replay_mprotect[]")
+            if set(item) != {"transform_index", "descriptor", "occurrence", "offset", "length"}:
+                raise FieldTypeError("Invalid no-replay mprotect boundary fields.")
+            descriptor = _mapping(item["descriptor"], "mprotect descriptor")
+            if set(descriptor) != {"architecture", "pc", "kind"}:
+                raise FieldTypeError("Invalid no-replay mprotect descriptor fields.")
+            architecture = _architecture_from_id(descriptor["architecture"], "mprotect architecture")
+            mprotect.append(NoReplayMprotectBoundary(
+                item["transform_index"],
+                NoReplayActionDescriptor(architecture.key, descriptor["pc"], NoReplayActionKind(descriptor["kind"])),
+                item["occurrence"], item["offset"], item["length"],
+            ))
+        return TraceCompletion(
+            document["final_pc"], document["transform_count"],
+            document["state_count"], parsed, action, no_replay_exit,
+            tuple(set_fs), tuple(set_tid), tuple(mmap), tuple(mprotect),
+        )
+    except (TypeError, ValueError) as error:
+        raise FieldTypeError(f"Invalid completion: {error}") from error
+
+
+def _completion_document(completion: TraceCompletion | None) -> dict | None:
+    if completion is None:
+        return None
+    document = asdict(completion)
+    if not completion.no_replay_set_fs:
+        document.pop("no_replay_set_fs")
+    else:
+        document["no_replay_set_fs"] = [
+            {
+                "transform_index": boundary.transform_index,
+                "descriptor": {
+                    "architecture": _architecture_from_key(boundary.descriptor.architecture).serialized_name,
+                    "pc": boundary.descriptor.pc,
+                    "kind": boundary.descriptor.kind.value,
+                },
+                "base": boundary.base,
+            }
+            for boundary in completion.no_replay_set_fs
+        ]
+    if not completion.no_replay_mprotect:
+        document.pop("no_replay_mprotect")
+    else:
+        document["no_replay_mprotect"] = [
+            {
+                "transform_index": boundary.transform_index,
+                "descriptor": {
+                    "architecture": _architecture_from_key(boundary.descriptor.architecture).serialized_name,
+                    "pc": boundary.descriptor.pc,
+                    "kind": boundary.descriptor.kind.value,
+                },
+                "occurrence": boundary.occurrence,
+                "offset": boundary.offset,
+                "length": boundary.length,
+            }
+            for boundary in completion.no_replay_mprotect
+        ]
+    if not completion.no_replay_mmap:
+        document.pop("no_replay_mmap")
+    else:
+        document["no_replay_mmap"] = [
+            {
+                "transform_index": boundary.transform_index,
+                "descriptor": {
+                    "architecture": _architecture_from_key(boundary.descriptor.architecture).serialized_name,
+                    "pc": boundary.descriptor.pc,
+                    "kind": boundary.descriptor.kind.value,
+                },
+                "length": boundary.length,
+                "occurrence": boundary.occurrence,
+            }
+            for boundary in completion.no_replay_mmap
+        ]
+    if not completion.no_replay_set_tid:
+        document.pop("no_replay_set_tid")
+    else:
+        document["no_replay_set_tid"] = [
+            {
+                "transform_index": boundary.transform_index,
+                "descriptor": {
+                    "architecture": _architecture_from_key(boundary.descriptor.architecture).serialized_name,
+                    "pc": boundary.descriptor.pc,
+                    "kind": boundary.descriptor.kind.value,
+                },
+                "address": boundary.address,
+                "expected_tid": boundary.expected_tid,
+            }
+            for boundary in completion.no_replay_set_tid
+        ]
+    if completion.no_replay_exit is None:
+        document.pop("no_replay_exit")
+    else:
+        document["no_replay_exit"] = {
+            "argument": completion.no_replay_exit.argument,
+            "scope": completion.no_replay_exit.scope.value,
+        }
+    if completion.terminal_action is not None:
+        action = completion.terminal_action
+        document["terminal_action"] = {
+            "architecture": _architecture_from_key(action.architecture).serialized_name,
+            "pc": action.pc,
+            "kind": action.kind.value,
+        }
+    return document
+
+
+def _completion_state_pc(
+    states: Sequence[ProgramState], completion: TraceCompletion | None
+) -> int | None:
+    if not states or completion is None:
+        return None
+    try:
+        return states[-1].read_pc()
+    except RegisterAccessError as error:
+        raise StateParseError("Completion requires a known final live PC.") from error
+
+
+def _validate_completion_binding(
+    completion: TraceCompletion | None, kind: TraceKind,
+    count: int, final_pc: int | None,
+) -> None:
+    if completion is not None:
+        try:
+            completion.validate_binding(kind, count, final_pc)
+        except ValueError as error:
+            raise TraceCardinalityError(str(error)) from error
 
 
 def _required(document: Mapping, key: str, path: str) -> object:
@@ -444,7 +677,25 @@ def _parse_versioned_header(document: Mapping, expected_kind: TraceKind) -> _Tra
         legacy=False,
     )
     addresses = _parse_addresses(_required(document, "addresses", "trace"), item_count, kind)
-    return _TraceHeader(version, kind, architecture, environment, addresses, item_count)
+    scope = TraceScope.UNSPECIFIED
+    completion = None
+    if version >= 5:
+        try:
+            scope = TraceScope(_required(document, "scope", "trace"))
+            completion = _parse_completion(_required(document, "completion", "trace"))
+            validate_trace_metadata(scope, completion)
+        except ValueError as error:
+            raise FieldTypeError(f"Invalid trace completion metadata: {error}") from error
+    _validate_completion_architecture(completion, architecture)
+    return _TraceHeader(version, kind, architecture, environment, addresses, item_count, scope, completion)
+
+
+def _validate_completion_architecture(
+    completion: TraceCompletion | None, architecture: Arch
+) -> None:
+    if completion is not None and completion.terminal_action is not None:
+        if completion.terminal_action.architecture != architecture.key:
+            raise ArchitectureParseError("Terminal action architecture conflicts with trace.")
 
 
 def _header_document(
@@ -453,7 +704,11 @@ def _header_document(
     environment: TraceEnvironment,
     addresses: tuple[int, ...] | None,
     item_count: int,
+    scope: TraceScope = TraceScope.UNSPECIFIED,
+    completion: TraceCompletion | None = None,
 ) -> dict:
+    validate_trace_metadata(scope, completion)
+    _validate_completion_architecture(completion, architecture)
     if item_count > MAX_TRACE_ITEMS:
         raise TraceLimitError(f"Trace exceeds the {MAX_TRACE_ITEMS}-item limit.")
     encoded_addresses = list(addresses) if addresses is not None else None
@@ -462,6 +717,8 @@ def _header_document(
     _parse_environment(encoded_environment, architecture, legacy=False)
     return {
         "schema_version": SCHEMA_VERSION,
+        "scope": scope.value,
+        "completion": _completion_document(completion),
         "trace_kind": kind,
         "architecture": architecture.serialized_name,
         "environment": encoded_environment,
@@ -519,6 +776,11 @@ def _decode_state(
             )
     memory = _list(_required(document, "memory", path), f"{path}.memory")
     state = ProgramState(architecture)
+    if "execution_tid" in document:
+        state.execution_tid = _integer(
+            document["execution_tid"], f"{path}.execution_tid",
+            minimum=1, maximum=(1 << 31) - 1,
+        )
 
     known_masks: dict[str, int] = {}
     known_values: dict[str, int] = {}
@@ -667,6 +929,8 @@ def _encode_state(
         "register_validity": register_validity,
         "memory": memory,
     }
+    if state.execution_tid is not None:
+        document["execution_tid"] = state.execution_tid
     _decode_state(document, architecture, path, legacy=False)
     return document
 
@@ -993,7 +1257,12 @@ def _validate_transform_document(
     return transform
 
 
-def _encode_transform(transform: SymbolicTransform, architecture: Arch, path: str) -> dict:
+def _encode_transform(
+    transform: SymbolicTransform,
+    architecture: Arch,
+    path: str,
+    decode_cache: _TransformDecodeCache | None = None,
+) -> dict:
     document = transform.to_json()
     document.pop("mem", None)
     document["record_kind"] = "transform"
@@ -1003,6 +1272,7 @@ def _encode_transform(transform: SymbolicTransform, architecture: Arch, path: st
         path,
         legacy=False,
         schema_version=SCHEMA_VERSION,
+        decode_cache=decode_cache,
     )
     return document
 
@@ -1168,10 +1438,11 @@ def _encode_symbolic_item(
     item: SymbolicTraceItem,
     architecture: Arch,
     path: str,
+    decode_cache: _TransformDecodeCache | None = None,
 ) -> dict:
     if isinstance(item, TraceGap):
         return _encode_gap(item, architecture, path)
-    return _encode_transform(item, architecture, path)
+    return _encode_transform(item, architecture, path, decode_cache)
 
 
 def _validate_transform_addresses(
@@ -1203,7 +1474,8 @@ def _parse_versioned_states(document: Mapping) -> MaterializedTrace[ProgramState
         for index, item in enumerate(items)
     ]
     _validate_state_addresses(states, header.addresses)
-    return MaterializedTrace(states, header.environment, header.addresses)
+    _validate_completion_binding(header.completion, "states", len(states), _completion_state_pc(states, header.completion))
+    return MaterializedTrace(states, header.environment, header.addresses, scope=header.scope, completion=header.completion)
 
 
 def _parse_legacy_states(document: Mapping) -> MaterializedTrace[ProgramState]:
@@ -1251,7 +1523,8 @@ def serialize_snapshots(
     addresses = snapshots.addresses
     if addresses is not None:
         _validate_state_addresses(snapshots, addresses)
-    document = _header_document("states", architecture, environment, addresses, len(snapshots))
+    _validate_completion_binding(snapshots.completion, "states", len(snapshots), _completion_state_pc(snapshots, snapshots.completion))
+    document = _header_document("states", architecture, environment, addresses, len(snapshots), snapshots.scope, snapshots.completion)
     document["items"] = [
         _encode_state(state, architecture, f"trace.items[{index}]")
         for index, state in enumerate(snapshots)
@@ -1277,7 +1550,8 @@ def _parse_versioned_transforms(document: Mapping) -> MaterializedTrace[Symbolic
         for index, item in enumerate(items)
     ]
     _validate_transform_addresses(transforms, header.addresses)
-    return MaterializedTrace(transforms, header.environment, header.addresses)
+    _validate_completion_binding(header.completion, "transforms", len(transforms), transforms[-1].range[1] if transforms else None)
+    return MaterializedTrace(transforms, header.environment, header.addresses, scope=header.scope, completion=header.completion)
 
 
 def _parse_legacy_transforms(document: Mapping) -> MaterializedTrace[SymbolicTransform]:
@@ -1357,6 +1631,8 @@ def _serialize_transform_json(
     out_file: str | PathLike[str],
 ) -> None:
     architecture, environment, addresses = _transform_trace_metadata(trace)
+    # Cache only parsing, not record validity; every output is still validated.
+    decode_cache = _TransformDecodeCache.bounded()
     items = []
     for index, transform in enumerate(trace):
         if index >= len(addresses):
@@ -1369,13 +1645,19 @@ def _serialize_transform_json(
             raise ArchitectureParseError(
                 f"Transform {index} has architecture {transform.arch}, expected {architecture}."
             )
-        items.append(_encode_symbolic_item(transform, architecture, f"trace.items[{index}]"))
+        items.append(
+            _encode_symbolic_item(
+                transform, architecture, f"trace.items[{index}]", decode_cache
+            )
+        )
     if len(items) != len(addresses):
         raise TraceCardinalityError(
             f"Transform stream ended after {len(items)} items; expected {len(addresses)}."
         )
 
-    document = _header_document("transforms", architecture, environment, addresses, len(items))
+    completion = trace.completion
+    _validate_completion_binding(completion, "transforms", len(items), transform.range[1] if items else None)
+    document = _header_document("transforms", architecture, environment, addresses, len(items), trace.scope, completion)
     document["items"] = items
     with open(out_file, "w") as out_stream:
         out_stream.write(json.dumps(document, option=json.OPT_INDENT_2).decode())
@@ -1399,7 +1681,12 @@ def _serialize_transform_msgpack(
     out_file: str | PathLike[str],
 ) -> None:
     architecture, environment, addresses = _transform_trace_metadata(trace)
-    header = _header_document("transforms", architecture, environment, addresses, len(addresses))
+    # Persist the declaration before streaming frames, but do not expose it to
+    # consumers until both the frame count and EOF have been verified.
+    completion = trace._completion if isinstance(trace, TransformStream) else trace.completion
+    header = _header_document("transforms", architecture, environment, addresses, len(addresses), trace.scope, completion)
+    # One bounded cache per call: no cross-trace architecture/schema state.
+    decode_cache = _TransformDecodeCache.bounded()
     with open(out_file, "wb") as out_stream:
         out_stream.write(MSGPACK_MAGIC)
         _write_msgpack_frame(out_stream, header)
@@ -1419,9 +1706,11 @@ def _serialize_transform_msgpack(
                 transform,
                 architecture,
                 f"trace.items[{index}]",
+                decode_cache,
             )
             _write_msgpack_frame(out_stream, {"item": item})
             count += 1
+        _validate_completion_binding(completion, "transforms", count, transform.range[1] if count else None)
         if count != len(addresses):
             raise TraceCardinalityError(
                 f"Transform stream ended after {count} items; expected {len(addresses)}."
@@ -1459,6 +1748,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
         self._decode_cache = _TransformDecodeCache.bounded()
         self._index = 0
         self._finished = False
+        self._final_pc: int | None = None
 
     def __iter__(self) -> _TransformFrameIterator:
         return self
@@ -1483,6 +1773,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
             try:
                 next(self._frames)
             except StopIteration:
+                _validate_completion_binding(self._header.completion, "transforms", self._index, self._final_pc)
                 self._finished = True
                 raise
             except ParseError:
@@ -1519,6 +1810,7 @@ class _TransformFrameIterator(Iterator[SymbolicTraceItem]):
                 f"expected {hex(expected_address)}."
             )
         self._index += 1
+        self._final_pc = transform.range[1]
         return transform
 
 
@@ -1653,7 +1945,7 @@ def _stream_versioned_transformations(
         frame_key="item",
         legacy=False,
     )
-    return TransformStream(iterator, header.environment, header.addresses)
+    return TransformStream(iterator, header.environment, header.addresses, scope=header.scope, completion=header.completion)
 
 
 def _stream_legacy_transformations(

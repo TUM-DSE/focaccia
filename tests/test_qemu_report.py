@@ -7,10 +7,12 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from miasm.expression.expression import ExprInt, ExprMem
 
 from focaccia.arch import x86
-from focaccia.compare import Error, ErrorTypes, ValidationReport
+from focaccia.compare import Error, ErrorTypes, ValidationReport, compare_symbolic
 from focaccia.match import MatchResult
+from focaccia.completion import TraceScope
 from focaccia.qemu.report import (
     QEMU_VALIDATION_REPORT_SCHEMA,
     TerminalReason,
@@ -55,7 +57,8 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     output = tmp_path / "report.json"
     oracle.write_text("{}")
     trace = SimpleNamespace(
-        env=TraceEnvironment(None, (), (), binary_hash=None, architecture=x86.ArchX86().key)
+        env=TraceEnvironment(None, (), (), binary_hash=None, architecture=x86.ArchX86().key),
+        scope=TraceScope.UNSPECIFIED, completion=None,
     )
     server = SimpleNamespace(
         binary="/guest",
@@ -81,7 +84,9 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     )
     monkeypatch.setattr(qemu_tool, "DeterministicLog", lambda _path: object())
     monkeypatch.setattr(qemu_tool.parser, "parse_transformations", lambda _file: trace)
-    monkeypatch.setattr(qemu_tool, "GDBServerStateIterator", lambda _remote, _log: server)
+    monkeypatch.setattr(
+        qemu_tool, "GDBServerStateIterator", lambda _remote, _log, _binary=None: server
+    )
     monkeypatch.setattr(
         qemu_tool,
         "collect_conc_trace",
@@ -96,7 +101,7 @@ def test_gdb_validation_avoids_timing_output_and_writes_report(
     monkeypatch.setattr(
         qemu_tool,
         "write_validation_report",
-        lambda path, report, coverage, matched, reason: writes.append(
+        lambda path, report, coverage, matched, reason, **_kwargs: writes.append(
             (path, report, coverage, matched, reason)
         ),
     )
@@ -202,7 +207,8 @@ def test_gdb_validation_persists_artifacts_before_renderer_failure(
     states_path = tmp_path / "states.trace"
     oracle.write_text("{}")
     trace = SimpleNamespace(
-        env=TraceEnvironment(None, (), (), binary_hash=None, architecture=x86.ArchX86().key)
+        env=TraceEnvironment(None, (), (), binary_hash=None, architecture=x86.ArchX86().key),
+        scope=TraceScope.UNSPECIFIED, completion=None,
     )
     state = ProgramState(x86.ArchX86())
     state.write_register("RIP", 0x401000)
@@ -234,7 +240,9 @@ def test_gdb_validation_persists_artifacts_before_renderer_failure(
     monkeypatch.setattr(qemu_tool, "decode_gdb_arguments", lambda _environment: arguments)
     monkeypatch.setattr(qemu_tool, "DeterministicLog", lambda _path: object())
     monkeypatch.setattr(qemu_tool.parser, "parse_transformations", lambda _file: trace)
-    monkeypatch.setattr(qemu_tool, "GDBServerStateIterator", lambda _remote, _log: server)
+    monkeypatch.setattr(
+        qemu_tool, "GDBServerStateIterator", lambda _remote, _log, _binary=None: server
+    )
     monkeypatch.setattr(qemu_tool, "collect_conc_trace", lambda *_args, **_kwargs: matched)
     monkeypatch.setattr(qemu_tool, "compare_symbolic", lambda *_args, **_kwargs: ValidationReport())
 
@@ -290,6 +298,34 @@ def test_structured_qemu_report_records_terminal_trace_evidence():
     assert document["terminal_reason"] is None
 
 
+def test_structured_qemu_report_localizes_memory_mismatch():
+    arch = x86.ArchX86()
+    source = ProgramState(arch)
+    source.write_register("RIP", 0x401000)
+    destination = ProgramState(arch)
+    destination.write_register("RIP", 0x401010)
+    destination.write_memory(0x2000, b"\x00\x00")
+    transform = SymbolicTransform(
+        1,
+        {ExprMem(ExprInt(0x2000, 64), 16): ExprInt(0xBEEF, 16)},
+        [],
+        arch,
+        0x401000,
+        0x401010,
+    )
+    environment = TraceEnvironment(None, (), (), binary_hash=None, architecture=arch.key)
+    trace = TransitionTrace((source, destination), (transform,), environment)
+
+    document = validation_report_document(compare_symbolic(trace), None)
+    # Check the persisted representation, not a separately constructed Error fixture.
+    entry = json.loads(json.dumps(document))["validation"]["entries"][0]
+    assert document["status"] == "mismatch"
+    assert entry["pc"] == 0x401000
+    assert entry["errors"][0]["severity"] == "confirmed"
+    assert entry["errors"][0]["code"] == "memory-content-mismatch"
+    assert entry["errors"][0]["subject"] == "0x2000"
+
+
 def test_structured_qemu_report_records_guest_signal_and_fault_pc():
     reason = TerminalReason(kind="signal", signal="SIGSEGV", pc=0x401014)
 
@@ -303,6 +339,15 @@ def test_structured_qemu_report_records_guest_signal_and_fault_pc():
         "kind": "signal",
         "signal": "SIGSEGV",
         "pc": 0x401014,
+        "delivery": {
+            "attempted": False,
+            "state": None,
+            "exit_status": None,
+            "termination_signal": None,
+            "stop_signal": None,
+            "known_terminated": False,
+            "description": None,
+        },
     }
 
 

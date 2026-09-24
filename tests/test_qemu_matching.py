@@ -6,6 +6,7 @@ import pytest
 from miasm.expression.expression import ExprId, ExprInt, ExprMem
 
 from focaccia.arch import x86
+from focaccia.compare import compare_symbolic
 from focaccia.match import TransitionMatcher
 from focaccia.qemu.validation_server import collect_conc_trace
 from focaccia.snapshot import ProgramState, RegisterAccessError
@@ -143,6 +144,45 @@ def test_skip_mode_does_not_compose_candidate_dependencies(monkeypatch):
 
     assert result.trace is not None
     assert isinstance(result.trace.transforms[0], TraceGap)
+
+
+def test_x86_cross_block_source_context_retains_actual_stack_address_inputs():
+    from focaccia.qemu.snapshot import (
+        MemoryDependency, SnapshotPlan, collect_snapshot_plan, plan_x86_scalar_context,
+    )
+
+    original = state(0x1000, rax=0x20)
+    original.write_register("RSP", 0x8000)
+    frozen = collect_snapshot_plan(original, original, plan_x86_scalar_context(original))
+    assert frozen.state.read_register("RSP") == 0x8000
+    assert frozen.state.read_register("RAX") == 0x20
+
+    original.write_register("RSP", 0x9000)
+    original.write_memory(0x8020, b"abcdefgh")
+    incoming = SnapshotPlan(
+        original.arch,
+        (),
+        (MemoryDependency(
+            ExprMem(ExprId("RSP", 64) + ExprId("RAX", 64), 64), "previous"
+        ),),
+    )
+    destination = collect_snapshot_plan(frozen.state, original, incoming)
+
+    assert not destination.issues
+    assert destination.state.read_memory(0x8020, 8) == b"abcdefgh"
+    assert frozen.state.read_register("RSP") == 0x8000
+
+
+def test_x86_source_context_keeps_unavailable_inputs_unknown():
+    from focaccia.qemu.snapshot import collect_snapshot_plan, plan_x86_scalar_context
+    from focaccia.snapshot import RegisterAccessError
+
+    original = state(0x1000)
+    frozen = collect_snapshot_plan(original, original, plan_x86_scalar_context(original))
+
+    assert any(issue.register == "RSP" for issue in frozen.issues)
+    with pytest.raises(RegisterAccessError):
+        frozen.state.read_register("RSP")
 
 
 def test_successor_dependency_planning_does_not_materialize_candidate_prefixes(monkeypatch):
@@ -432,6 +472,9 @@ def test_gdb_collector_composes_to_declared_cutpoint(monkeypatch):
         def next_cutpoint_pc(self, matcher):
             return matcher.current_destination_pc
 
+        def has_pending_no_replay_actions(self):
+            return False
+
     gdb_states = FakeGDBStates()
     try:
         result = qemu_tool.collect_conc_trace(
@@ -449,6 +492,85 @@ def test_gdb_collector_composes_to_declared_cutpoint(monkeypatch):
     assert len(result.trace) == 1
     assert result.trace.transforms[0].range == (0x1000, 0x1002)
     assert "symbolic-transforms-composed" in codes(result)
+
+
+def test_gdb_collector_composes_unobservable_register_into_memory_effect(monkeypatch):
+    fake_gdb = ModuleType("gdb")
+    for name in ("Breakpoint", "Frame", "Inferior", "Value"):
+        setattr(fake_gdb, name, object)
+    setattr(fake_gdb, "MemoryError", RuntimeError)
+    monkeypatch.setitem(sys.modules, "gdb", fake_gdb)
+    sys.modules.pop("focaccia.qemu.target", None)
+    sys.modules.pop("focaccia.qemu._qemu_tool", None)
+    qemu_tool = importlib.import_module("focaccia.qemu._qemu_tool")
+
+    expected = bytes(range(32))
+    actual = expected[:24] + b"\\xff" + expected[25:]
+    load = SymbolicTransform(
+        1,
+        {ExprId("YMM0", 256): ExprMem(ExprInt(0x2000, 64), 256)},
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+    store = SymbolicTransform(
+        1,
+        {ExprMem(ExprInt(0x3000, 64), 256): ExprId("YMM0", 256)},
+        [],
+        ARCH,
+        0x1001,
+        0x1002,
+    )
+
+    class FakeGDBStates:
+        class Events:
+            events = ()
+
+        _events = Events()
+
+        def __init__(self):
+            self._states = iter([
+                state(0x1000, memory={0x2000: expected}),
+                state(0x1001),
+                state(0x1002, memory={0x3000: actual}),
+            ])
+            self.run_until_calls = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._states)
+
+        def run_until(self, address: int):
+            self.run_until_calls.append(address)
+            raise AssertionError("pending actions require ordinary stepping")
+
+        def next_cutpoint_pc(self, matcher):
+            return matcher.current_destination_pc
+
+        def has_pending_no_replay_actions(self):
+            return True
+
+    gdb_states = FakeGDBStates()
+    try:
+        result = qemu_tool.collect_conc_trace(gdb_states, trace(load, store))
+    finally:
+        sys.modules.pop("focaccia.qemu._qemu_tool", None)
+        sys.modules.pop("focaccia.qemu.target", None)
+
+    assert gdb_states.run_until_calls == []
+    assert result.trace is not None
+    assert len(result.trace) == 1
+    assert result.trace.transforms[0].range == (0x1000, 0x1002)
+    assert "symbolic-transforms-composed" in codes(result)
+    report = compare_symbolic(result.trace)
+    assert any(
+        error.code == "memory-content-mismatch"
+        for entry in report
+        for error in entry["errors"]
+    )
 
 
 def test_gdb_no_skip_collector_plans_declared_long_block_once(monkeypatch):

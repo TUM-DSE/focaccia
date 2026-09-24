@@ -67,4 +67,9 @@ def test_aarch64_dczid_has_no_analyzer_host_reader():
     arch = aarch64.ArchAArch64("little")
 
     assert arch.get_reg_reader("DCZID") is None
-    assert arch.to_regname("DCZID_EL0") is None
+    assert arch.get_reg_reader("DCZID_EL0") is None
+    assert arch.to_regname("DCZID_EL0") == "DCZID_EL0"
+    from focaccia.snapshot import RegisterAccessError
+    state = ProgramState(arch)
+    with pytest.raises(RegisterAccessError):
+        state.read_register("DCZID_EL0")  # declaration is not an observation

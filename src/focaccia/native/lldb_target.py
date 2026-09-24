@@ -1,17 +1,47 @@
 import os
 import time
 import logging
+import xml.etree.ElementTree as ET
 
 import lldb
 
 from focaccia.snapshot import ProgramState
 from focaccia.arch import supported_architectures
 from focaccia.native.profiling import TraceProfiler
+from focaccia.execution import ExecutionOutcome, ExecutionState
 
 logger = logging.getLogger('focaccia-lldb-target')
 debug = logger.debug
 info = logger.info
 warn = logger.warning
+
+def _gdb_register_layout(target_xml: str) -> dict[str, tuple[int, int]]:
+    """Return byte offsets/sizes for a complete, contiguous GDB target XML map."""
+    try:
+        root = ET.fromstring(target_xml)
+    except ET.ParseError as error:
+        raise ConcreteRegisterError(f'Malformed GDB target XML: {error}.') from error
+    layout: dict[str, tuple[int, int]] = {}
+    offset = 0
+    expected_regnum = 0
+    for element in root.iter('reg'):
+        name, bits, regnum_text = element.get('name'), element.get('bitsize'), element.get('regnum')
+        if not name or not bits:
+            raise ConcreteRegisterError('GDB target XML register lacks name or width.')
+        try:
+            width_bits = int(bits)
+            regnum = expected_regnum if regnum_text is None else int(regnum_text)
+        except ValueError as error:
+            raise ConcreteRegisterError('GDB target XML has a non-integer register field.') from error
+        if width_bits <= 0 or width_bits % 8 or regnum != expected_regnum or name in layout:
+            raise ConcreteRegisterError('GDB target XML register layout is non-contiguous or invalid.')
+        layout[name] = (offset, width_bits // 8)
+        offset += width_bits // 8
+        expected_regnum += 1
+    if not layout:
+        raise ConcreteRegisterError('GDB target XML contains no registers.')
+    return layout
+
 
 class MemoryMap:
     """Description of a range of mapped memory.
@@ -97,7 +127,7 @@ class LLDBConcreteTarget:
     }
 
     register_retries = {
-        aarch64.archname: {},
+        aarch64.archname: {'dczid_el0': ['DCZID_EL0']},
         x86.archname: {
             "rflags": ["eflags"]
         }
@@ -125,6 +155,10 @@ class LLDBConcreteTarget:
         self.target = target
         self.process = process
         self.profiler = profiler
+        self.execution_tid: int | None = None
+        self._gdb_remote = False
+        self._gdb_hardware_stop = False
+        self._gdb_layout: dict[str, tuple[int, int]] | None = None
 
         self.module = self.target.FindModule(self.target.GetExecutable())
         if not _is_valid(self.module):
@@ -177,9 +211,52 @@ class LLDBConcreteTarget:
         argc = self.target.GetLaunchInfo().GetNumArguments()
         return [launch_info.GetArgumentAtIndex(i) for i in range(argc)]
 
+    def execution_outcome(self) -> ExecutionOutcome:
+        """Observe process metadata without reading any post-exit thread state.
+
+        LLDB 19 Linux reports both exit(15) and SIGTERM termination as status
+        15, with no exit description. Nonzero status is therefore retained as
+        raw evidence, not guessed to be a normal exit or a fatal signal.
+        """
+        if not _is_valid(self.process):
+            return ExecutionOutcome(ExecutionState.UNKNOWN, description='Invalid LLDB process.')
+        state = self.process.GetState()
+        if state == lldb.eStateExited:
+            status = self.process.GetExitStatus()
+            description = self.process.GetExitDescription()
+            return ExecutionOutcome(
+                ExecutionState.EXITED,
+                exit_status=0 if status == 0 else None,
+                backend_status=status,
+                description=description,
+            )
+        if state in {
+            getattr(lldb, name) for name in ('eStateRunning', 'eStateStepping')
+            if hasattr(lldb, name)
+        }:
+            return ExecutionOutcome(ExecutionState.RUNNING)
+        if state in {
+            getattr(lldb, name) for name in ('eStateStopped', 'eStateCrashed', 'eStateSuspended')
+            if hasattr(lldb, name)
+        }:
+            signal = None
+            thread = self.process.GetSelectedThread()
+            if _is_valid(thread) and thread.GetStopReason() == lldb.eStopReasonSignal:
+                if thread.GetStopReasonDataCount() > 0:
+                    value = thread.GetStopReasonDataAtIndex(0)
+                    signal = value if value > 0 else None
+            return ExecutionOutcome(ExecutionState.STOPPED, stop_signal=signal)
+        return ExecutionOutcome(
+            ExecutionState.UNKNOWN, description=self._process_state_description(state)
+        )
+
     def is_exited(self) -> bool:
-        """Return whether the concrete process has exited."""
-        return self.process.GetState() == lldb.eStateExited
+        """Report exit observation only; this does not imply known/successful termination."""
+        return _is_valid(self.process) and self.process.GetState() == lldb.eStateExited
+
+    def _require_live_observation(self) -> None:
+        if self.is_exited():
+            raise ConcreteExecutionError('An exited LLDB process has no readable state.')
 
     @staticmethod
     def _allowed_process_states() -> set[int]:
@@ -265,6 +342,7 @@ class LLDBConcreteTarget:
 
     def run(self):
         """Continue execution of the concrete process."""
+        self._gdb_hardware_stop = False
         profile_start = self._profile_start()
         try:
             state = self.process.GetState()
@@ -284,6 +362,7 @@ class LLDBConcreteTarget:
 
     def step(self):
         """Step forward by a single instruction."""
+        self._gdb_hardware_stop = False
         profile_start = self._profile_start()
         try:
             if self.is_exited():
@@ -326,6 +405,42 @@ class LLDBConcreteTarget:
                 f'Unable to delete LLDB breakpoint {breakpoint_id}.'
             )
 
+    def _send_gdb_packet(self, packet: str) -> str:
+        result = lldb.SBCommandReturnObject()
+        self.interpreter.HandleCommand(f'process plugin packet send {packet}', result)
+        output = result.GetOutput() or ''
+        if 'response:' not in output:
+            detail = result.GetError() or output or 'missing GDB response'
+            raise ConcreteExecutionError(f'GDB packet {packet!r} failed: {detail.strip()}.')
+        return output.split('response:', 1)[1].strip()
+
+    def _run_until_gdb_hardware(self, address: int) -> None:
+        packet = f'Z1,{address:x},1'
+        if self._send_gdb_packet(packet) != 'OK':
+            raise ConcreteExecutionError(f'Unable to install remote hardware breakpoint at {hex(address)}.')
+        primary_error: BaseException | None = None
+        try:
+            self.run()
+            self._gdb_hardware_stop = not self.is_exited()
+            if not self.is_exited() and self.read_pc() != address:
+                raise ConcreteExecutionError(
+                    f'Remote hardware breakpoint expected {hex(address)}, '
+                    f'observed {hex(self.read_pc())}.'
+                )
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                if self._send_gdb_packet(f'z1,{address:x},1') != 'OK':
+                    raise ConcreteExecutionError(
+                        f'Unable to remove remote hardware breakpoint at {hex(address)}.'
+                    )
+            except ConcreteExecutionError as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(str(cleanup_error))
+
     def run_until(self, address: int) -> None:
         """Continue until ``address`` or process exit, always removing the breakpoint."""
         if self.is_exited():
@@ -333,6 +448,9 @@ class LLDBConcreteTarget:
                 f'Cannot run an exited LLDB process to {hex(address)}.'
             )
         if self.read_pc() == address:
+            return
+        if getattr(self, '_gdb_remote', False):
+            self._run_until_gdb_hardware(address)
             return
         breakpoint = self._create_address_breakpoint(address)
         breakpoint_id = breakpoint.GetID()
@@ -365,7 +483,8 @@ class LLDBConcreteTarget:
 
     def record_snapshot(self) -> ProgramState:
         """Record the concrete target's state in a ProgramState object."""
-        state = ProgramState(self.arch)
+        self._require_live_observation()
+        state = ProgramState(self.arch, execution_tid=getattr(self, "execution_tid", None))
 
         # Query and store register state
         for regname in self.arch.regnames:
@@ -402,6 +521,7 @@ class LLDBConcreteTarget:
         :raise ConcreteRegisterError: If no register with the specified name
                                       can be found.
         """
+        self._require_live_observation()
         debug(f'Accessing register {regname}')
 
         thread = self.process.GetSelectedThread()
@@ -462,12 +582,26 @@ class LLDBConcreteTarget:
         return canonical
 
     def _read_scalar_register_value(self, reg: lldb.SBValue, regname: str) -> int:
-        self._validate_register_size(reg, regname)
+        # Linux LLDB can expose a 16-bit x86 selector in a 32/64-bit
+        # container. This is not an architectural alias: validate the entire
+        # scalar below rather than masking away unobserved or nonzero bits.
+        selector_container = (
+            self.archname == self.x86.archname
+            and regname in {'CS', 'DS', 'ES', 'FS', 'GS', 'SS'}
+            and reg.size in (4, 8)
+        )
+        if not selector_container:
+            self._validate_register_size(reg, regname)
         error = lldb.SBError()
         value = reg.GetValueAsUnsigned(error, 0)
         if not _error_succeeded(error):
             raise ConcreteRegisterError(
                 f'Unable to read LLDB register {regname}: {_error_message(error)}.'
+            )
+        if selector_container and not 0 <= value < (1 << 16):
+            raise ConcreteRegisterError(
+                f'LLDB selector {regname} has nonzero upper container bits '
+                f'or an invalid unsigned value: {value}.'
             )
         return value
 
@@ -511,11 +645,74 @@ class LLDBConcreteTarget:
         reg = self._get_register(flags_reg)
         read_name = self._scalar_observation_name(reg, canonical)
         flags_val = self._read_scalar_register_value(reg, read_name)
+        if (
+            getattr(self, '_gdb_remote', False)
+            and getattr(self, '_gdb_hardware_stop', False)
+            and self.archname == self.x86.archname
+        ):
+            # RF is debugger control state injected for a hardware-breakpoint
+            # stop, not an architectural result of the inferior transition.
+            flags_val &= ~(1 << 16)
         return self.flag_register_decompose[self.archname](flags_val)
 
     def read_pc(self) -> int:
         """Read the architecture's canonical program counter."""
         return self.read_register('PC')
+
+    def _read_gdb_target_xml(self) -> str:
+        chunks: list[str] = []
+        offset = 0
+        while True:
+            response = self._send_gdb_packet(
+                f'qXfer:features:read:target.xml:{offset:x},1000'
+            )
+            if not response or response[0] not in 'ml':
+                raise ConcreteRegisterError('Invalid GDB target XML transfer response.')
+            chunk = response[1:]
+            chunks.append(chunk)
+            offset += len(chunk.encode())
+            if response[0] == 'l':
+                return ''.join(chunks)
+
+    def _read_gdb_remote_zmm(self, regname: str) -> int:
+        """Read a ZMM register from GNU gdbserver's bulk register packet."""
+        if not self._gdb_remote or self.archname != self.x86.archname:
+            raise ConcreteRegisterError(f'No remote ZMM fallback for {regname}.')
+        try:
+            index = int(regname[3:])
+        except ValueError as error:
+            raise ConcreteRegisterError(f'Invalid ZMM register {regname}.') from error
+        if not 0 <= index < 32:
+            raise ConcreteRegisterError(f'Invalid ZMM register {regname}.')
+
+        try:
+            encoded = ''.join(self._send_gdb_packet('g').split())
+        except ConcreteExecutionError as error:
+            raise ConcreteRegisterError(f'Unable to read remote {regname}: {error}.') from error
+        try:
+            raw = bytes.fromhex(encoded)
+        except ValueError as error:
+            raise ConcreteRegisterError(
+                f'Unable to decode remote bulk registers for {regname}.'
+            ) from error
+
+        if self._gdb_layout is None:
+            self._gdb_layout = _gdb_register_layout(self._read_gdb_target_xml())
+        component = self._gdb_layout.get(f'zmm{index}h')
+        if component is None or component[1] != 32:
+            raise ConcreteRegisterError(
+                f'GDB target XML lacks a 256-bit zmm{index}h component.'
+            )
+        high_offset, high_size = component
+        high = raw[high_offset:high_offset + high_size]
+        if len(high) != high_size:
+            raise ConcreteRegisterError(
+                f'Short remote bulk register read for {regname}: '
+                f'needed byte {high_offset + high_size}, received {len(raw)}.'
+            )
+        low_reg = self._get_register(f'ymm{index}')
+        low = self._read_wide_register_value(low_reg, f'YMM{index}')
+        return low | int.from_bytes(high, byteorder='little') << 256
 
     def read_register(self, regname: str) -> int:
         """Read the value of a register.
@@ -542,17 +739,49 @@ class LLDBConcreteTarget:
             if reg.size > 8:
                 return self._read_wide_register_value(reg, canonical)
             read_name = self._scalar_observation_name(reg, canonical)
-            return self._read_scalar_register_value(reg, read_name)
+            value = self._read_scalar_register_value(reg, read_name)
+            if (
+                canonical == 'RFLAGS'
+                and getattr(self, '_gdb_remote', False)
+                and getattr(self, '_gdb_hardware_stop', False)
+            ):
+                value &= ~(1 << 16)
+            return value
         except ConcreteRegisterError as err:
+            if canonical.startswith('ZMM'):
+                return self._read_gdb_remote_zmm(canonical)
+            accessor = self.arch.get_reg_accessor(canonical)
             flags_reg = self.arch.to_regname(
                 self.flag_register_names.get(self.archname, '')
             )
-            accessor = self.arch.get_reg_accessor(canonical)
             flags_accessor = (
                 self.arch.get_reg_accessor(flags_reg)
                 if flags_reg is not None
                 else None
             )
+            if (
+                accessor is not None
+                and accessor.base_reg != canonical
+                and accessor.num_bits <= 64
+                and (
+                    flags_accessor is None
+                    or accessor.base_reg != flags_accessor.base_reg
+                )
+            ):
+                # LLDB may resolve disassembly operands to architectural aliases
+                # (notably R11B) that the remote register map does not name.
+                # Read the independently exposed hardware parent and extract
+                # exactly the requested bits; no other parent bits are returned
+                # or inferred.
+                try:
+                    parent = self._get_register(accessor.base_reg.lower())
+                    parent_value = self._read_scalar_register_value(
+                        parent, accessor.base_reg
+                    )
+                except ConcreteRegisterError:
+                    pass
+                else:
+                    return (parent_value & accessor.mask) >> accessor.start
             if (
                 accessor is not None
                 and flags_accessor is not None
@@ -588,6 +817,7 @@ class LLDBConcreteTarget:
 
         :raise ConcreteMemoryError: If unable to read `size` bytes from `addr`.
         """
+        self._require_live_observation()
         err = lldb.SBError()
         if size < 0:
             raise ValueError('A memory read size cannot be negative.')
@@ -619,6 +849,7 @@ class LLDBConcreteTarget:
             )
 
     def get_mappings(self) -> list[MemoryMap]:
+        self._require_live_observation()
         mmap = []
 
         region_list = self.process.GetMemoryRegions()
@@ -715,6 +946,7 @@ class LLDBConcreteTarget:
         return f'{mnemonic.upper()} {operands.upper().replace("0X", "0x")}'
 
     def get_disassembly_bytes(self, addr: int):
+        self._require_live_observation()
         error = lldb.SBError()
         buf = self.process.ReadMemory(addr, 64, error)
         inst = self.target.GetInstructions(lldb.SBAddress(addr, self.target), buf)[0]
@@ -813,4 +1045,5 @@ class LLDBRemoteTarget(LLDBConcreteTarget):
             )
 
         super().__init__(debugger, target, process, profiler)
+        self._gdb_remote = True
 

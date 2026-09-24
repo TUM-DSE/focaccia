@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -13,12 +15,37 @@ from miasm.expression.expression import Expr, ExprId, ExprInt, ExprMem, ExprOp
 from miasm.jitter.csts import EXCEPT_SYSCALL
 
 from focaccia.arch import Arch, x86
+from focaccia.completion import TraceCompletion, TraceScope
+from focaccia.execution import ExecutionOutcome, ExecutionState
+from focaccia.no_replay import (
+    AnonymousMmapAction,
+    ExitAction,
+    UnsupportedNoReplayAction,
+    describe_no_replay_action,
+    no_replay_syscall_opcode,
+    prepare_no_replay_action,
+    require_exit_only_entry,
+    MprotectNoneAction,
+    NoReplayMmapBoundary,
+    NoReplayMprotectBoundary,
+    NoReplaySetFsBoundary,
+    NoReplaySetTidBoundary,
+    require_private_tid_storage,
+    snapshot_set_tid_inputs,
+    validate_set_tid_transition,
+    SetFsAction,
+    SetTidAddressAction,
+    snapshot_set_fs_inputs,
+    validate_set_fs_transition,
+)
+from focaccia.symbolic import allocation_base_symbol
 from focaccia.utils import timebound, TimeoutError
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.snapshot import (
     MemoryAccessError,
     ReadableProgramState,
+    ProgramState,
     RegisterAccessError,
 )
 from focaccia.symbolic import (
@@ -39,6 +66,7 @@ from focaccia.deterministic import (
     DeterministicCursor,
     Event,
     EventSynchronizationError,
+    ExecTask,
     SignalEvent,
     SyscallEvent,
 )
@@ -107,6 +135,8 @@ def _normalized_disassembly_mnemonic(text: str) -> str:
     if not tokens:
         return ""
     mnemonic = tokens[0]
+    if mnemonic in ('B.LO', 'B.HS'):
+        return {'B.LO': 'B.CC', 'B.HS': 'B.CS'}[mnemonic]
     for prefix in ("CMOV", "SET", "J"):
         if mnemonic.startswith(prefix):
             condition = mnemonic[len(prefix) :]
@@ -154,8 +184,10 @@ def _validate_primary_disassembly(
     instruction: Instruction,
     target: LLDBConcreteTarget,
     pc: int,
+    source_bytes: bytes | None = None,
 ) -> None:
-    source_bytes = target.read_instructions(pc, instruction.length)
+    if source_bytes is None:
+        source_bytes = target.read_instructions(pc, instruction.length)
     encoding_error: Exception | None = None
     try:
         decoded_bytes = instruction.to_bytecode()
@@ -164,6 +196,20 @@ def _validate_primary_disassembly(
         encoding_error = err
     if decoded_bytes == source_bytes:
         return
+    if _normalized_disassembly_mnemonic(str(instruction)) in ('VMOVDQA', 'VPXOR', 'VZEROUPPER', 'VXORPS', 'VPTEST'):
+        raise DisassemblyMismatchError(
+            f'AVX extension requires exact supported encoding at {pc:#x}: '
+            f'source={source_bytes.hex()}, encoded={decoded_bytes!r}.'
+        )
+    if (target.arch.archname == 'aarch64'
+            and _normalized_disassembly_mnemonic(str(instruction)) in ('B.CC', 'B.CS')):
+        # Unlike x86 alternate encodings, these B.cond aliases have one exact
+        # imm19/condition encoding. Never accept just a matching mnemonic when
+        # the condition bit, displacement, or opcode bytes disagree.
+        raise DisassemblyMismatchError(
+            f'AArch64 carry-branch encoding disagrees at {pc:#x}: '
+            f'{instruction}, source={source_bytes.hex()}, encoded={decoded_bytes!r}.'
+        )
 
     # Alternate encodings are common (short branches, ignored SIB scale bits,
     # and redundant REX bits). Consult LLDB only on a byte mismatch so the
@@ -189,12 +235,69 @@ def _validate_primary_disassembly(
     )
 
 
+class _DisassemblyVerificationCache:
+    """Bounded successful verification facts owned by one trace/context/target.
+
+    Decoding is deliberately NOT cached: Miasm instructions and location bindings
+    are mutable. Re-decode and read current instruction bytes on every visit, and
+    retain only verification facts, never instruction objects or fallback results.
+    The pinned decoder's interpretation of bytes is fixed within this context;
+    resolved text additionally distinguishes changes to location bindings.
+    """
+
+    def __init__(
+        self, ctx: DisassemblyContext, target: LLDBConcreteTarget, max_entries: int = 4096
+    ):
+        if max_entries < 1:
+            raise ValueError("Disassembly verification cache must have positive capacity.")
+        self._ctx = ctx
+        self._target = target
+        self._max_entries = max_entries
+        self._verified: OrderedDict[
+            tuple[Arch, Arch, Arch, int, int, int, bytes, str], None
+        ] = OrderedDict()
+
+    def validate(
+        self,
+        ctx: DisassemblyContext,
+        target: LLDBConcreteTarget,
+        instruction: Instruction,
+        pc: int,
+    ) -> None:
+        if ctx is not self._ctx or target is not self._target:
+            raise RuntimeError("Disassembly verification cache belongs to another trace context.")
+        source_bytes = target.read_instructions(pc, instruction.length)
+        key = (
+            ctx.arch,
+            target.arch,
+            instruction.arch,
+            pc,
+            instruction.addr,
+            instruction.length,
+            source_bytes,
+            str(instruction),
+        )
+        if key in self._verified:
+            self._verified.move_to_end(key)
+            return
+        _validate_primary_disassembly(instruction, target, pc, source_bytes)
+        self._verified[key] = None
+        if len(self._verified) > self._max_entries:
+            self._verified.popitem(last=False)
+
+
 def _disassemble_instruction(
-    ctx: DisassemblyContext, target: LLDBConcreteTarget, pc: int
+    ctx: DisassemblyContext,
+    target: LLDBConcreteTarget,
+    pc: int,
+    verification_cache: _DisassemblyVerificationCache | None = None,
 ) -> Instruction:
     try:
         instruction = ctx.disassemble(pc)
-        _validate_primary_disassembly(instruction, target, pc)
+        if verification_cache is None:
+            _validate_primary_disassembly(instruction, target, pc)
+        else:
+            verification_cache.validate(ctx, target, instruction, pc)
         return instruction
     except (
         Disasm_Exception,
@@ -208,12 +311,16 @@ def _disassemble_instruction(
             disassembly = target.get_disassembly(pc)
             if not disassembly.strip():
                 raise ConcreteExecutionError(f"LLDB returned empty disassembly at {hex(pc)}.")
-            return Instruction.from_string(
+            fallback = Instruction.from_string(
                 disassembly,
                 ctx.arch,
                 pc,
                 target.get_instruction_size(pc),
             )
+            if (ctx.arch.archname == 'aarch64'
+                    and _normalized_disassembly_mnemonic(str(fallback)) in ('B.CC', 'B.CS')):
+                _validate_primary_disassembly(fallback, target, pc)
+            return fallback
         except (
             Disasm_Exception,
             ConcreteExecutionError,
@@ -222,6 +329,73 @@ def _disassemble_instruction(
             NotImplementedError,
         ) as fallback_error:
             raise DisassemblyError(pc, primary_error, fallback_error) from fallback_error
+
+
+def _consume_native_exec_bootstrap(
+    env: TraceEnvironment,
+    target: ReadableProgramState,
+    cursor: DeterministicCursor[ReadableProgramState],
+) -> None:
+    """Bind RR's pre-program setup to this observed ELF entry, not a trace gap.
+
+    Only a successful x86-64 exec of the requested static executable permits
+    excluding earlier process-image actions. Every event after that boundary
+    remains in the ordinary cursor, including unsupported bookkeeping/effects.
+    """
+    if env.detlog is None or target.arch.archname != "x86_64":
+        return
+    entry = target.read_pc()
+    matches = [
+        (position, pre, post)
+        for position, pre in enumerate(cursor.events[:-1])
+        if isinstance(pre, SyscallEvent)
+        and isinstance((post := cursor.events[position + 1]), SyscallEvent)
+        and pre.syscall_number == post.syscall_number == 59
+        and post.syscall_state == "exiting"
+        and post.pc == entry
+    ]
+    if not matches:
+        return
+    if len(matches) != 1:
+        raise EventSynchronizationError("Ambiguous native initial exec boundary.")
+    position, pre, post = matches[0]
+    if (
+        pre.syscall_state not in ("entering", "enteringPtrace")
+        or pre.failed_during_preparation or post.failed_during_preparation
+        or pre.arch != target.arch or post.arch != target.arch
+        or pre.tid != post.tid or not match_event(post, target)
+    ):
+        raise EventSynchronizationError("Native initial exec does not match the observed entry state.")
+    tasks = [
+        task for task in env.detlog.tasks()
+        if isinstance(task, ExecTask) and task.event_count == post.event_count
+    ]
+    if len(tasks) != 1 or env.binary_name is None:
+        raise EventSynchronizationError("Native initial exec requires one bound executable task.")
+    task = tasks[0]
+    binary = Path(env.binary_name).resolve()
+    if (
+        task.tid != post.tid
+        or Path(os.fsdecode(task.filename)).resolve() != binary
+        or task.commandline != (os.fsencode(env.binary_name), *(os.fsencode(arg) for arg in env.argv))
+        or task.interpreter_base_address != 0 or task.interpreter_name
+    ):
+        raise EventSynchronizationError("Native initial exec executable/arguments identity mismatch.")
+    from miasm.analysis.binary import Container
+    from miasm.core.locationdb import LocationDB
+    from focaccia.utils import file_hash
+
+    with binary.open("rb") as stream:
+        image = Container.from_stream(stream, LocationDB())
+    if (
+        image.arch != "x86_64" or image.entry_point != entry
+        or env.binary_hash is None or file_hash(str(binary)) != env.binary_hash
+    ):
+        raise EventSynchronizationError("Native initial exec does not match the requested ELF entry/hash.")
+    # The verified exec establishes the initial program state. Bootstrap actions
+    # belong to the replaced process image; no post-entry action is skipped.
+    cursor.state = CursorState.SYNCHRONIZED
+    cursor.skip(position + 2)
 
 
 def _events_for_environment(env: TraceEnvironment) -> tuple[Event, ...]:
@@ -448,6 +622,84 @@ def _specialize_observed_lsl_outputs(
     return specialized
 
 
+def _outcome_for_verified_exit_action(
+    action: ExitAction,
+    outcome: ExecutionOutcome,
+) -> ExecutionOutcome:
+    """Bind LLDB's ambiguous raw status to an exit syscall executed at its live boundary."""
+    if outcome.state is not ExecutionState.EXITED:
+        raise ValidationError("Terminal execution has no observed exit outcome.")
+    if outcome.termination_signal is not None:
+        raise ValidationError("Exit action ended with a termination signal.")
+    if outcome.exit_status is not None:
+        action.validate_status(outcome.exit_status)
+        return outcome
+    if outcome.backend_status != action.status:
+        raise UnsupportedNoReplayAction(
+            "Exit action status does not match the backend's ambiguous terminal status."
+        )
+    return ExecutionOutcome(
+        ExecutionState.EXITED,
+        exit_status=action.status,
+        description=outcome.description,
+        backend_status=outcome.backend_status,
+    )
+
+
+def _architectural_outputs_for_observed_popf(
+    outputs: dict[Expr, Expr],
+    instruction: Instruction,
+    state: ReadableProgramState,
+) -> dict[Expr, Expr]:
+    """Apply userspace POPF privilege rules and remove only inactive trap control."""
+    if str(instruction).split(maxsplit=1)[0].upper() not in {
+        "POPF",
+        "POPFD",
+        "POPFQ",
+        "POPFW",
+    }:
+        return outputs
+
+    # Native tracing observes a Linux userspace process at CPL 3. POPF cannot
+    # change IOPL outside CPL 0, while IF is preserved only when CPL > IOPL.
+    # Read the independent architectural pre-state instead of assuming the
+    # usual Linux IOPL=0: userspace may legitimately run with IOPL=3.
+    normalized = dict(outputs)
+    interrupt_enable = ExprId("i_f", 1)
+    io_privilege = ExprId("iopl", 2)
+    observed_iopl = state.read_register("IOPL")
+    if type(observed_iopl) is not int or not 0 <= observed_iopl <= 3:
+        raise SymbolicCompositionError("POPF requires a known two-bit pre-state IOPL.")
+    if interrupt_enable in normalized and observed_iopl < 3:
+        normalized[interrupt_enable] = interrupt_enable
+    if io_privilege in normalized:
+        normalized[io_privilege] = io_privilege
+
+    marker = ExprId("exception_flags", 32)
+    control = normalized.get(marker)
+    if control is None:
+        return normalized
+
+    # Miasm uses this internal destination to request a trap when POPF enables
+    # TF. It is not architectural CPU state. At this debugger-confirmed live
+    # instruction boundary there is no pending Miasm exception state, so zero
+    # is the explicit initial control value. Only discard the marker when the
+    # exact control equation proves that this execution requests no new trap.
+    # Flag and stack outputs remain and
+    # are independently cross-validated against the observed post-state.
+    observed = eval_symbol(
+        control.replace_expr({marker: ExprInt(0, marker.size)}),
+        state,
+    )
+    if observed != 0:
+        return normalized
+    return {
+        destination: value
+        for destination, value in normalized.items()
+        if destination != marker
+    }
+
+
 def _architectural_outputs_for_observed_division(
     outputs: dict[Expr, Expr],
     instruction: Instruction,
@@ -574,6 +826,9 @@ class SpeculativeTracer(ReadableProgramState):
         self._register_cache: dict[str, int] = {}
         self._memory_cache: dict[MemoryCacheKey, bytes] = {}
         self._flags_cache: dict[str, int | bool] | None = None
+        # Native hardware observation only; never serialized as an emulator
+        # input or installed in the independent QEMU backend.
+        self._native_dczid_observation: tuple[int, int, int] | None = None
 
     @property
     def speculative_pc(self) -> int | None:
@@ -732,6 +987,11 @@ class SpeculativeTracer(ReadableProgramState):
         if canonical is None:
             raise RegisterAccessError(reg, f"Not a register name: {reg}")
         self.progress_execution()
+        if canonical == 'DCZID_EL0' and self._native_dczid_observation is not None:
+            tid, value, _ = self._native_dczid_observation
+            if self.target.get_current_tid() != tid:
+                raise ConcreteRegisterError('Native DCZID observation belongs to a different task.')
+            return value
         if canonical not in self._register_cache:
             self._register_cache[canonical] = self.target.read_register(canonical)
         return self._register_cache[canonical]
@@ -802,7 +1062,11 @@ class SymbolicTracer:
         force: bool = False,
         cross_validate: bool = False,
         profiler: TraceProfiler | None = None,
+        whole_program: bool = False,
     ):
+        if whole_program and (env.start_address is not None or env.stop_address is not None):
+            raise ValueError("Whole-program capture prohibits witness bounds.")
+        self.whole_program = whole_program
         self.env = env
         self.force = force
         self.remote = remote
@@ -847,11 +1111,72 @@ class SymbolicTracer:
 
         return target
 
+    def _observe_native_dczid_mrs(self, instruction: Instruction, tid: int) -> SymbolicTransform | None:
+        """Use the native oracle's actual MRS as a bounded hardware observation.
+
+        Linux LLDB does not expose this system register. Native hardware, not
+        an emulator result, is the oracle: the destination establishes the
+        environmental input. We check PC and preserved GPR/flags, then validate
+        the MRS equation against a frozen source augmented with that observation.
+        The retained equation stays symbolic; QEMU must independently read its
+        own DCZID. This does not independently prove native MRS hardware correct.
+        No injected code, target register writes, host queries or double-step.
+        """
+        if (self.remote is not None or self.env.detlog is not None
+                or not self.whole_program or self.target.arch.archname != 'aarch64'
+                or self.target.arch.endianness != 'little'
+                or instruction.instr.name != 'MRS'):
+            return None
+        encoded = instruction.to_bytecode()
+        word = int.from_bytes(encoded, 'little')
+        if len(encoded) != 4 or word & 0xFFFFFFE0 != 0xD53B00E0:
+            return None
+        self.target.progress_execution()
+        pc = self.target.read_pc()
+        destination = word & 31
+        if destination == 31:
+            raise UnsupportedNoReplayAction('MRS DCZID to XZR cannot establish a native observation.')
+        if pc != instruction.addr or instruction.length != 4 or self.target.read_memory(pc, 4) != encoded:
+            raise ValidationError('Native DCZID instruction identity changed before observation.')
+        if self.target.process.GetNumThreads() != 1 or self.target.get_current_tid() != tid:
+            raise UnsupportedNoReplayAction('Native DCZID observation requires one stable native task.')
+        before = ProgramState(self.target.arch)
+        preserved = ('SP', 'CPSR', *[f'X{i}' for i in range(31) if i != destination])
+        for name in ('PC', f'X{destination}', *preserved):
+            before.write_register(name, self.target.read_register(name))
+        self.target.step()
+        if self.target.is_exited() or self.target.read_pc() != pc + 4 or self.target.get_current_tid() != tid:
+            raise ValidationError('Native DCZID MRS did not reach its immediate live destination.')
+        for name in preserved:
+            if self.target.read_register(name) != before.read_register(name):
+                raise ValidationError(f'Native DCZID MRS changed preserved {name}.')
+        observed = self.target.read_register(f'X{destination}')
+        if not 0 <= observed < 32:
+            raise UnsupportedNoReplayAction('Native DCZID has unsupported nonzero reserved bits.')
+        previous = self.target._native_dczid_observation
+        if previous is not None and previous[:2] != (tid, observed):
+            raise UnsupportedNoReplayAction('Native DCZID context changed between hardware observations.')
+        self.target._native_dczid_observation = (tid, observed, pc)
+        info(f'Observed native DCZID_EL0={observed:#x} from actual MRS at {pc:#x}, task {tid}.')
+        before.write_register('DCZID_EL0', observed)
+        transform = SymbolicTransform(
+            tid, {ExprId(f'X{destination}', 64): ExprId('DCZID_EL0', 64)},
+            [instruction], self.target.arch, pc, pc + 4,
+        )
+        # Source is frozen BEFORE the one instruction step. The observed value
+        # adds only its hardware environment; it cannot replace other inputs.
+        self.validate(instruction, transform, transform.eval_validation_register_transforms(before), {})
+        return transform
+
     def predict_next_state(self, instruction: Instruction, transform: SymbolicTransform):
-        debug(f"Evaluating register and memory transforms for {instruction} to cross-validate")
-        predicted_regs = transform.eval_validation_register_transforms(self.target)
-        predicted_mems = transform.eval_memory_transforms(self.target)
-        return predicted_regs, predicted_mems
+        started = self._profile_start("validation")
+        try:
+            debug(f"Evaluating register and memory transforms for {instruction} to cross-validate")
+            predicted_regs = transform.eval_validation_register_transforms(self.target)
+            predicted_mems = transform.eval_memory_transforms(self.target)
+            return predicted_regs, predicted_mems
+        finally:
+            self._profile_finish("validation", started)
 
     def validate(
         self,
@@ -863,7 +1188,11 @@ class SymbolicTracer:
         # Verify last generated transform by comparing concrete state against
         # predicted values.
         if self.target.is_exited():
-            return
+            raise ValidationError(
+                "Cannot cross-validate a state transition after process exit: "
+                "the destination state is unavailable. Terminal actions require "
+                "separate outcome validation."
+            )
 
         profile_start = self._profile_start("validation")
         try:
@@ -936,23 +1265,51 @@ class SymbolicTracer:
         )
 
     def trace(self, time_limit: int | None = None) -> MaterializedTrace[SymbolicTraceItem]:
+        profiler = getattr(self, "profiler", None)
+        if profiler is None:
+            return self._trace(time_limit)
+        # Early failures inside manually delimited symbolic intervals must not
+        # leave active spans or mask the original tracing exception.
+        with profiler.scope():
+            return self._trace(time_limit)
+
+    def _trace(self, time_limit: int | None = None) -> MaterializedTrace[SymbolicTraceItem]:
         """Execute a program and compute state transformations between executed
         instructions.
 
         :param start_addr: Address from which to start tracing.
         :param stop_addr: Address until which to trace.
         """
+        whole_program = getattr(self, "whole_program", False)
+        if whole_program and (
+            self.env.start_address is not None or self.env.stop_address is not None
+        ):
+            raise ValueError("Whole-program capture prohibits witness bounds.")
+        completion = None
         # Set up concrete reference state
         if self.env.start_address is not None:
             self.target.run_until(self.env.start_address)
 
         ctx = DisassemblyContext(self.target)
+        verification_cache = _DisassemblyVerificationCache(ctx, self.target)
         arch = ctx.arch
 
         event_matcher = DeterministicCursor(
             _events_for_environment(self.env),
             match_event,
         )
+        no_replay_exit_only = whole_program and self.env.detlog is None
+        if no_replay_exit_only:
+            if self.force:
+                raise UnsupportedNoReplayAction("Exit-only capture prohibits forced semantics gaps.")
+            require_exit_only_entry(
+                self.env.binary_name, self.env.binary_hash,
+                self.target.read_pc(), self.target.arch.key,
+            )
+            if self.target.process.GetNumThreads() != 1:
+                raise UnsupportedNoReplayAction("Exit-only capture requires exactly one native thread.")
+        if whole_program:
+            _consume_native_exec_bootstrap(self.env, self.target, event_matcher)
         if logger.isEnabledFor(logging.DEBUG):
             debug("Tracing program with the following non-deterministic events")
             for event in event_matcher.events:
@@ -960,6 +1317,12 @@ class SymbolicTracer:
 
         # Trace concolically
         strace: list[SymbolicTraceItem] = []
+        no_replay_set_fs: list[NoReplaySetFsBoundary] = []
+        no_replay_set_tid: list[NoReplaySetTidBoundary] = []
+        no_replay_mmap: list[NoReplayMmapBoundary] = []
+        no_replay_mprotect: list[NoReplayMprotectBoundary] = []
+        allocation_bases: list[int] = []
+        no_replay_tid: int | None = None
         while not self.target.is_exited():
             pc = self.target.read_pc()
 
@@ -971,7 +1334,9 @@ class SymbolicTracer:
             symbolic_start = self._profile_start("symbolic")
             tid = self.target.get_current_tid()
             try:
-                instruction = _disassemble_instruction(ctx, self.target, pc)
+                instruction = _disassemble_instruction(
+                    ctx, self.target, pc, verification_cache
+                )
                 info(f"[{tid}] Disassembled instruction {instruction} at {hex(pc)}")
             except DisassemblyError as err:
                 if not self.force:
@@ -1002,10 +1367,17 @@ class SymbolicTracer:
                         f"({pending_event.event_type}) has no program counter and "
                         "cannot be synchronized by the native tracer."
                     )
+            previous_position = event_matcher.event_position if whole_program else 0
             event, post_event, is_pre_event = _match_deterministic_event(
                 event_matcher,
                 self.target,
             )
+            if whole_program and event is not None:
+                consumed = 2 if post_event is not None else 1
+                if event_matcher.event_position != previous_position + consumed:
+                    raise EventSynchronizationError(
+                        "Whole-program capture cannot discard an unsynchronized RR prefix."
+                    )
             if isinstance(event, SignalEvent):
                 if not isinstance(post_event, SignalEvent):
                     raise EventSynchronizationError(
@@ -1036,6 +1408,170 @@ class SymbolicTracer:
             instruction_is_syscall = self.target.arch.is_instr_syscall(str(instruction))
             in_event = is_pre_event or instruction_is_syscall
             terminal_event = _is_terminal_event(post_event)
+            if whole_program and instruction_is_syscall:
+                if no_replay_exit_only:
+                    self.target.progress_execution()
+                    if self.target.is_exited() or self.target.read_pc() != pc:
+                        raise ValidationError("Process exited before the final live boundary.")
+                    descriptor = describe_no_replay_action(self.target)
+                    action = prepare_no_replay_action(
+                        self.target, single_thread=True, descriptor=descriptor, expected_tid=tid
+                    )
+                    if isinstance(action, AnonymousMmapAction):
+                        if self.target.read_memory(pc, 2) != b"\x0f\x05":
+                            raise UnsupportedNoReplayAction("mmap requires the SYSCALL opcode.")
+                        if self.target.process.GetNumThreads() != 1:
+                            raise UnsupportedNoReplayAction("Anonymous mmap requires one native task.")
+                        flags = self.target.read_register("RFLAGS")
+                        next_pc = pc + 2
+                        self.target.run_until(next_pc)
+                        base = action.validate_observed_result(
+                            self.target.read_register("RAX"), self.target.read_memory
+                        )
+                        occurrence = len(allocation_bases)
+                        allocation_bases.append(base)
+                        self.target.allocation_bases = tuple(allocation_bases)
+                        strace.append(SymbolicTransform(
+                            tid,
+                            {ExprId("RAX", 64): allocation_base_symbol(occurrence),
+                             ExprId("RCX", 64): ExprInt(next_pc, 64),
+                             ExprId("R11", 64): ExprInt(flags, 64)},
+                            [instruction], arch, pc, next_pc,
+                        ))
+                        no_replay_mmap.append(NoReplayMmapBoundary(
+                            len(strace) - 1, descriptor, action.length, occurrence,
+                        ))
+                        self._profile_finish("symbolic", symbolic_start)
+                        continue
+                    if isinstance(action, MprotectNoneAction):
+                        if self.target.read_memory(pc, 2) != b"\x0f\x05":
+                            raise UnsupportedNoReplayAction("mprotect requires the SYSCALL opcode.")
+                        next_pc = pc + 2
+                        flags = self.target.read_register("RFLAGS")
+                        self.target.run_until(next_pc)
+                        action.validate_return(self.target.read_register("RAX"))
+                        strace.append(SymbolicTransform(
+                            tid,
+                            {ExprId("RAX", 64): ExprInt(0, 64),
+                             ExprId("RCX", 64): ExprInt(next_pc, 64),
+                             ExprId("R11", 64): ExprInt(flags, 64)},
+                            [instruction], arch, pc, next_pc,
+                        ))
+                        no_replay_mprotect.append(NoReplayMprotectBoundary(
+                            len(strace) - 1, descriptor, action.occurrence,
+                            action.offset, action.length,
+                        ))
+                        self._profile_finish("symbolic", symbolic_start)
+                        continue
+                    if isinstance(action, SetTidAddressAction):
+                        if self.target.process.GetNumThreads() != 1:
+                            raise UnsupportedNoReplayAction("Context-relative TID requires one native task.")
+                        if no_replay_tid is not None and tid != no_replay_tid:
+                            raise UnsupportedNoReplayAction("Native task identity changed during no-replay capture.")
+                        opcode = no_replay_syscall_opcode(arch.key)
+                        if self.target.read_memory(pc, len(opcode)) != opcode:
+                            raise UnsupportedNoReplayAction("SET_TID_ADDRESS requires the supported syscall opcode.")
+                        require_private_tid_storage(self.env.binary_name, action.registration.address, arch.key)
+                        no_replay_tid = tid
+                        self.target.execution_tid = tid
+                        before = snapshot_set_tid_inputs(self.target)
+                        next_pc = pc + len(opcode)
+                        self.target.run_until(next_pc)
+                        validate_set_tid_transition(
+                            before, self.target, tid,
+                            native_breakpoint_destination=arch.key.isa == 'aarch64',
+                        )
+                        outputs = (
+                            {ExprId("X0", 64): ExprId("__focaccia_execution_tid", 64)}
+                            if arch.key.isa == "aarch64" else
+                            {ExprId("RAX", 64): ExprId("__focaccia_execution_tid", 64),
+                             ExprId("RCX", 64): ExprInt(next_pc, 64),
+                             ExprId("R11", 64): ExprId("RFLAGS", 64)}
+                        )
+                        strace.append(SymbolicTransform(
+                            tid, outputs, [instruction], arch, pc, next_pc,
+                        ))
+                        no_replay_set_tid.append(NoReplaySetTidBoundary(
+                            len(strace) - 1, descriptor, action.registration.address, tid,
+                        ))
+                        self._profile_finish("symbolic", symbolic_start)
+                        continue
+                    if isinstance(action, SetFsAction):
+                        if self.target.read_memory(pc, 2) != b"\x0f\x05":
+                            raise UnsupportedNoReplayAction("SET_FS requires the SYSCALL opcode.")
+                        before = snapshot_set_fs_inputs(self.target)
+                        self.target.run_until(pc + 2)
+                        validate_set_fs_transition(before, self.target)
+                        strace.append(SymbolicTransform(
+                            tid,
+                            {ExprId("RAX", 64): ExprInt(0, 64),
+                             ExprId("FS_BASE", 64): ExprId("RSI", 64),
+                             ExprId("RCX", 64): ExprInt(pc + 2, 64),
+                             ExprId("R11", 64): ExprId("RFLAGS", 64)},
+                            [instruction], arch, pc, pc + 2,
+                        ))
+                        no_replay_set_fs.append(NoReplaySetFsBoundary(len(strace) - 1, descriptor, action.base))
+                        self._profile_finish("symbolic", symbolic_start)
+                        continue
+                    if not isinstance(action, ExitAction):
+                        raise UnsupportedNoReplayAction(
+                            "No-replay TID effects require independent same-action and registration evidence."
+                        )
+                    opcode = no_replay_syscall_opcode(arch.key)
+                    if self.target.read_memory(pc, len(opcode)) != opcode:
+                        raise UnsupportedNoReplayAction("Exit-only action requires the supported syscall opcode.")
+                    if self.target.process.GetNumThreads() != 1:
+                        raise UnsupportedNoReplayAction("Exit-only capture requires one native thread.")
+                    self._profile_finish("symbolic", symbolic_start)
+                    self.target.run_to_exit()
+                    outcome = self.target.execution_outcome()
+                    if not isinstance(outcome, ExecutionOutcome):
+                        raise ValidationError("Terminal execution has no observed exit outcome.")
+                    outcome = _outcome_for_verified_exit_action(action, outcome)
+                    completion = TraceCompletion(
+                        pc, len(strace), len(strace) + 1, outcome, descriptor,
+                        no_replay_exit=action, no_replay_set_fs=tuple(no_replay_set_fs),
+                        no_replay_set_tid=tuple(no_replay_set_tid),
+                        no_replay_mmap=tuple(no_replay_mmap),
+                        no_replay_mprotect=tuple(no_replay_mprotect),
+                    )
+                    break
+                if not isinstance(event, SyscallEvent) or not is_pre_event:
+                    raise UnsupportedNoReplayAction(
+                        "Whole-program native syscalls require a synchronized RR action; "
+                        "no-log syscall capture is not wired."
+                    )
+                if terminal_event:
+                    # Reach the last LIVE boundary before executing the terminal
+                    # action. It is not an ordinary transform with a PC-zero state.
+                    self.target.progress_execution()
+                    if self.target.is_exited() or self.target.read_pc() != pc:
+                        raise ValidationError("Process exited before the final live boundary.")
+                    if event_matcher.state is not CursorState.EXHAUSTED:
+                        raise EventSynchronizationError("Unconsumed RR effects follow terminal exit.")
+                    if len({item.tid for item in event_matcher.events}) != 1:
+                        raise UnsupportedNoReplayAction("Whole-program capture requires one RR thread.")
+                    descriptor = describe_no_replay_action(self.target)
+                    action = prepare_no_replay_action(
+                        self.target, single_thread=True, descriptor=descriptor
+                    )
+                    if not isinstance(action, ExitAction):
+                        raise UnsupportedNoReplayAction("RR terminal action is not exit/exit_group.")
+                    self._profile_finish("symbolic", symbolic_start)
+                    self.target.run_to_exit()
+                    observe_outcome = getattr(self.target, "execution_outcome", None)
+                    if not callable(observe_outcome):
+                        raise ValidationError("Terminal execution has no outcome observation API.")
+                    outcome = observe_outcome()
+                    if not isinstance(outcome, ExecutionOutcome):
+                        raise ValidationError("Terminal execution has no observed exit outcome.")
+                    outcome = _outcome_for_verified_exit_action(action, outcome)
+                    # Outcome equality is NOT full terminal/kernel-effect equality.
+                    # Recorded actions remain in the RR log for consumer validation.
+                    completion = TraceCompletion(pc, len(strace), len(strace) + 1, outcome, descriptor)
+                    break
+            elif whole_program and terminal_event:
+                raise UnsupportedNoReplayAction("RR exit marker did not match a syscall instruction.")
             recorded_syscall_destination = (
                 int(post_event.pc)
                 if (
@@ -1047,6 +1583,12 @@ class SymbolicTracer:
                 )
                 else None
             )
+
+            observed_mrs = self._observe_native_dczid_mrs(instruction, tid) if no_replay_exit_only else None
+            if observed_mrs is not None:
+                strace.append(observed_mrs)
+                self._profile_finish('symbolic', symbolic_start)
+                continue
 
             # Run instruction
             conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
@@ -1076,6 +1618,11 @@ class SymbolicTracer:
                     event,
                     post_event,
                     instruction,
+                )
+                modified = _architectural_outputs_for_observed_popf(
+                    modified,
+                    instruction,
+                    self.target,
                 )
                 modified = _architectural_outputs_for_observed_division(
                     modified,
@@ -1312,5 +1859,15 @@ class SymbolicTracer:
 
                 debug(f"Completed handling event: {post_event}")
 
+        if whole_program and completion is None:
+            raise ValidationError("Whole-program capture ended without a verified terminal action.")
         trace_env = self.env.with_architecture(arch.key)
-        return MaterializedTrace(strace, trace_env, [transform.addr for transform in strace])
+        scope = (
+            TraceScope.WHOLE_PROGRAM if whole_program else
+            TraceScope.WITNESS if self.env.start_address is not None or self.env.stop_address is not None else
+            TraceScope.UNSPECIFIED
+        )
+        return MaterializedTrace(
+            strace, trace_env, [transform.addr for transform in strace],
+            scope=scope, completion=completion,
+        )

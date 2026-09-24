@@ -151,11 +151,42 @@ def simp_fpconvert_fp64(expr_simp, expr: ExprOp):
     return expr
 
 
+def simp_ucomisd(expr_simp, expr: ExprOp):
+    """Resolve Miasm's binary64 comparison flags without host FP arithmetic.
+
+    These expressions describe the comparison result, not MXCSR exception
+    delivery. Unknown operands remain symbolic, including x compared with x:
+    without its bits x could be a NaN.
+    """
+    if expr.op not in {"ucomisd_cf", "ucomisd_zf", "ucomisd_pf"}:
+        return expr
+    if len(expr.args) != 2 or any(arg.size != 64 for arg in expr.args):
+        raise ValueError("ucomisd flags require two binary64 operands")
+    if not all(isinstance(arg, ExprInt) for arg in expr.args):
+        return expr
+    left, right = (int(arg) for arg in expr.args)
+    magnitude_mask = (1 << 63) - 1
+    infinity = 0x7FF0000000000000
+    unordered = any((bits & magnitude_mask) > infinity for bits in (left, right))
+    equal = left == right or (left & magnitude_mask == right & magnitude_mask == 0)
+    # IEEE encodings increase with magnitude; reverse ordering for negatives.
+    def order_key(bits: int) -> int:
+        return ~bits if bits >> 63 else bits | (1 << 63)
+
+    less = not equal and order_key(left) < order_key(right)
+    value = {
+        "ucomisd_cf": unordered or less,
+        "ucomisd_zf": unordered or equal,
+        "ucomisd_pf": unordered,
+    }[expr.op]
+    return ExprInt(int(value), 1)
+
+
 # The expression simplifier used in this module
 expr_simp = expr_simp_explicit
 expr_simp.enable_passes(
     {
-        ExprOp: [simp_segm, simp_fadd, simp_fsub, simp_fpconvert_fp64],
+        ExprOp: [simp_segm, simp_fadd, simp_fsub, simp_fpconvert_fp64, simp_ucomisd],
     }
 )
 
@@ -178,6 +209,51 @@ class MiasmSymbolResolver:
     def resolve_register(self, regname: str) -> int | None:
         return self._state.read_register(self._miasm_to_regname(regname))
 
+    def resolve_register_slice(
+        self,
+        regname: str,
+        register_size: int,
+        start: int,
+        stop: int,
+    ) -> int | None:
+        """Resolve an exact architectural alias without reading its wider base.
+
+        A concrete backend may expose YMM while the composed symbolic equation
+        names ZMM.  Reading the exact alias preserves unknown upper bits rather
+        than requiring or fabricating the complete base register.
+        """
+        if not isinstance(regname, str):
+            raise ValueError("Symbolic register names must be strings.")
+        canonical = self._arch.to_regname(regname)
+        accessor = self._arch.get_reg_accessor(canonical) if canonical is not None else None
+        if accessor is None or accessor.num_bits != register_size:
+            raise ValueError(
+                f"Symbolic register {regname} has width {register_size}, "
+                f"expected {accessor.num_bits if accessor is not None else 'unknown'}."
+            )
+        absolute_start = accessor.start + start
+        absolute_stop = accessor.start + stop
+        if start < 0 or start >= stop or absolute_stop > accessor.end:
+            raise ValueError(
+                f"Invalid symbolic register slice {regname}[{start}:{stop}]."
+            )
+        aliases = sorted(
+            name
+            for name in self._arch.all_regnames
+            if (
+                (alias := self._arch.get_reg_accessor(name)) is not None
+                and alias.base_reg == accessor.base_reg
+                and alias.start == absolute_start
+                and alias.end == absolute_stop
+            )
+        )
+        if aliases:
+            return self.resolve_register(aliases[0])
+        value = self.resolve_register(canonical)
+        if value is None:
+            return None
+        return (value >> start) & ((1 << (stop - start)) - 1)
+
     def resolve_memory(self, addr: int, size: int) -> bytes | None:
         try:
             return self._state.read_memory(addr, size)
@@ -193,6 +269,19 @@ class MiasmSymbolResolver:
         The default deliberately leaves such operations symbolic.  In
         particular, it must never query the analyzer host.
         """
+        if operation == 'x86_aligned_vector256':
+            if (self._arch.archname == 'x86_64' and len(args) == 1
+                    and isinstance(args[0], ExprInt) and args[0].size == 64
+                    and int(args[0]) % 32 == 0):
+                return ExprInt(0, 64)
+            return None
+        if operation == 'aarch64_dczva_zero64':
+            if (self._arch.archname == 'aarch64' and self._arch.endianness == 'little'
+                    and len(args) == 1 and isinstance(args[0], ExprInt)
+                    and args[0].size == 64 and int(args[0]) == 4):
+                return ExprInt(0, 64)
+            # Unsupported/prohibited/unknown capability stays unresolved. The
+            # evaluator reports incomplete semantics, never successful clearing.
         return None
 
 
@@ -268,11 +357,13 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
         if key in results:
             continue
         children = expression_children(current)
+        direct_register_slice = isinstance(current, ExprSlice) and isinstance(current.arg, ExprId)
         if not expanded:
             pending.append((current, True))
-            pending.extend(
-                (child, False) for child in reversed(children) if id(child) not in results
-            )
+            if not direct_register_slice:
+                pending.extend(
+                    (child, False) for child in reversed(children) if id(child) not in results
+                )
             continue
 
         if isinstance(current, ExprInt):
@@ -305,7 +396,17 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
                         current.size,
                     )
         elif isinstance(current, ExprSlice):
-            rebuilt = ExprSlice(results[id(current.arg)], current.start, current.stop)
+            if direct_register_slice:
+                identifier = current.arg
+                value = conc_state.resolve_register_slice(
+                    identifier.name,
+                    identifier.size,
+                    current.start,
+                    current.stop,
+                )
+                rebuilt = current if value is None else ExprInt(value, current.size)
+            else:
+                rebuilt = ExprSlice(results[id(current.arg)], current.start, current.stop)
         elif isinstance(current, ExprCond):
             condition = results[id(current.cond)]
             if isinstance(condition, ExprInt):
@@ -326,7 +427,10 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
         else:
             raise TypeError(f"Unknown expression type {type(current).__name__}")
 
-        rebuilt_depth = 1 + max((depths[id(child)] for child in children), default=-1)
+        rebuilt_depth = 1 + max(
+            (depths[id(child)] for child in children if id(child) in depths),
+            default=-1,
+        )
         result = simplify_if_shallow(rebuilt, rebuilt_depth)
         results[key] = result
         depths[key] = rebuilt_depth if result is rebuilt else expression_depth(result)

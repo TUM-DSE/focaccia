@@ -12,7 +12,7 @@ from miasm.expression.expression import (
     ExprOp,
     ExprSlice,
 )
-from miasm.jitter.csts import EXCEPT_DIV_BY_ZERO, EXCEPT_SYSCALL
+from miasm.jitter.csts import EXCEPT_DIV_BY_ZERO, EXCEPT_SOFT_BP, EXCEPT_SYSCALL
 
 from focaccia import symbolic as symbolic_module
 from focaccia.arch import x86
@@ -26,9 +26,11 @@ from focaccia.deterministic import (
     SignalEvent,
     SyscallEvent,
 )
+from focaccia.execution import ExecutionOutcome, ExecutionState
 from focaccia.miasm_util import MiasmSymbolResolver
 from focaccia.native import tracer as tracer_module
 from focaccia.native.lldb_target import ConcreteExecutionError, LLDBConcreteTarget
+from focaccia.no_replay import ExitAction, ExitScope, UnsupportedNoReplayAction
 from focaccia.native.tracer import (
     DisassemblyError,
     SpeculativeTracer,
@@ -316,7 +318,7 @@ def test_signal_action_trace_does_not_execute_interrupted_instruction(monkeypatc
     monkeypatch.setattr(
         tracer_module,
         "_disassemble_instruction",
-        lambda _ctx, _target, _pc: instruction,
+        lambda _ctx, _target, _pc, _cache: instruction,
     )
 
     def forbidden_instruction_execution(*_args, **_kwargs):
@@ -457,6 +459,152 @@ def test_observed_division_removes_only_inactive_exception_control(
     )
     assert (marker not in architectural) is marker_removed
     assert ExprId("RAX", 64) in architectural
+
+
+@pytest.mark.parametrize(
+    ("trap_control", "marker_removed"),
+    ((0, True), (EXCEPT_SOFT_BP, False)),
+)
+def test_observed_popfq_removes_only_inactive_internal_trap_control(
+    trap_control: int,
+    marker_removed: bool,
+):
+    arch = x86.ArchX86()
+    marker = ExprId("exception_flags", 32)
+    control_source = ExprId("R13", 64)
+    privileged_flag = ExprId("i_f", 1)
+    io_privilege = ExprId("iopl", 2)
+    outputs: dict[Expr, Expr] = {
+        marker: ExprCond(
+            control_source,
+            ExprInt(EXCEPT_SOFT_BP, 32),
+            marker,
+        ),
+        # POPF's architectural outputs, including privilege-sensitive flags,
+        # must remain for concrete post-state cross-validation.
+        privileged_flag: ExprInt(0, 1),
+        io_privilege: ExprInt(3, 2),
+        ExprId("RSP", 64): ExprId("RSP", 64) + ExprInt(8, 64),
+    }
+
+    class PopfqInstruction:
+        def __str__(self) -> str:
+            return "POPFQ"
+
+    class PopfqState(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+        def read_register(self, reg: str) -> int:
+            if reg == "IOPL":
+                return 0
+            assert reg == "R13"
+            return trap_control
+
+    architectural = tracer_module._architectural_outputs_for_observed_popf(
+        outputs,
+        cast(Instruction, PopfqInstruction()),
+        PopfqState(),
+    )
+    assert (marker not in architectural) is marker_removed
+    assert architectural[privileged_flag] == privileged_flag
+    assert architectural[io_privilege] == io_privilege
+    assert ExprId("RSP", 64) in architectural
+
+
+def test_observed_popfq_iopl3_retains_popped_interrupt_flag():
+    arch = x86.ArchX86()
+    marker = ExprId("exception_flags", 32)
+    interrupt_enable = ExprId("i_f", 1)
+    outputs: dict[Expr, Expr] = {
+        marker: marker,
+        interrupt_enable: ExprInt(0, 1),
+        ExprId("iopl", 2): ExprInt(0, 2),
+    }
+
+    class PopfqInstruction:
+        def __str__(self) -> str:
+            return "POPFQ"
+
+    class Iopl3State(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+        def read_register(self, reg: str) -> int:
+            assert reg == "IOPL"
+            return 3
+
+    architectural = tracer_module._architectural_outputs_for_observed_popf(
+        outputs,
+        cast(Instruction, PopfqInstruction()),
+        Iopl3State(),
+    )
+    assert architectural[interrupt_enable] == ExprInt(0, 1)
+    assert architectural[ExprId("iopl", 2)] == ExprId("iopl", 2)
+
+
+def test_observed_popfq_unknown_iopl_fails_closed():
+    arch = x86.ArchX86()
+
+    class PopfqInstruction:
+        def __str__(self) -> str:
+            return "POPFQ"
+
+    class UnknownIoplState(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+        def read_register(self, reg: str) -> int:
+            assert reg == "IOPL"
+            return 4
+
+    with pytest.raises(SymbolicCompositionError, match="known two-bit pre-state IOPL"):
+        tracer_module._architectural_outputs_for_observed_popf(
+            {ExprId("exception_flags", 32): ExprInt(0, 32)},
+            cast(Instruction, PopfqInstruction()),
+            UnknownIoplState(),
+        )
+
+
+def test_verified_exit_action_binds_matching_ambiguous_backend_status():
+    action = ExitAction(0x103, ExitScope.GROUP)
+    observed = ExecutionOutcome(ExecutionState.EXITED, backend_status=3)
+    bound = tracer_module._outcome_for_verified_exit_action(action, observed)
+    assert bound.exit_status == 3
+    assert bound.backend_status == 3
+
+
+@pytest.mark.parametrize("backend_status", (None, 2, 15))
+def test_verified_exit_action_rejects_absent_or_different_backend_status(
+    backend_status: int | None,
+):
+    action = ExitAction(3, ExitScope.GROUP)
+    observed = ExecutionOutcome(ExecutionState.EXITED, backend_status=backend_status)
+    with pytest.raises(UnsupportedNoReplayAction, match="ambiguous terminal status"):
+        tracer_module._outcome_for_verified_exit_action(action, observed)
+
+
+def test_observed_popfq_does_not_consume_control_for_other_instructions():
+    arch = x86.ArchX86()
+    marker = ExprId("exception_flags", 32)
+    outputs: dict[Expr, Expr] = {marker: ExprInt(0, 32)}
+
+    class OtherInstruction:
+        def __str__(self) -> str:
+            return "NOP"
+
+    class State(ReadableProgramState):
+        def __init__(self):
+            super().__init__(arch)
+
+    assert (
+        tracer_module._architectural_outputs_for_observed_popf(
+            outputs,
+            cast(Instruction, OtherInstruction()),
+            State(),
+        )
+        is outputs
+    )
 
 
 def test_native_terminal_syscall_consumes_exit_marker_and_targets_exit():
@@ -702,10 +850,13 @@ def test_empty_miasm_disassembly_attempts_lldb_fallback():
             assert pc == 0x1000
             return 1
 
-    context = object.__new__(DisassemblyContext)
-    context.mdis = cast(Any, EmptyDisassembler())
-    context.arch = x86.ArchX86()
+        def read_instructions(self, address: int, size: int) -> bytes:
+            assert address == 0x1000
+            return b'\x90' * size
+
     target = FallbackTarget()
+    context = DisassemblyContext(cast(ReadableProgramState, target))
+    context.mdis = cast(Any, EmptyDisassembler())
 
     instruction = tracer_module._disassemble_instruction(
         context,
@@ -845,6 +996,26 @@ def test_prefixed_disassembly_compares_the_instruction_mnemonic():
         "LOCK CMPXCHG DWORD PTR [R9], ECX",
     )
     assert not tracer_module._disassembly_mnemonics_compatible("LOCK", "")
+
+
+@pytest.mark.parametrize('hexcode', ['c5fd6f05a60f0000', 'c5f9efc0', 'c5f877',
+                                     'c5fc574424e0', 'c4e27d17c0'])
+def test_aligned_vector_move_requires_exact_native_bytes(hexcode):
+    raw = bytes.fromhex(hexcode)
+    instruction = Instruction.from_bytecode(raw, x86.ArchX86())
+
+    class AlignedTarget:
+        arch = x86.ArchX86()
+
+        def read_instructions(self, address, size):
+            return raw[:size]
+
+    target = cast(LLDBConcreteTarget, AlignedTarget())
+    tracer_module._validate_primary_disassembly(instruction, target, 0, raw)
+    for wrong in (raw[:1] + bytes([raw[1] ^ 4]) + raw[2:],
+                  raw[:-1] + bytes([raw[-1] ^ 1]), raw[:-1]):
+        with pytest.raises(tracer_module.DisassemblyMismatchError):
+            tracer_module._validate_primary_disassembly(instruction, target, 0, wrong)
 
 
 def test_vex_misdecode_is_rejected_before_using_wrong_semantics():
@@ -1144,7 +1315,7 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(
     monkeypatch.setattr(
         tracer_module,
         "_disassemble_instruction",
-        lambda _ctx, _target, _pc: instruction,
+        lambda _ctx, _target, _pc, _cache: instruction,
     )
     monkeypatch.setattr(tracer_module, "DeterministicCursor", FakeCursor)
     monkeypatch.setattr(tracer_module, "timebound", unsupported_output)
@@ -1265,7 +1436,7 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
     monkeypatch.setattr(
         tracer_module,
         "_disassemble_instruction",
-        lambda _ctx, _target, _pc: instruction,
+        lambda _ctx, _target, _pc, _cache: instruction,
     )
     monkeypatch.setattr(tracer_module, "DeterministicCursor", FakeCursor)
     monkeypatch.setattr(tracer_module, "timebound", fail_symbolically)
@@ -1284,3 +1455,26 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
     assert gap.range == (0x1000, 0)
     assert gap.reason == "unsupported-semantics"
     assert gap.cause is symbolic_error
+
+
+@pytest.mark.parametrize("has_outputs", [False, True])
+def test_cross_validation_rejects_missing_post_exit_state(has_outputs):
+    class ExitedTarget:
+        def is_exited(self):
+            return True
+
+        def read_register(self, _name):
+            pytest.fail("Must not read registers after exit")
+
+        def read_memory(self, _address, _size):
+            pytest.fail("Must not read memory after exit")
+
+    tracer = object.__new__(SymbolicTracer)
+    tracer.target = cast(Any, ExitedTarget())
+    with pytest.raises(tracer_module.ValidationError, match="destination state is unavailable"):
+        tracer.validate(
+            cast(Any, None),
+            cast(Any, None),
+            {"RAX": 1} if has_outputs else {},
+            {4096: b"\x01"} if has_outputs else {},
+        )

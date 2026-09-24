@@ -143,9 +143,38 @@ class SparseMemory:
 class ReadableProgramState:
     """Interface for read-only program states."""
 
-    def __init__(self, arch: Arch):
+    def __init__(
+        self, arch: Arch, execution_tid: int | None = None,
+        allocation_bases: tuple[int, ...] = (),
+    ):
         self.arch = arch
         self.strict = True
+        self.execution_tid = execution_tid
+        self.allocation_bases = allocation_bases
+
+    @property
+    def execution_tid(self) -> int | None:
+        """Independent execution context, never an architectural register."""
+        return self._execution_tid
+
+    @execution_tid.setter
+    def execution_tid(self, value: int | None) -> None:
+        if value is not None and (type(value) is not int or not 0 < value < 1 << 31):
+            raise ValueError("Execution TID must be a positive integer below 2^31.")
+        self._execution_tid = value
+
+    @property
+    def allocation_bases(self) -> tuple[int, ...]:
+        """Per-execution bases for ordered anonymous mapping actions."""
+        return self._allocation_bases
+
+    @allocation_bases.setter
+    def allocation_bases(self, values: tuple[int, ...]) -> None:
+        if type(values) is not tuple or any(
+            type(value) is not int or value < 0 or value >= 1 << 64 for value in values
+        ):
+            raise ValueError("Allocation bases must be a tuple of 64-bit addresses.")
+        self._allocation_bases = values
 
     def read_pc(self) -> int:
         """Read the architecture's program counter."""
@@ -161,8 +190,13 @@ class ReadableProgramState:
 class ProgramState(ReadableProgramState):
     """A concrete program-state observation with explicit validity."""
 
-    def __init__(self, arch: Arch):
-        super().__init__(arch=arch)
+    def __init__(
+        self, arch: Arch, execution_tid: int | None = None,
+        allocation_bases: tuple[int, ...] = (),
+    ):
+        super().__init__(
+            arch=arch, execution_tid=execution_tid, allocation_bases=allocation_bases
+        )
         self.regs: dict[str, int | None] = {reg: None for reg in arch.regnames}
         self._valid_register_bits: dict[str, int] = {reg: 0 for reg in arch.regnames}
         self.mem = SparseMemory()

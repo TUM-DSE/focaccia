@@ -1,7 +1,7 @@
 from typing import cast
 
 import pytest
-from miasm.expression.expression import ExprId, ExprInt, ExprMem, ExprOp
+from miasm.expression.expression import ExprId, ExprInt, ExprMem, ExprOp, ExprSlice
 
 from focaccia.arch import aarch64, x86
 from focaccia.compare import (
@@ -255,6 +255,27 @@ def test_result_renderer_does_not_report_shape_failure_as_clean(capsys):
 
     assert "empty-state-trace" in output
     assert "Found 1 trace diagnostics." in output
+
+
+def test_separator_uses_current_output_stream():
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    from focaccia.utils import print_separator
+
+    first = StringIO()
+    with redirect_stdout(first):
+        print_separator(count=3)
+    assert first.getvalue() == "---\n"
+    first.close()
+
+    second = StringIO()
+    explicit = StringIO()
+    with redirect_stdout(second):
+        print_separator("=", count=2)
+        print_separator("+", stream=explicit, count=2)
+    assert second.getvalue() == "==\n"
+    assert explicit.getvalue() == "++\n"
 
 
 def test_result_renderer_bounds_entries_diagnostics_and_transform_text(capsys):
@@ -700,6 +721,8 @@ def test_symbolic_memory_validation_classifies_missing_and_incorrect_destination
     )
     assert len(errors_with_severity(unavailable, ErrorTypes.POSSIBLE)) == 1
     assert "Memory range [0x2000, 0x2002) is unavailable" in unavailable[0]["errors"][0].error_msg
+    assert unavailable[0]["errors"][0].code is None
+    assert unavailable[0]["errors"][0].subject is None
 
     wrong_destination = state(0x1001)
     wrong_destination.write_memory(0x2000, b"\x00\x00")
@@ -708,6 +731,8 @@ def test_symbolic_memory_validation_classifies_missing_and_incorrect_destination
     )
     assert len(errors_with_severity(mismatch, ErrorTypes.CONFIRMED)) == 1
     assert "Expected efbe, actual 0000" in mismatch[0]["errors"][0].error_msg
+    assert mismatch[0]["errors"][0].code == "memory-content-mismatch"
+    assert mismatch[0]["errors"][0].subject == "0x2000"
 
     correct_destination = state(0x1001)
     correct_destination.write_memory(0x2000, b"\xef\xbe")
@@ -741,6 +766,77 @@ def test_symbolic_memory_validation_checks_every_output_after_an_unavailable_ran
     assert "[0x2000, 0x2001)" in report[0]["errors"][0].error_msg
     assert "memory at 0x3000 is false" in report[0]["errors"][1].error_msg
     assert "Expected bb, actual 00" in report[0]["errors"][1].error_msg
+    assert report[0]["errors"][0].code is None
+    assert report[0]["errors"][1].code == "memory-content-mismatch"
+    assert report[0]["errors"][1].subject == "0x3000"
+
+
+def test_low_vector_alias_confirms_memory_while_unknown_upper_bits_stay_incomplete():
+    low = int.from_bytes(bytes(range(32)), "little")
+    source = state(0x1000)
+    source.write_register("YMM0", low)
+    low_store = SymbolicTransform(
+        1,
+        {ExprMem(ExprInt(0x2000, 64), 256): ExprSlice(ExprId("ZMM0", 512), 0, 256)},
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+    wrong_low_destination = state(0x1001)
+    wrong_low_destination.write_memory(0x2000, bytes(32))
+
+    low_report = compare_symbolic(
+        TransitionTrace([source, wrong_low_destination], [low_store], ENV)
+    )
+    assert len(errors_with_severity(low_report, ErrorTypes.CONFIRMED)) == 1
+    assert not errors_with_severity(low_report, ErrorTypes.INCOMPLETE)
+    assert low_report[0]["errors"][0].code == "memory-content-mismatch"
+    assert "Expected 00010203040506070809" in low_report[0]["errors"][0].error_msg
+
+    whole_store = SymbolicTransform(
+        1,
+        {ExprMem(ExprInt(0x3000, 64), 512): ExprId("ZMM0", 512)},
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+    whole_destination = state(0x1001)
+    whole_destination.write_memory(0x3000, bytes(64))
+    unknown_upper_report = compare_symbolic(
+        TransitionTrace([source, whole_destination], [whole_store], ENV)
+    )
+    assert len(errors_with_severity(unknown_upper_report, ErrorTypes.INCOMPLETE)) == 1
+    assert not errors_with_severity(unknown_upper_report, ErrorTypes.CONFIRMED)
+
+    observed = state(0x1000)
+    observed.write_register("ZMM0", low | (1 << 256))
+    observed_upper_report = compare_symbolic(
+        TransitionTrace([observed, whole_destination], [whole_store], ENV)
+    )
+    assert len(errors_with_severity(observed_upper_report, ErrorTypes.CONFIRMED)) == 1
+    assert not errors_with_severity(observed_upper_report, ErrorTypes.INCOMPLETE)
+
+
+def test_malformed_symbolic_register_width_rejects_narrow_alias_resolution():
+    malformed = SymbolicTransform(
+        1,
+        {
+            ExprMem(ExprInt(0x2000, 64), 128): ExprSlice(
+                ExprId("ZMM0", 256), 0, 128
+            ),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1001,
+    )
+    source = state(0x1000)
+    source.write_register("XMM0", 0)
+
+    with pytest.raises(ValueError, match="ZMM0 has width 256, expected 512"):
+        malformed.eval_memory_transforms(source)
 
 
 def test_symbolic_memory_validation_fails_closed_on_unavailable_dependencies():

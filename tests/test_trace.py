@@ -13,7 +13,7 @@ from focaccia.parser import (
     serialize_snapshots,
     stream_transformation,
 )
-from focaccia.snapshot import ProgramState
+from focaccia.snapshot import ProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform
 from focaccia.trace import (
     MaterializedTrace,
@@ -289,8 +289,71 @@ def test_box64_parser_separates_adjacent_flags_from_register_value():
     assert len(parsed) == 1
     assert parsed[0].read_register("RAX") == 0x1234567812345678
     assert parsed[0].read_register("RSP") == 0xEA4A4D7FDA68
-    assert parsed[0].read_register("ZF") == 1
-    assert parsed[0].read_register("PF") == 1
+    with pytest.raises(RegisterAccessError):
+        parsed[0].read_register("ZF")
+    with pytest.raises(RegisterAccessError):
+        parsed[0].read_register("PF")
+
+
+def test_box64_parser_groups_proven_fused_pushes_without_fabricating_boundary():
+    log = io.StringIO(
+        "header\n"
+        "ES=0 RSP=1000 FLAGS=------- RIP=401001 55 push rbp\n"
+        "ES=0 RSP=0ff0 FLAGS=------- RIP=401002 53 push rbx\n"
+        "ES=0 RSP=0ff0 FLAGS=------- RIP=401003 48 89 C0 mov rax, rax\n"
+    )
+
+    parsed = parse_box64(log, x86.ArchX86())
+
+    assert [state.read_pc() for state in parsed] == [0x401001, 0x401003]
+    assert [state.read_register("RSP") for state in parsed] == [0x1000, 0xFF0]
+
+
+def test_box64_parser_does_not_group_ordinary_cmpxchg_boundary():
+    log = io.StringIO(
+        "header\n"
+        "ES=0 RAX=1234567812345678 RSP=1000 flags=???Z?P? "
+        "RIP=401054 0F B1 D1 cmpxchg ecx, edx\n"
+        "ES=0 RAX=12345678 RSP=1000 flags=???Z?P? "
+        "RIP=401057 31 C0 xor eax, eax\n"
+    )
+
+    parsed = parse_box64(log, x86.ArchX86())
+
+    assert [state.read_pc() for state in parsed] == [0x401054, 0x401057]
+    assert parsed[0].read_register("RAX") == 0x1234567812345678
+    assert parsed[1].read_register("RAX") == 0x12345678
+
+
+def test_box64_parser_does_not_treat_stale_materialized_flags_as_observed():
+    log = io.StringIO(
+        "header\n"
+        "ES=0x002b CS=0x0033\n"
+        "RAX=0 RSP=1000 FLAGS=---Z-P-\n"
+        "RIP=40105a 48 31 ED xor rbp, rbp\n"
+    )
+
+    state = parse_box64(log, x86.ArchX86())[0]
+
+    with pytest.raises(RegisterAccessError):
+        state.read_register("ZF")
+    with pytest.raises(RegisterAccessError):
+        state.read_register("PF")
+
+
+def test_box64_parser_keeps_legacy_deferred_flags_unknown():
+    log = io.StringIO(
+        "header\n"
+        "ES=0x002b CS=0x0033\n"
+        "RAX=0 RSP=1000 flags=???Z?P?\n"
+        "RIP=401054 0F B1 D1 cmpxchg ecx, edx\n"
+    )
+
+    state = parse_box64(log, x86.ArchX86())[0]
+
+    for register in ("ZF", "PF", "CF"):
+        with pytest.raises(RegisterAccessError):
+            state.read_register(register)
 
 
 def test_empty_materialized_snapshot_serialization_returns_after_writing():

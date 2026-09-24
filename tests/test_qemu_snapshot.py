@@ -1,11 +1,12 @@
 import pytest
-from miasm.expression.expression import ExprId, ExprInt, ExprMem
+from miasm.expression.expression import ExprId, ExprInt, ExprMem, ExprSlice
 
 from focaccia.arch import aarch64, x86
 from focaccia.qemu.snapshot import (
     SnapshotPlanningError,
     collect_minimal_snapshot,
     plan_minimal_snapshot,
+    unavailable_validation_outputs,
 )
 from focaccia.snapshot import MemoryAccessError, ProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTransform
@@ -151,6 +152,47 @@ def test_vector_validation_evaluation_preserves_narrow_aliases():
     }
     with pytest.raises(RegisterAccessError):
         source.read_register("ZMM1")
+
+
+def test_low_vector_slice_planning_requests_observable_alias_not_full_base():
+    current = state(0x1000)
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprMem(ExprInt(0x2000, 64), 256): ExprSlice(
+                ExprId("ZMM0", 512), 0, 256
+            ),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1004,
+    )
+
+    plan = plan_minimal_snapshot(current, None, transform)
+
+    assert set(plan.registers) == {"YMM0"}
+    assert "ZMM0" not in plan.registers
+
+
+def test_wide_vector_observation_capability_rejects_unknown_upper_lanes():
+    current = state(0x1000, XMM0=0xAA)
+    transform = SymbolicTransform(
+        1,
+        {
+            ExprId("YMM0", 256): ExprInt(0, 256),
+            ExprId("ZMM1", 512): ExprInt(0, 512),
+        },
+        [],
+        ARCH,
+        0x1000,
+        0x1004,
+    )
+
+    assert unavailable_validation_outputs(current, transform) == {"YMM0", "ZMM1"}
+    assert current.read_register("XMM0") == 0xAA
+    with pytest.raises(RegisterAccessError):
+        current.read_register("YMM0")
 
 
 def test_mmx_source_planning_does_not_request_simd_state():

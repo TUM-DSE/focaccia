@@ -95,6 +95,8 @@ registers = [
     ),
 
     _Reg(('TPIDR', 0, 64)),
+    # Target execution's architectural cache-zero capability, never analyzer-host data.
+    _Reg(('DCZID_EL0', 0, 64)),
 ]
 
 constant_registers = [

@@ -20,6 +20,9 @@ class FakeProcess:
     def __init__(self, data: bytes):
         self.data = data
 
+    def GetState(self) -> int:
+        return lldb_target.lldb.eStateStopped
+
     def ReadMemory(self, _addr: int, size: int, _error) -> bytes:
         return self.data[:size]
 

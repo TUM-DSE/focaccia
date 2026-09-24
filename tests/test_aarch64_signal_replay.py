@@ -213,7 +213,8 @@ def configured_engine() -> AArch64ReplayEngine:
     return engine
 
 
-def test_aarch64_signal_frame_delivery_and_rt_sigreturn_round_trip():
+@pytest.mark.parametrize("invalid_entry", [None, "missing-frame", "wrong-sp"])
+def test_aarch64_signal_frame_delivery_and_rt_sigreturn_round_trip(invalid_entry):
     pre, post, frame, handler_extra = make_signal_pair()
     target = FakeSignalTarget(pre.registers)
     engine = configured_engine()
@@ -268,6 +269,20 @@ def test_aarch64_signal_frame_delivery_and_rt_sigreturn_round_trip():
         return context.state
 
     target.execute = restore
+    if invalid_entry is not None:
+        if invalid_entry == "missing-frame":
+            engine.state.signal_frames.clear()
+            message = "no delivered frame"
+        else:
+            target.state.write_register("sp", FRAME_ADDRESS + 16)
+            message = "rt_sigreturn SP"
+        mutations = list(target.mutations)
+        with pytest.raises(ReplayEventError, match=message):
+            engine.replay_syscall(target, return_pre, return_post)
+        assert target.state.read_pc() == RESTORER_ADDRESS
+        assert target.mutations == mutations
+        return
+
     result = engine.replay_syscall(target, return_pre, return_post)
 
     assert result is target.state

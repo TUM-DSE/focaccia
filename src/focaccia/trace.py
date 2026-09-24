@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from .arch.arch import ArchitectureKey
+from .completion import TraceCompletion, TraceScope, validate_trace_metadata
 from .utils import file_hash
 
 if TYPE_CHECKING:
@@ -173,12 +174,36 @@ class TransformStream(Iterator[T_co], Generic[T_co]):
         items: Iterator[T_co],
         env: TraceEnvironment,
         addresses: Iterable[int] | None = None,
+        *,
+        scope: TraceScope = TraceScope.UNSPECIFIED,
+        completion: TraceCompletion | None = None,
     ):
         self.env = env
+        self.scope = scope
+        validate_trace_metadata(scope, completion)
+        self._completion = completion
         self.addresses = tuple(addresses) if addresses is not None else None
         self._iterator = items
         self._position = 0
         self._exhausted = False
+        self._final_pc: int | None = None
+        self._item_kind = "transforms"
+        self._failure: Exception | None = None
+
+    @property
+    def completion(self) -> TraceCompletion | None:
+        """Unconsumed or truncated streams cannot establish completion."""
+        return self._completion if self.exhausted else None
+
+    @property
+    def declared_completion(self) -> TraceCompletion | None:
+        """Return unverified header metadata needed to configure consumption.
+
+        This declaration may authorize expected no-replay actions, but it is not
+        completion evidence. ``completion`` remains unavailable until verified
+        EOF and cardinality checks succeed.
+        """
+        return self._completion
 
     @property
     def position(self) -> int:
@@ -197,13 +222,25 @@ class TransformStream(Iterator[T_co], Generic[T_co]):
         return self
 
     def __next__(self) -> T_co:
+        if self._failure is not None:
+            raise self._failure
         if self._exhausted:
             raise StopIteration
         try:
             item = next(self._iterator)
         except StopIteration:
+            if self._completion is not None:
+                self._completion.validate_binding(self._item_kind, self.position, self._final_pc)
             self._exhausted = True
             raise
+        except Exception as error:
+            # A malformed/truncated frame is permanently fatal for this cursor.
+            self._failure = error
+            raise
+        if self._completion is not None:
+            read_pc = getattr(item, "read_pc", None)
+            self._item_kind = "states" if callable(read_pc) else "transforms"
+            self._final_pc = read_pc() if callable(read_pc) else getattr(item, "range", (None, None))[1]
         self._position += 1
         return item
 
@@ -228,10 +265,28 @@ class MaterializedTrace(Sequence[T_co], Generic[T_co]):
         items: Iterable[T_co],
         env: TraceEnvironment,
         addresses: Iterable[int] | None = None,
+        *,
+        scope: TraceScope = TraceScope.UNSPECIFIED,
+        completion: TraceCompletion | None = None,
     ):
         self.env = env
+        validate_trace_metadata(scope, completion)
+        self.scope = scope
+        self.completion = completion
+        self.declared_completion = completion
         self._items = tuple(items)
         self.addresses = tuple(addresses) if addresses is not None else None
+        if completion is not None:
+            if self._items:
+                final = self._items[-1]
+                read_pc = getattr(final, "read_pc", None)
+                if callable(read_pc):
+                    completion.validate_binding("states", len(self), read_pc())
+                else:
+                    bounds = getattr(final, "range", (None, None))
+                    completion.validate_binding("transforms", len(self), bounds[1])
+            else:
+                completion.validate_binding("transforms", 0, None)
         if self.addresses is not None and len(self.addresses) != len(self._items):
             raise ValueError(
                 "Trace address count must equal item count: "
@@ -245,7 +300,10 @@ class MaterializedTrace(Sequence[T_co], Generic[T_co]):
 
     def cursor(self) -> TransformStream[T_co]:
         """Create an independent one-shot cursor over this trace."""
-        return TransformStream(iter(self._items), self.env, self.addresses)
+        return TransformStream(
+            iter(self._items), self.env, self.addresses,
+            scope=self.scope, completion=self.completion,
+        )
 
     def __len__(self) -> int:
         return len(self._items)
@@ -288,10 +346,21 @@ class TransitionTrace(
         states: Sequence[StateT_co],
         transforms: Sequence[TransformT_co],
         env: TraceEnvironment,
+        *,
+        scope: TraceScope = TraceScope.UNSPECIFIED,
+        completion: TraceCompletion | None = None,
     ):
         self.env = env
+        validate_trace_metadata(scope, completion)
+        self.scope = scope
+        self.completion = completion
         self.state_boundaries = tuple(states)
         self.transforms = tuple(transforms)
+        if completion is not None:
+            read_pc = getattr(self.state_boundaries[-1], "read_pc", None) if self.state_boundaries else None
+            completion.validate_binding("states", len(self.state_boundaries), read_pc() if callable(read_pc) else None)
+            if completion.transform_count != len(self.transforms):
+                raise ValueError("Completion transform count differs from trace.")
         if len(self.state_boundaries) != len(self.transforms) + 1:
             raise ValueError(
                 "A transition trace requires exactly one more state boundary than "

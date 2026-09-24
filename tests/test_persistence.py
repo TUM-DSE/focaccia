@@ -1,3 +1,12 @@
+from dataclasses import replace
+
+from focaccia.completion import TraceCompletion, TraceScope
+from focaccia.execution import ExecutionOutcome, ExecutionState
+from focaccia.no_replay import (
+    ExitAction, ExitScope, NoReplayActionDescriptor, NoReplayActionKind,
+    NoReplaySetFsBoundary, NoReplaySetTidBoundary,
+)
+
 import copy
 import io
 import json
@@ -38,6 +47,104 @@ from focaccia.symbolic import Instruction, InstructionRecord, SymbolicTransform,
 from focaccia.trace import MaterializedTrace, TraceEnvironment, TransformStream
 
 FIXTURES = Path(__file__).parent / "fixtures" / "traces"
+
+
+@pytest.mark.parametrize("tid", [None, 123])
+@pytest.mark.parametrize("format", ["json", "msgpack"])
+def test_execution_tid_state_roundtrip(tmp_path, tid, format):
+    from focaccia.persistence import _encode_state, _decode_state
+    arch = x86.ArchX86()
+    state = ProgramState(arch)
+    state.execution_tid = tid
+    document = _encode_state(state, arch, "state")
+    assert ("execution_tid" in document) == (tid is not None)
+    encoded = json.loads(json.dumps(document)) if format == "json" else msgpack.unpackb(msgpack.packb(document))
+    assert _decode_state(encoded, arch, "state", legacy=False).execution_tid == tid
+
+
+@pytest.mark.parametrize("tid", [None, True, 0, -1, 1 << 31, "123"])
+def test_execution_tid_state_rejects_malformed_metadata(tid):
+    from focaccia.persistence import _decode_state
+    with pytest.raises(ParseError):
+        _decode_state({"registers": {}, "register_validity": {}, "memory": [], "execution_tid": tid},
+                      x86.ArchX86(), "state", legacy=False)
+
+
+def tid_completion():
+    arch = x86.ArchX86()
+    return TraceCompletion(
+        0x1001, 1, 2, ExecutionOutcome(ExecutionState.EXITED, exit_status=0),
+        NoReplayActionDescriptor(arch.key, 0x1001, NoReplayActionKind.EXIT_GROUP),
+        ExitAction(0, ExitScope.GROUP),
+        no_replay_set_tid=(NoReplaySetTidBoundary(
+            0, NoReplayActionDescriptor(arch.key, 0x1000, NoReplayActionKind.SET_TID_ADDRESS),
+            0x3000, 123,
+        ),),
+    )
+
+
+@pytest.mark.parametrize("format", ["json", "msgpack"])
+def test_tid_completion_roundtrip(tmp_path, format):
+    source = transform_trace()
+    from focaccia.symbolic import EXECUTION_TID
+    item = SymbolicTransform(123, {ExprId("RAX", 64): EXECUTION_TID}, [], source[0].arch, 0x1000, 0x1001)
+    trace = MaterializedTrace(
+        (item,), source.env, source.addresses,
+        scope=TraceScope.WHOLE_PROGRAM, completion=tid_completion(),
+    )
+    path = tmp_path / "tid.trace"
+    serialize_transformations(trace, path, format)
+    with path.open("r" if format == "json" else "rb") as source_file:
+        parsed = parse_transformations(source_file) if format == "json" else stream_transformation(source_file)
+        items = list(parsed)
+        assert len(items) == 1
+        assert isinstance(items[0], SymbolicTransform)
+        assert items[0].changed_regs["RAX"] == EXECUTION_TID
+        local = ProgramState(items[0].arch, execution_tid=456)
+        assert items[0].eval_validation_register_transforms(local)["RAX"] == 456
+        assert parsed.completion == trace.completion
+
+
+@pytest.mark.parametrize("field,value", [
+    ("transform_index", True), ("transform_index", 1),
+    ("address", True), ("address", -1), ("expected_tid", True),
+    ("expected_tid", 0), ("expected_tid", "123"),
+    ("extra", 1),
+])
+def test_tid_completion_rejects_malformed_fields(field, value):
+    from focaccia.persistence import _completion_document, _parse_completion
+    document = _completion_document(tid_completion())
+    assert document is not None
+    document["no_replay_set_tid"][0][field] = value
+    with pytest.raises(FieldTypeError):
+        _parse_completion(document)
+
+
+def test_tid_completion_requires_order_exit_and_noncolliding_actions():
+    completion = tid_completion()
+    boundary = completion.no_replay_set_tid[0]
+    fs = NoReplaySetFsBoundary(
+        0, replace(boundary.descriptor, kind=NoReplayActionKind.SET_FS), 0x4000,
+    )
+    with pytest.raises(ValueError, match="context must remain constant"):
+        replace(completion, transform_count=2, state_count=3, no_replay_set_tid=(
+            boundary, replace(boundary, transform_index=1, expected_tid=boundary.expected_tid + 1),
+        ))
+    for changes in (
+        {"no_replay_exit": None}, {"no_replay_set_tid": [boundary]},
+        {"no_replay_set_tid": (boundary, boundary)}, {"no_replay_set_fs": (fs,)},
+    ):
+        with pytest.raises(ValueError):
+            replace(completion, **changes)
+
+
+def test_empty_tid_evidence_omitted_and_legacy_metadata_readable():
+    from focaccia.persistence import _completion_document, _parse_completion
+    completion = replace(tid_completion(), no_replay_set_tid=())
+    document = _completion_document(completion)
+    assert document is not None
+    assert "no_replay_set_tid" not in document
+    assert _parse_completion(document) == completion
 
 
 def environment(arch) -> TraceEnvironment:
@@ -384,6 +491,8 @@ def test_json_and_msgpack_share_logical_header_fields(tmp_path):
     msgpack_header = msgpack_frames[0]
 
     common_fields = {
+        "scope",
+        "completion",
         "schema_version",
         "trace_kind",
         "architecture",

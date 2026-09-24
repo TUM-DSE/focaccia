@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -67,6 +68,45 @@ def test_smoke_plan_uses_native_rr_oracle_and_separate_qemu_consumer(tmp_path):
     assert document["guest"]["architecture"] == "x86_64-linux"
     assert document["limits_seconds"] == {"command": 1.0, "server_startup": 1.0}
     assert "same-user ptrace" in document["capabilities"]
+
+
+def test_whole_program_smoke_removes_capture_bounds(tmp_path):
+    plan = replace(make_plan(tmp_path), whole_program=True)
+    command = plan.commands()["capture-oracle"]
+    assert "--whole-program" in command
+    assert "--cross-validate" in command
+    assert "--start-address" not in command
+    assert "--stop-address" not in command
+    assert plan.to_json()["guest"]["start_address"] is None
+    assert plan.to_json()["guest"]["stop_address"] is None
+    assert plan.to_json()["guest"]["scope"] == "whole-program"
+
+
+@pytest.mark.parametrize("completion", [None, {}, {"scope": "witness", "complete": True},
+                                         {"scope": "whole-program", "complete": False}])
+def test_whole_program_smoke_rejects_unverified_completion(tmp_path, completion):
+    plan = replace(make_plan(tmp_path), whole_program=True)
+    plan.artifacts.run_directory.mkdir()
+    plan.artifacts.validation_report.write_text(json.dumps({
+        "schema": smoke.QEMU_VALIDATION_REPORT_SCHEMA,
+        "status": "accepted", "completion": completion,
+    }))
+    with pytest.raises(smoke.SmokeRunError, match="verified completion"):
+        smoke._load_accepted_validation(plan)
+
+
+def test_whole_program_smoke_accepts_verified_completion(tmp_path):
+    plan = replace(make_plan(tmp_path), whole_program=True)
+    plan.artifacts.run_directory.mkdir()
+    document = {
+        "schema": smoke.QEMU_VALIDATION_REPORT_SCHEMA,
+        "status": "accepted",
+        "completion": {"scope": "whole-program", "complete": True},
+        "replay": {"active": True, "records": [{}], "record_count": 1,
+                   "by_outcome": {"handled": 1}},
+    }
+    plan.artifacts.validation_report.write_text(json.dumps(document))
+    assert smoke._load_accepted_validation(plan) == document
 
 
 def test_smoke_harness_refuses_to_overwrite_a_run_directory(tmp_path):

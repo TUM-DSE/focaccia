@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 from miasm.ir.ir import Lifter
@@ -24,7 +25,7 @@ from miasm.expression.expression import (
     ExprSlice,
 )
 
-from .snapshot import ReadableProgramState
+from .snapshot import ReadableProgramState, MemoryAccessError
 from .arch import Arch, supported_architectures
 from .arch.arch import RegisterAccessor
 from .miasm_util import (
@@ -37,6 +38,25 @@ from .miasm_util import (
     make_machine,
     simplify_if_shallow,
 )
+
+
+EXECUTION_TID = ExprId("__focaccia_execution_tid", 64)
+ALLOCATION_BASE_PREFIX = "__focaccia_allocation_base_"
+
+
+def allocation_base_symbol(occurrence: int) -> ExprId:
+    if type(occurrence) is not int or occurrence < 0:
+        raise ValueError("Allocation occurrence must be nonnegative.")
+    return ExprId(f"{ALLOCATION_BASE_PREFIX}{occurrence}", 64)
+
+
+def _allocation_occurrence(name: str) -> int | None:
+    if not name.startswith(ALLOCATION_BASE_PREFIX):
+        return None
+    suffix = name.removeprefix(ALLOCATION_BASE_PREFIX)
+    if not suffix.isdecimal() or str(int(suffix)) != suffix:
+        raise SymbolEvaluationError("Malformed allocation-context symbol.")
+    return int(suffix)
 
 
 _ARCHITECTURAL_UNKNOWN_PREFIX = "FOCACCIA_UNDEFINED_"
@@ -96,6 +116,16 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
             super().__init__(conc_state, LocationDB())
 
         def resolve_register(self, regname: str) -> int:
+            if regname == EXECUTION_TID.name:
+                tid = self._state.execution_tid
+                if type(tid) is not int or not 0 < tid < 1 << 31:
+                    raise SymbolEvaluationError("Independent execution TID is missing or invalid.")
+                return tid
+            occurrence = _allocation_occurrence(regname)
+            if occurrence is not None:
+                if occurrence >= len(self._state.allocation_bases):
+                    raise SymbolEvaluationError("Independent allocation context is missing.")
+                return self._state.allocation_bases[occurrence]
             return self._state.read_register(self._miasm_to_regname(regname))
 
         def resolve_memory(self, addr: int, size: int) -> bytes:
@@ -106,6 +136,11 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
                 "[In eval_symbol]: Unable to evaluate symbols that contain IR location expressions."
             )
 
+    for node in iter_expression_dag(symbol):
+        if isinstance(node, ExprId) and isinstance(node.name, str):
+            contextual = node.name == EXECUTION_TID.name or _allocation_occurrence(node.name) is not None
+            if contextual and node.size != 64:
+                raise SymbolEvaluationError("Execution-context expression must have width 64.")
     res = eval_expr(symbol, ConcreteStateWrapper(conc_state))
 
     # Must be either ExprInt or ExprLoc,
@@ -122,6 +157,224 @@ def _miasm_mode(arch: Arch) -> int | str:
     if arch.archname == "aarch64":
         return arch.endianness[0]
     return arch.ptr_size
+
+
+class _AArch64DupGeneral(miasm_instr):
+    """Project-side AdvSIMD DUP(general), absent from pinned Miasm.
+
+    Arm DUP (general): size=LowestSetBit(imm5[3:0]); higher imm5 bits
+    are ignored. Q=0 clears the upper 64 destination bits. No FP arithmetic,
+    flags, memory or TLS effects occur. This is the Linux userspace AdvSIMD
+    instruction model; disabled/trapped AdvSIMD still fails native validation.
+    """
+
+    def __init__(self, word: int, offset: int = 0):
+        imm5, q = (word >> 16) & 31, (word >> 30) & 1
+        low = imm5 & 15
+        if not low or (low == 8 and q == 0):
+            raise UnsupportedInstructionError("Reserved AArch64 DUP(general) size/Q encoding.")
+        width = 8 * (low & -low)
+        source = ('X' if width == 64 else 'W') + (str((word >> 5) & 31) if ((word >> 5) & 31) != 31 else 'ZR')
+        super().__init__('DUP', 'l', [ExprId(f'V{word & 31}', 128),
+                                     ExprId(source, 64 if width == 64 else 32)], word)
+        self.offset = offset
+        self.l = 4
+
+    @property
+    def element_width(self) -> int:
+        low = (self.additional_info >> 16) & 15
+        return 8 * (low & -low)
+
+    @property
+    def vector_width(self) -> int:
+        return 64 << ((self.additional_info >> 30) & 1)
+
+    @staticmethod
+    def arg2str(expr, index=None, loc_db=None):
+        return str(expr)
+
+    def to_string(self, loc_db=None):
+        suffix = {8: 'B', 16: 'H', 32: 'S', 64: 'D'}[self.element_width]
+        return f'DUP {self.args[0]}.{self.vector_width // self.element_width}{suffix}, {self.args[1]}'
+
+
+def _decode_aarch64_dup(data: bytes, arch: Arch, offset: int = 0) -> _AArch64DupGeneral | None:
+    if arch.archname != 'aarch64' or arch.endianness != 'little' or len(data) < 4:
+        return None
+    word = int.from_bytes(data[:4], 'little')
+    # Not DUP(element), INS, SMOV/UMOV, scalar DUP or SVE DUP.
+    if word & 0xBFE0FC00 != 0x0E000C00:
+        return None
+    return _AArch64DupGeneral(word, offset)
+
+
+def _parse_aarch64_dup(text: str, arch: Arch, offset: int, length: int) -> _AArch64DupGeneral | None:
+    if arch.archname != 'aarch64' or not re.match(r'^\s*DUP\b', text, re.IGNORECASE):
+        return None
+    match = re.fullmatch(r'\s*DUP\s+V([0-9]+)\.(8B|16B|4H|8H|2S|4S|2D),\s*([WX])([0-9]+|ZR)\s*', text.upper())
+    if arch.endianness != 'little' or match is None or length not in (0, 4):
+        raise UnsupportedInstructionError('Unsupported AArch64 DUP form, mode or length.')
+    d, arrangement, source_width, register = match.groups()
+    width = {'B': 8, 'H': 16, 'S': 32, 'D': 64}[arrangement[-1]]
+    datasize = int(arrangement[:-1]) * width
+    n = 31 if register == 'ZR' else int(register)
+    if not 0 <= int(d) < 32 or not 0 <= n < 32 or (register != 'ZR' and n == 31) or source_width != ('X' if width == 64 else 'W'):
+        raise UnsupportedInstructionError('Invalid AArch64 DUP general registers.')
+    return _AArch64DupGeneral(0x0E000C00 | ((datasize == 128) << 30) | ((width // 8) << 16) | (n << 5) | int(d), offset)
+
+
+class _AArch64DcZva(miasm_instr):
+    """Narrow DC ZVA decode; memory semantics retain a target DCZID guard."""
+
+    def __init__(self, word: int, offset: int = 0):
+        n = word & 31
+        super().__init__('DC', 'l', [ExprId('XZR' if n == 31 else f'X{n}', 64)], word)
+        self.offset = offset
+        self.l = 4
+
+    @staticmethod
+    def arg2str(expr, index=None, loc_db=None):
+        return str(expr)
+
+    def to_string(self, loc_db=None):
+        return f'DC ZVA, {self.args[0]}'
+
+
+def _decode_aarch64_dczva(data: bytes, arch: Arch, offset: int = 0) -> _AArch64DcZva | None:
+    if arch.archname != 'aarch64' or arch.endianness != 'little' or len(data) < 4:
+        return None
+    word = int.from_bytes(data[:4], 'little')
+    return _AArch64DcZva(word, offset) if word & 0xFFFFFFE0 == 0xD50B7420 else None
+
+
+def _parse_aarch64_dczva(text: str, arch: Arch, offset: int, length: int) -> _AArch64DcZva | None:
+    if arch.archname != 'aarch64' or not re.match(r'^\s*DC\b', text, re.IGNORECASE):
+        return None
+    match = re.fullmatch(r'\s*DC\s+ZVA,\s*X([0-9]+|ZR)\s*', text.upper())
+    if arch.endianness != 'little' or match is None or length not in (0, 4):
+        raise UnsupportedInstructionError('Unsupported AArch64 DC form, mode or length.')
+    n = 31 if match[1] == 'ZR' else int(match[1])
+    if not 0 <= n < 32 or (n == 31 and match[1] != 'ZR'):
+        raise UnsupportedInstructionError('Invalid AArch64 DC ZVA register.')
+    return _AArch64DcZva(0xD50B7420 | n, offset)
+
+
+class _X86Vmovdqa(miasm_instr):
+    """VEX.256.66.0F.WIG aligned moves, RIP+disp32 or RSP+disp8 only."""
+
+    def __init__(self, raw: bytes, offset: int = 0):
+        if (len(raw) not in (6, 8) or raw[:2] != b'\xc5\xfd'
+                or raw[2] not in (0x6f, 0x7f)
+                or not ((len(raw) == 8 and raw[3] == 5 and raw[2] == 0x6f)
+                        or (len(raw) == 6 and raw[3:5] == b'\x44\x24'))):
+            raise UnsupportedInstructionError('Unsupported VMOVDQA encoding.')
+        base = 'RIP' if len(raw) == 8 else 'RSP'
+        displacement = int.from_bytes(raw[4:] if base == 'RIP' else raw[5:], 'little', signed=True)
+        pointer = ExprId(base, 64) + ExprInt(displacement + (len(raw) if base == 'RIP' else 0), 64)
+        memory, register = ExprMem(pointer, 256), ExprId('YMM0', 256)
+        args = [register, memory] if raw[2] == 0x6f else [memory, register]
+        super().__init__('VMOVDQA', 64, args, raw)
+        self.offset, self.l = offset, len(raw)
+
+    def validate(self):
+        expected = _X86Vmovdqa(self.additional_info, self.offset)
+        if self.mode != 64 or self.l != expected.l or self.args != expected.args or self.name != expected.name:
+            raise UnsupportedInstructionError('VMOVDQA operands, width or length disagree with encoding.')
+
+    @staticmethod
+    def arg2str(expr, index=None, loc_db=None):
+        return str(expr)
+
+
+def _decode_x86_vmovdqa(data: bytes, arch: Arch, offset: int = 0):
+    if arch.archname != 'x86_64' or data[:2] != b'\xc5\xfd' or len(data) < 4 or data[2] not in (0x6f, 0x7f):
+        return None
+    length = 8 if data[3] == 5 else 6
+    return _X86Vmovdqa(data[:length], offset)
+
+
+class _X86AvxLogic(miasm_instr):
+    """Only the four exact AVX forms observed in the retained vector ELF.
+
+    VEX XOR has bitwise (not FP) semantics. VZEROUPPER clears bits
+    MAXVL-1:128 of registers 0..15, leaving registers 16..31 untouched.
+    VPTEST tests all 256 bits, not just packed-element sign bits.
+    """
+
+    def __init__(self, raw: bytes, offset: int = 0):
+        xmm, ymm = ExprId('XMM0', 128), ExprId('YMM0', 256)
+        forms = {
+            bytes.fromhex('c5f9efc0'): ('VPXOR', [xmm, xmm, xmm]),
+            bytes.fromhex('c5f877'): ('VZEROUPPER', []),
+            bytes.fromhex('c5fc574424e0'): ('VXORPS', [ymm, ymm, ExprMem(ExprId('RSP', 64) + ExprInt(-32, 64), 256)]),
+            bytes.fromhex('c4e27d17c0'): ('VPTEST', [ymm, ymm]),
+        }
+        if raw not in forms:
+            raise UnsupportedInstructionError('Unsupported AVX logic encoding.')
+        name, args = forms[raw]
+        super().__init__(name, 64, args, raw)
+        self.offset, self.l = offset, len(raw)
+
+    def validate(self):
+        expected = _X86AvxLogic(self.additional_info, self.offset)
+        if self.mode != 64 or self.l != expected.l or self.args != expected.args or self.name != expected.name:
+            raise UnsupportedInstructionError('AVX logic operands, width or length disagree with encoding.')
+
+    @staticmethod
+    def arg2str(expr, index=None, loc_db=None):
+        return str(expr)
+
+
+def _decode_x86_avx_logic(data: bytes, arch: Arch, offset: int = 0):
+    if arch.archname != 'x86_64':
+        return None
+    for raw in (bytes.fromhex('c5f9efc0'), bytes.fromhex('c5f877'),
+                bytes.fromhex('c5fc574424e0'), bytes.fromhex('c4e27d17c0')):
+        if data.startswith(raw):
+            return _X86AvxLogic(raw, offset)
+    return None
+
+
+def _parse_x86_project_instruction(
+    text: str, arch: Arch, offset: int, length: int,
+) -> miasm_instr | None:
+    """Parse the exact project-owned AVX forms emitted by ``str(instr)``."""
+    if arch.archname != 'x86_64':
+        return None
+    normalized = ' '.join(text.upper().split())
+    logic_forms = {
+        ('VPXOR XMM0, XMM0, XMM0', 4): bytes.fromhex('c5f9efc0'),
+        ('VZEROUPPER', 3): bytes.fromhex('c5f877'),
+        ('VXORPS YMM0, YMM0, @256[RSP + 0XFFFFFFFFFFFFFFE0]', 6): bytes.fromhex('c5fc574424e0'),
+        ('VPTEST YMM0, YMM0', 5): bytes.fromhex('c4e27d17c0'),
+    }
+    raw = logic_forms.get((normalized, length))
+    if raw is not None:
+        return _X86AvxLogic(raw, offset)
+    stack_match = re.fullmatch(
+        r'VMOVDQA (?:(@256\[RSP \+ 0X([0-9A-F]+)\]), YMM0|YMM0, @256\[RSP \+ 0X([0-9A-F]+)\])',
+        normalized,
+    )
+    if stack_match is not None and length == 6:
+        load = stack_match.group(3) is not None
+        unsigned = int(stack_match.group(3) if load else stack_match.group(2), 16)
+        displacement = unsigned - (1 << 64) if unsigned >= (1 << 63) else unsigned
+        if not -128 <= displacement < 128:
+            raise UnsupportedInstructionError('VMOVDQA RSP displacement is not signed 8-bit.')
+        return _X86Vmovdqa(
+            bytes.fromhex('c5fd6f4424' if load else 'c5fd7f4424')
+            + displacement.to_bytes(1, 'little', signed=True),
+            offset,
+        )
+    match = re.fullmatch(r'VMOVDQA YMM0, @256\[RIP \+ 0X([0-9A-F]+)\]', normalized)
+    if match is None or length != 8:
+        return None
+    pointer_displacement = int(match.group(1), 16)
+    encoded_displacement = pointer_displacement - length
+    if not -(1 << 31) <= encoded_displacement < (1 << 31):
+        raise UnsupportedInstructionError('VMOVDQA RIP displacement is not signed 32-bit.')
+    raw = bytes.fromhex('c5fd6f05') + encoded_displacement.to_bytes(4, 'little', signed=True)
+    return _X86Vmovdqa(raw, offset)
 
 
 class Instruction:
@@ -148,20 +401,48 @@ class Instruction:
         """Disassemble an instruction."""
         machine = make_machine(arch)
         assert machine.mn is not None
-        _instr = machine.mn.dis(asm, _miasm_mode(arch))
+        _instr = _decode_x86_avx_logic(asm, arch) or _decode_x86_vmovdqa(asm, arch) or _decode_aarch64_dup(asm, arch) or _decode_aarch64_dczva(asm, arch) or machine.mn.dis(asm, _miasm_mode(arch))
         return Instruction(_instr, machine, arch, None)
 
     @staticmethod
     def from_string(s: str, arch: Arch, offset: int = 0, length: int = 0) -> Instruction:
         machine = make_machine(arch)
         assert machine.mn is not None
-        _instr = machine.mn.fromstring(s, LocationDB(), _miasm_mode(arch))
+        if arch.archname == 'aarch64':
+            # Arm's unsigned carry aliases are identical condition encodings.
+            s = re.sub(r'^\s*B\.(LO|HS)(?=\s|$)',
+                       lambda match: {'LO': 'B.CC', 'HS': 'B.CS'}[match[1].upper()],
+                       s, flags=re.IGNORECASE)
+        _instr = (_parse_x86_project_instruction(s, arch, offset, length)
+                  or _parse_aarch64_dup(s, arch, offset, length)
+                  or _parse_aarch64_dczva(s, arch, offset, length)
+                  or machine.mn.fromstring(s, LocationDB(), _miasm_mode(arch)))
         _instr.offset = offset
-        _instr.l = length
+        _instr.l = length or (4 if isinstance(_instr, (_AArch64DupGeneral, _AArch64DcZva)) else 0)
         return Instruction(_instr, machine, arch, None)
 
     def to_bytecode(self) -> bytes:
         """Assemble the instruction to byte code."""
+        if isinstance(self.instr, (_X86Vmovdqa, _X86AvxLogic)):
+            self.instr.validate()
+            return self.instr.additional_info
+        if isinstance(self.instr, (_AArch64DupGeneral, _AArch64DcZva)):
+            return self.instr.additional_info.to_bytes(4, 'little')
+        if self.arch.archname == 'aarch64' and self.instr.name in ('B.CC', 'B.CS'):
+            # Project instructions carry resolved absolute targets; Miasm's
+            # assembler instead expects an imm19 displacement. Preserve the
+            # semantic operand, and encode/check the signed displacement here.
+            if (self.instr.mode != _miasm_mode(self.arch) or self.length not in (0, 4)
+                    or len(self.instr.args) != 1 or not isinstance(self.instr.args[0], ExprInt)):
+                raise UnsupportedInstructionError('Invalid AArch64 carry-branch mode or operands.')
+            displacement = (int(self.instr.args[0]) - self.addr) & ((1 << 64) - 1)
+            if displacement >= 1 << 63:
+                displacement -= 1 << 64
+            if displacement % 4 or not -(1 << 20) <= displacement < (1 << 20):
+                raise UnsupportedInstructionError('AArch64 carry-branch target is unaligned or out of range.')
+            condition = 3 if self.instr.name == 'B.CC' else 2
+            word = 0x54000000 | ((displacement // 4 & 0x7FFFF) << 5) | condition
+            return word.to_bytes(4, self.arch.endianness)
         assert self.machine.mn is not None
         return self.machine.mn.asm(self.instr)[0]
 
@@ -223,6 +504,19 @@ class _TransformEvaluator(MiasmSymbolResolver):
         self._indexed_write_count = 0
         self._building_index = False
 
+    def resolve_register(self, regname: str) -> int | None:
+        if regname == EXECUTION_TID.name:
+            tid = self._state.execution_tid
+            if tid is None:
+                raise SymbolEvaluationError("Independent execution TID context is missing.")
+            return tid
+        occurrence = _allocation_occurrence(regname)
+        if occurrence is not None:
+            if occurrence >= len(self._state.allocation_bases):
+                raise SymbolEvaluationError("Independent allocation context is missing.")
+            return self._state.allocation_bases[occurrence]
+        return super().resolve_register(regname)
+
     def _ensure_write_index(self) -> None:
         if self._indexed_write_count == len(self._writes) or self._building_index:
             return
@@ -265,6 +559,11 @@ class _TransformEvaluator(MiasmSymbolResolver):
         return ExprInt(data[0], args[0].size)
 
     def evaluate(self, expression: Expr) -> int:
+        for node in iter_expression_dag(expression):
+            if isinstance(node, ExprId) and isinstance(node.name, str):
+                contextual = node.name == EXECUTION_TID.name or _allocation_occurrence(node.name) is not None
+                if contextual and node.size != 64:
+                    raise SymbolEvaluationError("Execution context requires 64-bit expression width.")
         result = eval_expr(expression, self)
         if not isinstance(result, ExprInt):
             raise SymbolEvaluationError(
@@ -425,6 +724,12 @@ class SymbolicTransform:
 
         self.normalize_architectural_unknowns()
         self._reset_validation_register_names()
+        self._register_output_cache_key: tuple[tuple[str, Expr], ...] | None = None
+        self._canonical_register_output_cache: dict[str, Expr] = {}
+        self._validation_register_output_cache_key: tuple[
+            tuple[tuple[str, Expr], ...], frozenset[str]
+        ] | None = None
+        self._validation_register_output_cache: dict[str, Expr] = {}
 
     def _reset_validation_register_names(self) -> None:
         names: set[str] = set()
@@ -502,7 +807,13 @@ class SymbolicTransform:
 
     def canonical_register_outputs(self) -> dict[str, Expr]:
         """Return base-register outputs expressed over the transition source."""
-        return _canonical_register_outputs(self)
+        # changed_regs remains public for compatibility, so key the cache by its
+        # actual content rather than assuming callers only mutate via concat().
+        key = tuple(self.changed_regs.items())
+        if key != self._register_output_cache_key:
+            self._canonical_register_output_cache = _canonical_register_outputs(self)
+            self._register_output_cache_key = key
+        return self._canonical_register_output_cache.copy()
 
     def get_used_registers(self) -> list[str]:
         """Find all register inputs using an iterative DAG traversal."""
@@ -550,12 +861,46 @@ class SymbolicTransform:
 
         registers: set[str] = set()
         for expression in expressions:
-            for node in iter_expression_dag(expression):
-                if not isinstance(node, ExprId) or not isinstance(node.name, str):
+            pending = [expression]
+            visited: set[int] = set()
+            while pending:
+                node = pending.pop()
+                if id(node) in visited:
                     continue
-                canonical = self.arch.to_regname(node.name)
-                if canonical is not None:
-                    registers.add(canonical)
+                visited.add(id(node))
+                if isinstance(node, ExprSlice) and isinstance(node.arg, ExprId):
+                    identifier = node.arg
+                    canonical = (
+                        self.arch.to_regname(identifier.name)
+                        if isinstance(identifier.name, str)
+                        else None
+                    )
+                    accessor = (
+                        self.arch.get_reg_accessor(canonical)
+                        if canonical is not None
+                        else None
+                    )
+                    if accessor is not None and accessor.num_bits == identifier.size:
+                        absolute_start = accessor.start + node.start
+                        absolute_end = accessor.start + node.stop
+                        aliases = sorted(
+                            name
+                            for name in self.arch.all_regnames
+                            if (
+                                (alias := self.arch.get_reg_accessor(name)) is not None
+                                and alias.base_reg == accessor.base_reg
+                                and alias.start == absolute_start
+                                and alias.end == absolute_end
+                            )
+                        )
+                        if aliases:
+                            registers.add(aliases[0])
+                            continue
+                if isinstance(node, ExprId) and isinstance(node.name, str):
+                    canonical = self.arch.to_regname(node.name)
+                    if canonical is not None:
+                        registers.add(canonical)
+                pending.extend(reversed(expression_children(node)))
         return sorted(registers)
 
     def get_used_memory_addresses(self) -> list[ExprMem]:
@@ -586,6 +931,11 @@ class SymbolicTransform:
         independent defined slices. Architecturally zero-extending writes are
         validated through their complete base register.
         """
+        changed_key = tuple(self.changed_regs.items())
+        cache_key = (changed_key, frozenset(self._validation_register_names))
+        if cache_key == self._validation_register_output_cache_key:
+            return self._validation_register_output_cache.copy()
+
         canonical_outputs = self.canonical_register_outputs()
         outputs: dict[str, Expr] = {}
         for regname in sorted(self._validation_register_names):
@@ -617,7 +967,9 @@ class SymbolicTransform:
                 )
             if not _contains_architectural_unknown(expression):
                 outputs[regname] = expression
-        return outputs
+        self._validation_register_output_cache = outputs
+        self._validation_register_output_cache_key = cache_key
+        return outputs.copy()
 
     def eval_validation_register_transforms(
         self,
@@ -650,6 +1002,10 @@ class SymbolicTransform:
                 continue
             res[regname] = evaluator.evaluate(expr)
         return res
+
+    def eval_memory_address(self, expression: Expr, conc_state: ReadableProgramState) -> int:
+        """Evaluate an output address with this transform's ordered-store context."""
+        return _TransformEvaluator(conc_state, self.memory_writes).evaluate(expression)
 
     def eval_memory_transforms(self, conc_state: ReadableProgramState) -> dict[int, bytes]:
         """Calculate memory transformations when applied to a concrete state.
@@ -892,6 +1248,11 @@ def _read_symbolic_register(
     state: _SymbolicState,
 ) -> tuple[Expr, int]:
     if not isinstance(identifier.name, str):
+        return identifier, 0
+    if identifier.name == EXECUTION_TID.name or _allocation_occurrence(identifier.name) is not None:
+        if identifier.size != 64:
+            raise SymbolicCompositionError("Execution-context expression must have width 64.")
+        # Execution context is immutable across transforms, not register storage.
         return identifier, 0
     canonical = state.arch.to_regname(identifier.name)
     if canonical is None:
@@ -1255,6 +1616,7 @@ class DisassemblyContext:
         # Determine the binary's architecture
         self.machine = make_machine(target.arch)
         self.arch = target.arch
+        self._target = target
 
         # Create disassembly/lifting context
         assert self.machine.dis_engine is not None
@@ -1266,11 +1628,39 @@ class DisassemblyContext:
     def disassemble(self, address: int) -> Instruction:
         try:
             miasm_instr = self.mdis.dis_instr(address)
-        except IndexError as err:
-            # Miasm's dis_instr indexes block.lines[0] when decoding produced
-            # an empty block. Normalize that dependency failure at its direct
-            # boundary so callers can attempt another disassembler.
-            raise Disasm_Exception(f"Miasm decoded no instruction at {hex(address)}.") from err
+        except (IndexError, Disasm_Exception, MemoryAccessError) as err:
+            # Probe the narrow extension only on decode failure, not with an
+            # additional target memory read for every supported instruction.
+            if self.arch.archname == 'aarch64' and self.arch.endianness == 'little':
+                raw = self._target.read_instructions(address, 4)
+                extension = _decode_aarch64_dup(raw, self.arch, address) or _decode_aarch64_dczva(raw, self.arch, address)
+                if extension is not None:
+                    return Instruction(extension, self.machine, self.arch, self.loc_db)
+            if self.arch.archname == 'x86_64':
+                prefix = self._target.read_instructions(address, 3)
+                lengths = {b'\xc5\xf9\xef': 4, b'\xc5\xf8\x77': 3,
+                           b'\xc5\xfc\x57': 6, b'\xc4\xe2\x7d': 5}
+                if prefix in lengths:
+                    raw = self._target.read_instructions(address, lengths[prefix])
+                    extension = _decode_x86_avx_logic(raw, self.arch, address)
+                    if extension is not None:
+                        return Instruction(extension, self.machine, self.arch, self.loc_db)
+                prefix = self._target.read_instructions(address, 4)
+                if prefix[:2] == b'\xc5\xfd' and prefix[2] in (0x6f, 0x7f):
+                    raw = self._target.read_instructions(address, 8 if prefix[3] == 5 else 6)
+                    extension = _decode_x86_vmovdqa(raw, self.arch, address)
+                    if extension is not None:
+                        return Instruction(extension, self.machine, self.arch, self.loc_db)
+            # Miasm's dis_instr indexes block.lines[0] for an empty block.
+            if isinstance(err, IndexError):
+                raise Disasm_Exception(f"Miasm decoded no instruction at {hex(address)}.") from err
+            raise
+        # Pinned Miasm labels this SYS encoding as IC rather than DC ZVA.
+        # Override only the exact DC ZVA word, never all cache operations.
+        if self.arch.archname == 'aarch64' and self.arch.endianness == 'little' and miasm_instr.name == 'IC':
+            extension = _decode_aarch64_dczva(self._target.read_instructions(address, 4), self.arch, address)
+            if extension is not None:
+                return Instruction(extension, self.machine, self.arch, self.loc_db)
         return Instruction(miasm_instr, self.machine, self.arch, self.loc_db)
 
 
@@ -1384,6 +1774,63 @@ def run_instruction(
         if not isinstance(new_pc, ExprInt):
             raise SymbolEvaluationError(f"Program counter remains unresolved as {new_pc!r}.")
         return new_pc, modified
+
+    if isinstance(instr, _X86AvxLogic):
+        instr.validate()
+        if str(lifter.pc) != 'RIP' or lifter.attrib != 64:
+            raise UnsupportedInstructionError('AVX logic requires an x86-64 lifter.')
+        next_pc = ExprInt(instr.offset + instr.l, 64)
+        outputs = {lifter.pc: next_pc, lifter.IRDst: next_pc}
+        if instr.name == 'VZEROUPPER':
+            outputs.update({ExprId(f'ZMM{n}', 512): ExprId(f'XMM{n}', 128).zeroExtend(512)
+                            for n in range(16)})
+        elif instr.name in ('VPXOR', 'VXORPS'):
+            outputs[ExprId('ZMM0', 512)] = expr_simp(instr.args[1] ^ instr.args[2]).zeroExtend(512)
+        else:
+            lhs, rhs = instr.args
+            outputs[ExprId('zf', 1)] = expr_simp(ExprCond(lhs & rhs, ExprInt(0, 1), ExprInt(1, 1)))
+            outputs[ExprId('cf', 1)] = expr_simp(ExprCond((lhs ^ ExprInt((1 << 256) - 1, 256)) & rhs,
+                                                       ExprInt(0, 1), ExprInt(1, 1)))
+            outputs.update({ExprId(flag, 1): ExprInt(0, 1) for flag in ('of', 'sf', 'af', 'pf')})
+        return next_pc, outputs
+
+    if isinstance(instr, _X86Vmovdqa):
+        instr.validate()
+        if instr.mode != 64 or str(lifter.pc) != 'RIP' or instr.l != len(instr.additional_info):
+            raise UnsupportedInstructionError('VMOVDQA requires an x86-64 lifter and exact encoding.')
+        dst, src = instr.args
+        memory = src if isinstance(src, ExprMem) else dst
+        value = src + ExprOp('x86_aligned_vector256', memory.ptr).zeroExtend(256)
+        if isinstance(dst, ExprId):
+            dst, value = ExprId('ZMM0', 512), value.zeroExtend(512)
+        next_pc = ExprInt(instr.offset + instr.l, 64)
+        return next_pc, {dst: value, lifter.pc: next_pc, lifter.IRDst: next_pc}
+
+    if isinstance(instr, _AArch64DcZva):
+        if instr.mode != 'l' or lifter.attrib != 'l' or str(lifter.pc) != 'PC' or instr.l != 4:
+            raise UnsupportedInstructionError('DC ZVA requires a matching little-endian AArch64 lifter.')
+        # The observed musl path uses permitted 64-byte blocks (DCZID=4).
+        # Keep that requirement in the expression, so the emulator must supply
+        # its OWN capability. Different sizes/DZP never become an assumed zero.
+        address = instr.args[0] & ExprInt((1 << 64) - 64, 64)
+        capability = ExprId('DCZID_EL0', 64)
+        guard = ExprOp('aarch64_dczva_zero64', capability)
+        zero = guard.zeroExtend(512)
+        next_pc = ExprInt(instr.offset + 4, 64)
+        # A guarded identity is a postcondition, not a system-register write.
+        # It preserves the capability obligation if later stores overwrite all
+        # zeroed bytes during cutpoint composition.
+        return next_pc, {ExprMem(address, 512): zero, capability: capability + guard,
+                         lifter.pc: next_pc, lifter.IRDst: next_pc}
+
+    if isinstance(instr, _AArch64DupGeneral):
+        if instr.mode != 'l' or lifter.attrib != 'l' or str(lifter.pc) != 'PC' or instr.l != 4:
+            raise UnsupportedInstructionError('AArch64 DUP requires its matching little-endian lifter and length.')
+        source = instr.args[1]
+        element = source if source.size == instr.element_width else source[:instr.element_width]
+        value = ExprCompose(*([element] * (instr.vector_width // instr.element_width))).zeroExtend(128)
+        next_pc = ExprInt(instr.offset + 4, 64)
+        return next_pc, {instr.args[0]: value, lifter.pc: next_pc, lifter.IRDst: next_pc}
 
     # Lift and execute the instruction through one typed unsupported boundary.
     ircfg = lifter.new_ircfg()

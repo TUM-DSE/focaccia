@@ -429,6 +429,8 @@ def _find_memory_errors(
                     ErrorTypes.CONFIRMED,
                     f"Content of memory at {hex(address)} is false. Expected "
                     f"{truth_bytes.hex()}, actual {txl_bytes.hex()}.",
+                    code="memory-content-mismatch",
+                    subject=hex(address),
                 )
             )
     return errors

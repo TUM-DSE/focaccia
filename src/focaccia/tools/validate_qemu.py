@@ -20,6 +20,7 @@ import focaccia.qemu
 from focaccia.arch import supported_architectures
 from focaccia.compare import ErrorTypes
 from focaccia.qemu.report import write_validation_failure_report
+from focaccia.qemu.transport_profile import XMM_READ_PROFILE
 from focaccia.qemu.validation_server import start_validation_server
 from focaccia.trace import TraceEnvironment
 
@@ -106,6 +107,14 @@ observe guest state and validate it against a symbolic native trace.
         help="QEMU GDB server hostname:port.",
     )
     parser.add_argument(
+        '--qemu-aarch64-cpu-model', choices=['neoverse-v1'], default=None,
+        help='Bind a local Linux-user QEMU CPU model using its live process arguments and MIDR; supplies model-defined DCZID when XML omits it.',
+    )
+    parser.add_argument(
+        '--qemu-xmm-read-profile', choices=[XMM_READ_PROFILE], default=None,
+        help='Normalize the audited QEMU 6.1 XMM read packet defect; requires the exact supported local executable digest.',
+    )
+    parser.add_argument(
         "--gdb",
         type=str,
         default="gdb",
@@ -150,6 +159,14 @@ observe guest state and validate it against a symbolic native trace.
         help="Write opt-in QEMU validation component timings as JSON.",
     )
     parser.add_argument(
+        "--plugin-terminal-ready",
+        help="Write a process-bound readiness record after plugin FINISH.",
+    )
+    parser.add_argument(
+        "--plugin-terminal-evidence",
+        help="Read parent-observed guest termination evidence (plugin backend).",
+    )
+    parser.add_argument(
         "--run-manifest",
         help="Verify this content-bound RR/QEMU run manifest before validation.",
     )
@@ -168,6 +185,10 @@ def validate_backend_options(
     args: argparse.Namespace,
 ) -> None:
     if args.use_socket is not None:
+        if getattr(args, 'qemu_xmm_read_profile', None) is not None:
+            parser.error('--qemu-xmm-read-profile requires the GDB backend')
+        if getattr(args, 'qemu_aarch64_cpu_model', None) is not None:
+            parser.error('--qemu-aarch64-cpu-model requires the GDB backend')
         if args.remote is not None:
             parser.error("--remote and --use-socket select different backends")
         if args.guest_arch is None:
@@ -176,8 +197,12 @@ def validate_backend_options(
             parser.error("run-manifest verification currently requires the GDB backend")
         if args.cutpoint_address:
             parser.error("--cutpoint-address currently requires the GDB backend")
+        if (args.plugin_terminal_ready is None) != (args.plugin_terminal_evidence is None):
+            parser.error("plugin terminal readiness and evidence paths must be provided together")
     elif args.remote is None:
         parser.error("--remote is required unless --use-socket is specified")
+    elif args.plugin_terminal_ready is not None or args.plugin_terminal_evidence is not None:
+        parser.error("plugin terminal evidence options require --use-socket")
     if args.run_manifest is not None:
         if args.deterministic_log is None:
             parser.error("--run-manifest requires --deterministic-log")
@@ -330,6 +355,8 @@ def main() -> None:
                 args.skip_unmatched,
                 args.report,
                 args.profile_report,
+                args.plugin_terminal_ready,
+                args.plugin_terminal_evidence,
             )
         except Exception as error:
             if args.report is not None and not Path(args.report).is_file():

@@ -6,13 +6,17 @@ from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from miasm.expression.expression import ExprId
+
 from .snapshot import ProgramState, RegisterAccessError
 from .symbolic import (
     SymbolicDependencies,
     SymbolicTraceItem,
+    SymbolicTransform,
     SymbolicTransformComposer,
     TraceGap,
 )
+from .miasm_util import iter_expression_dag
 from .trace import (
     DiagnosticLevel,
     MaterializedTrace,
@@ -40,6 +44,9 @@ class MatchResult:
     trace: TransitionTrace[ProgramState, SymbolicTraceItem] | None
     diagnostics: tuple[TraceDiagnostic, ...]
     pending_transform: SymbolicTraceItem | None = None
+    # Original ordinary transforms whose semantics reached a retained boundary.
+    # None denotes older/external callers without consumption evidence.
+    consumed_transform_count: int | None = None
 
     @property
     def complete(self) -> bool:
@@ -102,6 +109,7 @@ class TransitionMatcher:
 
         self._diagnostics: list[TraceDiagnostic] = []
         self._next_transform_index = 0
+        self._consumed_transform_count = 0
         self._loaded_transforms: dict[int, SymbolicTraceItem] = {}
         self._current_index: int | None = None
         self._current: SymbolicTraceItem | None = None
@@ -129,6 +137,11 @@ class TransitionMatcher:
     @property
     def pending_transform(self) -> SymbolicTraceItem | None:
         return self._pending_transform
+
+    @property
+    def current_transform_index(self) -> int | None:
+        """Ordered original occurrence at the current live source boundary."""
+        return self._current_index if self._has_source else None
 
     @property
     def current_destination_pc(self) -> int | None:
@@ -592,6 +605,68 @@ class TransitionMatcher:
             self._planned_destinations[key] = planned
         return planned
 
+    def plan_materialized_destination(
+        self,
+        unavailable_outputs: set[str],
+    ) -> tuple[int, SymbolicTransform] | None:
+        """Find the first later boundary that materializes unavailable outputs.
+
+        Some debugger transports omit architectural registers permanently.  A
+        register-producing transform is still observable at a later memory
+        effect when composition eliminates that transient register from the
+        source dependencies.  This plans that adaptive cutpoint without
+        discarding any transform or relying on instruction addresses.
+        """
+        if self._done or not self._has_source or not unavailable_outputs:
+            return None
+        assert self._current is not None
+        assert self._current_index is not None
+        if isinstance(self._current, TraceGap):
+            return None
+
+        unavailable_bases = {
+            accessor.base_reg
+            for name in unavailable_outputs
+            if (accessor := self._current.arch.get_reg_accessor(name)) is not None
+        }
+        previous: SymbolicTraceItem = self._current
+        for end_index in range(self._current_index + 1, len(self.addresses)):
+            transform = self._read_transform(end_index)
+            if transform is None or isinstance(transform, TraceGap):
+                return None
+            if previous.range[1] != transform.range[0] or previous.tid != transform.tid:
+                return None
+            planned = self._compose_through(end_index, self._concrete_count)
+            if not isinstance(planned, SymbolicTransform):
+                return None
+            dependency_bases: set[str] = set()
+            for write in planned.memory_writes:
+                for expression in (write.address, write.value):
+                    for node in iter_expression_dag(expression):
+                        if not isinstance(node, ExprId) or not isinstance(node.name, str):
+                            continue
+                        canonical = planned.arch.to_regname(node.name)
+                        accessor = (
+                            planned.arch.get_reg_accessor(canonical)
+                            if canonical is not None
+                            else None
+                        )
+                        if accessor is not None:
+                            dependency_bases.add(accessor.base_reg)
+            if planned.memory_writes and unavailable_bases.isdisjoint(dependency_bases):
+                self._planned_destinations[(self._current_index, end_index)] = planned
+                return planned.range[1], planned
+            previous = transform
+            underlying = (
+                getattr(transform.instructions[-1], "instr", None)
+                if transform.instructions
+                else None
+            )
+            breakflow = getattr(underlying, "breakflow", None)
+            if callable(breakflow) and breakflow():
+                return None
+        return None
+
     def observe(self, pc: int) -> MatchedBoundary | None:
         concrete_index = self._concrete_count
         self._concrete_count += 1
@@ -710,6 +785,8 @@ class TransitionMatcher:
             return None
 
         composed_count = end_index - start_index + 1
+        if not isinstance(incoming, TraceGap):
+            self._consumed_transform_count += composed_count
         if composed_count > 1:
             self._diagnose(
                 "info",
@@ -815,7 +892,9 @@ class TransitionMatcher:
                     "matched-trace-cardinality",
                     str(error),
                 )
-        return MatchResult(trace, self.diagnostics, self._pending_transform)
+        return MatchResult(
+            trace, self.diagnostics, self._pending_transform, self._consumed_transform_count
+        )
 
 
 def match_transitions(

@@ -232,6 +232,70 @@
       exec ${pythonEnv}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
     '';
 
+    # Build only: these native fixtures are never executed by flake checks.
+    nativeTerminalFixtures = pkgs.stdenv.mkDerivation {
+      name = "native-terminal-observation-fixtures";
+      src = ./tests/probes;
+      dontConfigure = true;
+      dontStrip = true;
+      buildPhase = ''
+        $CC -g -O0 -DEXIT_CODE=0 terminal_fixture.c -o exit0
+        $CC -g -O0 -DEXIT_CODE=7 terminal_fixture.c -o exit7
+        $CC -g -O0 -DFATAL_SIGNAL terminal_fixture.c -o fatal-signal
+      '';
+      installPhase = ''
+        mkdir -p "$out/bin"
+        cp exit0 exit7 fatal-signal "$out/bin/"
+      '';
+    };
+
+    # Fake-only contract coverage: no debugger attachment, inferior, or RR.
+    nativeTerminalOutcomeCheck = mkStaticUnitCheck {
+      name = "native-terminal-outcome";
+      ruffTargets = [
+        "src/focaccia/execution.py"
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_terminal_outcome.py"
+      ];
+      pytestTargets = [ "tests/test_native_terminal_outcome.py" ];
+    };
+
+    # Fake-only GDB process events; no debugger, inferior, sockets, or RR.
+    qemuTerminalOutcomeCheck = mkStaticUnitCheck {
+      name = "qemu-terminal-outcome";
+      ruffTargets = [
+        "src/focaccia/qemu/target.py"
+        "tests/test_qemu_terminal_outcome.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_terminal_outcome.py" ];
+    };
+
+    # Fake-only GDB signal delivery semantics: default-fatal, handler stop,
+    # and genuine trap delivery. No debugger, inferior, sockets, or RR.
+    qemuFatalSignalTerminationCheck = mkStaticUnitCheck {
+      name = "qemu-fatal-signal-termination";
+      ruffTargets = [
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_qemu_terminal_outcome.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_terminal_outcome.py"
+        "-k"
+        "pending_guest_signal"
+      ];
+    };
+
+    nativeTerminalObservationCheck = mkStaticUnitCheck {
+      name = "native-terminal-observation-harness";
+      ruffTargets = [
+        "tests/probes/native_terminal_observation.py"
+        "tests/test_native_terminal_observation.py"
+      ];
+      pytestTargets = [ "tests/test_native_terminal_observation.py" ];
+    };
+
     x86FileReadFixture =
       if system == "x86_64-linux" then
         pkgs.stdenv.mkDerivation {
@@ -685,6 +749,68 @@
       ];
     };
 
+    reproducerNarrowGprRestorationCheck = mkStaticUnitCheck {
+      name = "reproducer-narrow-gpr-restoration";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py::test_reproducer_state_restore_uses_known_32_bit_alias_without_inventing_upper_bits"
+        "tests/test_reproducer.py::test_reproducer_state_restore_does_not_invent_unknown_base_register_bits"
+      ];
+    };
+
+    reproducerObservedUpperContextCheck = mkStaticUnitCheck {
+      name = "reproducer-observed-upper-context";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py::test_reproducer_narrow_input_preserves_observed_upper_context"
+        "tests/test_reproducer.py::test_reproducer_state_restore_uses_known_32_bit_alias_without_inventing_upper_bits"
+      ];
+    };
+
+    reproducerSimdMmxRestorationCheck = mkStaticUnitCheck {
+      name = "reproducer-simd-mmx-restoration";
+      ruffTargets = [
+        "src/focaccia/reproducer.py"
+        "tests/test_reproducer.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer.py::test_simd_mmx_restores_canonical_known_xmm_without_zeroing_upper_bits"
+        "tests/test_reproducer.py::test_simd_mmx_restores_exact_mmx_with_valid_instruction"
+        "tests/test_reproducer.py::test_simd_mmx_restore_values_are_validated"
+        "tests/test_reproducer.py::test_simd_mmx_unknown_required_bits_fail_closed"
+        "tests/test_reproducer.py::test_simd_mmx_observed_upper_context_fails_closed"
+        "tests/test_reproducer.py::test_simd_mmx_unsupported_widths_do_not_zero_unknown_context"
+      ];
+    };
+
+    reproducerAarch64BackendCheck = mkStaticUnitCheck {
+      name = "reproducer-aarch64-backend";
+      ruffTargets = [
+        "src/focaccia/reproducer_aarch64.py"
+        "tests/test_reproducer_aarch64.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer_aarch64.py"
+      ];
+    };
+
+    aarch64ReproducerStopCaptureCheck = mkStaticUnitCheck {
+      name = "aarch64-reproducer-stop-capture";
+      ruffTargets = [
+        "src/focaccia/reproducer_aarch64.py"
+        "tests/test_reproducer_aarch64.py"
+      ];
+      pytestTargets = [
+        "tests/test_reproducer_aarch64.py::test_destination_pc_has_unique_mapped_stop_landing_instruction"
+      ];
+    };
+
     reproducerFragmentFidelityCheck = mkStaticUnitCheck {
       name = "reproducer-fragment-fidelity";
       ruffTargets = [
@@ -694,7 +820,33 @@
       pytestTargets = [
         "tests/test_reproducer.py"
         "-k"
-        "exact_fragment or entry_prefix or single_transition or condition_code_seed"
+        "fragment or entry_prefix or single_transition or condition_code_seed"
+      ];
+    };
+
+    # Pure action-policy fixtures; no native debugger, RR, or emulator execution.
+    noReplaySyscallActionsCheck = mkStaticUnitCheck {
+      name = "no-replay-syscall-actions";
+      ruffTargets = [
+        "src/focaccia/no_replay.py"
+        "tests/test_no_replay.py"
+      ];
+      pytestTargets = [ "tests/test_no_replay.py" ];
+    };
+
+    noReplayAnonymousMmapCheck = mkStaticUnitCheck {
+      name = "no-replay-anonymous-mmap";
+      ruffTargets = [
+        "src/focaccia/no_replay.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "tests/test_no_replay.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [
+        "tests/test_no_replay.py"
+        "tests/test_qemu_whole_program.py"
+        "-k"
+        "anonymous_mmap or interior_no_replay_action_kind"
       ];
     };
 
@@ -840,6 +992,20 @@
       ];
     };
 
+    # Fake LLDB values only; no native debugger/ptrace capability required.
+    lldbSegmentSelectorObservationCheck = mkStaticUnitCheck {
+      name = "lldb-segment-selector-observation";
+      ruffTargets = [
+        "src/focaccia/native/lldb_target.py"
+        "tests/test_native_tracing.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "lldb_selector_container"
+      ];
+    };
+
     nativeTargetErrorHandlingCheck = mkStaticUnitCheck {
       name = "native-target-error-handling";
       ruffTargets = [
@@ -947,6 +1113,38 @@
       ];
     };
 
+    qemuStopGenerationCacheCheck = mkStaticUnitCheck {
+      name = "qemu-stop-generation-cache";
+      # Fake GDB backend only: proves reads reuse one stopped-state validation
+      # and that resume/write boundaries invalidate the state token.
+      ruffTargets = [
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "stop_once_then_uses_generation_token or target_writes_invalidate_existing_state"
+      ];
+    };
+
+    nativeComponentAccountingCheck = mkStaticUnitCheck {
+      name = "native-component-accounting";
+      # Deterministic fake-clock/backend checks; no debugger or RR capability.
+      ruffTargets = [
+        "src/focaccia/native/profiling.py"
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_component_accounting.py"
+        "tests/test_native_profiling.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_component_accounting.py"
+        "tests/test_native_profiling.py"
+        "tests/test_native_tracing.py"
+        "tests/test_native_api.py"
+      ];
+    };
+
     persistenceTimingSeparationCheck = mkStaticUnitCheck {
       name = "persistence-timing-separation";
       ruffTargets = [
@@ -982,6 +1180,96 @@
         "tests/test_native_api.py::test_force_mode_records_unknown_symbolic_outputs_as_trace_gap"
         "tests/test_native_tracing.py::test_lldb_execution_is_profiled_only_with_explicit_collector"
         "tests/test_qemu_report.py::test_gdb_validation_avoids_timing_output_and_writes_report"
+      ];
+    };
+
+    x86UcomisdConcreteResolutionCheck = mkStaticUnitCheck {
+      name = "x86-ucomisd-concrete-resolution";
+      ruffTargets = [ "tests/test_ucomisd_resolution.py" ];
+      pytestTargets = [ "tests/test_ucomisd_resolution.py" ];
+    };
+
+    x86AvxLogicCheck = mkStaticUnitCheck {
+      name = "x86-avx-logic-semantics";
+      ruffTargets = [ "tests/test_x86_avx_logic.py" ];
+      pytestTargets = [
+        "tests/test_x86_avx_logic.py"
+        "tests/test_x86_vmovdqa.py"
+        "tests/test_native_api.py::test_aligned_vector_move_requires_exact_native_bytes"
+      ];
+    };
+
+    partialWideVectorDependencyCheck = mkStaticUnitCheck {
+      name = "partial-wide-vector-dependency";
+      ruffTargets = [
+        "src/focaccia/miasm_util.py"
+        "src/focaccia/symbolic.py"
+        "src/focaccia/qemu/target.py"
+        "tests/test_compare.py"
+        "tests/test_qemu_snapshot.py"
+        "tests/test_symbolic_composition.py"
+        "tests/test_no_replay_exit_only.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py::test_low_vector_alias_confirms_memory_while_unknown_upper_bits_stay_incomplete"
+        "tests/test_compare.py::test_malformed_symbolic_register_width_rejects_narrow_alias_resolution"
+        "tests/test_qemu_snapshot.py::test_low_vector_slice_planning_requests_observable_alias_not_full_base"
+        "tests/test_symbolic_composition.py::test_aarch64_scalar_bit_slice_resolves_from_known_full_register"
+        "tests/test_symbolic_composition.py::test_register_slice_evaluation_preserves_resolver_overrides"
+        "tests/test_no_replay_exit_only.py::test_qemu_ordinary_prefix_cannot_cross_action"
+        "tests/test_qemu_matching.py::test_gdb_collector_composes_to_declared_cutpoint"
+      ];
+    };
+
+    adaptiveUnobservableOutputCompositionCheck = mkStaticUnitCheck {
+      name = "adaptive-unobservable-output-composition";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/snapshot.py"
+        "tests/test_qemu_matching.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_matching.py::test_gdb_collector_composes_unobservable_register_into_memory_effect"
+      ];
+    };
+
+    nativeRemoteWideVectorObservationCheck = mkStaticUnitCheck {
+      name = "native-remote-wide-vector-observation";
+      ruffTargets = [ "src/focaccia/native/lldb_target.py" "tests/test_native_tracing.py" ];
+      pytestTargets = [
+        "tests/test_native_tracing.py"
+        "-k"
+        "gdb_target_xml_layout or remote_zmm"
+      ];
+    };
+
+    nativeNarrowRegisterAliasCheck = mkStaticUnitCheck {
+      name = "native-narrow-register-alias";
+      ruffTargets = [ "src/focaccia/native/lldb_target.py" "tests/test_native_tracing.py" ];
+      pytestTargets = [
+        "tests/test_native_tracing.py::test_lldb_narrow_alias_falls_back_to_exact_hardware_parent_slice"
+      ];
+    };
+
+    x86VectorPersistenceRoundtripCheck = mkStaticUnitCheck {
+      name = "x86-vector-persistence-roundtrip";
+      ruffTargets = [ "src/focaccia/symbolic.py" "tests/test_x86_avx_logic.py" ];
+      pytestTargets = [
+        "tests/test_x86_avx_logic.py"
+        "-k"
+        "project_avx_text"
+      ];
+    };
+
+    x86AlignedVectorMovesCheck = mkStaticUnitCheck {
+      name = "x86-aligned-vector-moves";
+      ruffTargets = [ "tests/test_x86_vmovdqa.py" ];
+      pytestTargets = [
+        "tests/test_x86_vmovdqa.py"
+        "tests/test_native_api.py::test_aligned_vector_move_requires_exact_native_bytes"
       ];
     };
 
@@ -1057,6 +1345,21 @@
       ];
     };
 
+    nativeDisassemblyVerificationReuseCheck = mkStaticUnitCheck {
+      name = "native-disassembly-verification-reuse";
+      # Offline byte fixtures and fake backends only; no debugger/ptrace/RR.
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_disassembly_cache.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_disassembly_cache.py"
+        "tests/test_native_api.py"
+        "-k"
+        "verification_reuse or disassembly or vex_misdecode or rex_mmx_movq"
+      ];
+    };
+
     vexDisassemblyValidationCheck = mkStaticUnitCheck {
       name = "vex-disassembly-validation";
       ruffTargets = [
@@ -1124,6 +1427,19 @@
       ];
     };
 
+    observedPopfControlCheck = mkStaticUnitCheck {
+      name = "observed-popf-control";
+      ruffTargets = [
+        "src/focaccia/native/tracer.py"
+        "tests/test_native_api.py"
+      ];
+      pytestTargets = [
+        "tests/test_native_api.py"
+        "-k"
+        "observed_popfq or verified_exit_action"
+      ];
+    };
+
     x86SyscallEntryMatchingCheck = mkStaticUnitCheck {
       name = "x86-syscall-entry-matching";
       ruffTargets = [
@@ -1135,6 +1451,213 @@
         "-k"
         "x86_syscall_entry_matching"
       ];
+    };
+
+    nativePostExitCrossValidationCheck = mkStaticUnitCheck {
+      name = "native-post-exit-cross-validation";
+      ruffTargets = [ "src/focaccia/native/tracer.py" "tests/test_native_api.py" ];
+      pytestTargets = [ "tests/test_native_api.py::test_cross_validation_rejects_missing_post_exit_state" ];
+    };
+
+    noReplayExitOnlyCheck = mkStaticUnitCheck {
+      name = "no-replay-exit-only-whole-program";
+      ruffTargets = [
+        "src/focaccia/no_replay.py"
+        "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py"
+        "src/focaccia/completion.py"
+        "src/focaccia/persistence.py"
+        "tests/test_no_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_no_replay.py"
+        "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py"
+        "tests/test_trace_completion.py"
+      ];
+    };
+
+    noReplaySetFsCheck = mkStaticUnitCheck {
+      name = "no-replay-ordered-set-fs";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/target.py" "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/report.py" "src/focaccia/completion.py"
+        "src/focaccia/persistence.py" "src/focaccia/match.py"
+        "tests/test_no_replay.py" "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py" "tests/test_trace_completion.py"
+      ];
+      pytestTargets = [
+        "tests/test_no_replay.py" "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py" "tests/test_trace_completion.py"
+      ];
+    };
+
+    noReplaySetFsContinuedDiagnosticsCheck = mkStaticUnitCheck {
+      name = "no-replay-set-fs-continued-diagnostics";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/qemu/target.py"
+        "tests/test_no_replay.py" "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [ "tests/test_no_replay.py" "tests/test_qemu_whole_program.py" ];
+    };
+
+    noReplaySyscallContinuedDiagnosticsCheck = mkStaticUnitCheck {
+      name = "no-replay-syscall-continued-diagnostics";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "tests/test_no_replay.py" "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [ "tests/test_no_replay.py" "tests/test_qemu_whole_program.py" ];
+    };
+
+    noReplayContextTidCheck = mkStaticUnitCheck {
+      name = "no-replay-context-relative-tid";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/native/tracer.py"
+        "src/focaccia/native/lldb_target.py" "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/_qemu_tool.py" "src/focaccia/qemu/report.py"
+        "src/focaccia/completion.py" "src/focaccia/persistence.py"
+        "src/focaccia/snapshot.py" "src/focaccia/symbolic.py" "src/focaccia/qemu/snapshot.py"
+        "tests/test_no_replay.py" "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py" "tests/test_persistence.py" "tests/test_whole_program_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_no_replay.py" "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py" "tests/test_persistence.py" "tests/test_whole_program_report.py"
+      ];
+    };
+
+    # Fake-only checks run on either host ISA. Live acceptance requires native
+    # AArch64 hardware + authorized LLDB ptrace, and a Linux-user QEMU GDB socket.
+    # Fake native observation only. Live invocation requires authorized native
+    # AArch64 LLDB tracing; never applied to emulator or RR/remote targets.
+    aarch64SourceContextCheck = mkStaticUnitCheck {
+      name = "aarch64-whole-program-source-context";
+      ruffTargets = [ "src/focaccia/qemu/snapshot.py" "src/focaccia/qemu/_qemu_tool.py" "src/focaccia/match.py" "src/focaccia/symbolic.py" "tests/test_aarch64_source_context.py" ];
+      pytestTargets = [ "tests/test_aarch64_source_context.py" "tests/test_qemu_trace_output.py" "tests/test_match.py" ];
+    };
+
+    orderedStoreSnapshotAddressCheck = mkStaticUnitCheck {
+      name = "ordered-store-snapshot-addresses";
+      ruffTargets = [ "src/focaccia/qemu/snapshot.py" "src/focaccia/symbolic.py" "tests/test_aarch64_source_context.py" ];
+      pytestTargets = [ "tests/test_aarch64_source_context.py" ];
+    };
+
+    aarch64VectorObservationCheck = mkStaticUnitCheck {
+      name = "aarch64-qemu-vector-observation";
+      ruffTargets = [ "src/focaccia/qemu/target.py" "tests/test_aarch64_qemu_context.py" ];
+      pytestTargets = [ "tests/test_aarch64_qemu_context.py" ];
+    };
+
+    aarch64QemuContextCheck = mkStaticUnitCheck {
+      name = "aarch64-qemu-independent-cpu-context";
+      ruffTargets = [
+        "src/focaccia/qemu/target.py" "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/tools/validate_qemu.py" "tests/test_aarch64_qemu_context.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_qemu_context.py" "tests/test_aarch64_dczva.py"
+        "tests/test_aarch64_no_replay.py" "tests/test_gdb_program_state.py"
+      ];
+    };
+
+    aarch64SvcBoundaryCheck = mkStaticUnitCheck {
+      name = "aarch64-svc-successor-boundary";
+      ruffTargets = [ "src/focaccia/qemu/target.py" "tests/test_aarch64_no_replay.py" ];
+      pytestTargets = [ "tests/test_aarch64_no_replay.py" "tests/test_qemu_whole_program.py" ];
+    };
+
+    aarch64BranchAliasesCheck = mkStaticUnitCheck {
+      name = "aarch64-carry-branch-aliases";
+      ruffTargets = [
+        "src/focaccia/symbolic.py" "src/focaccia/native/tracer.py"
+        "tests/test_aarch64_branch_aliases.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_branch_aliases.py" "tests/test_native_api.py"
+        "tests/test_native_disassembly_cache.py" "tests/test_aarch64_no_replay.py"
+      ];
+    };
+
+    aarch64SyscallPstateCheck = mkStaticUnitCheck {
+      name = "aarch64-syscall-pstate-observation";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/native/tracer.py"
+        "tests/test_aarch64_syscall_pstate.py" "tests/test_aarch64_no_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_syscall_pstate.py" "tests/test_aarch64_no_replay.py"
+        "tests/test_no_replay.py" "tests/test_native_whole_program.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+    };
+
+    nativeDczidObservationCheck = mkStaticUnitCheck {
+      name = "aarch64-native-dczid-observation";
+      ruffTargets = [ "src/focaccia/native/tracer.py" "tests/test_native_dczid_observation.py" ];
+      pytestTargets = [
+        "tests/test_native_dczid_observation.py" "tests/test_aarch64_dczva.py"
+        "tests/test_aarch64_no_replay.py" "tests/test_native_tracing.py"
+        "tests/test_native_api.py"
+      ];
+    };
+
+    aarch64DczvaCheck = mkStaticUnitCheck {
+      name = "aarch64-target-dczid-zeroing";
+      ruffTargets = [
+        "src/focaccia/arch/aarch64.py" "src/focaccia/symbolic.py"
+        "src/focaccia/miasm_util.py" "src/focaccia/native/lldb_target.py"
+        "src/focaccia/qemu/target.py" "tests/test_aarch64_dczva.py"
+        "tests/test_environment_symbols.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_dczva.py" "tests/test_aarch64_dup.py"
+        "tests/test_aarch64_no_replay.py" "tests/test_memory_byte_order.py"
+        "tests/test_environment_symbols.py"
+      ];
+    };
+
+    aarch64DupGeneralCheck = mkStaticUnitCheck {
+      name = "aarch64-dup-general-semantics";
+      ruffTargets = [ "src/focaccia/symbolic.py" "tests/test_aarch64_dup.py" ];
+      pytestTargets = [ "tests/test_aarch64_dup.py" "tests/test_aarch64_no_replay.py" ];
+    };
+
+    aarch64NoReplayCheck = mkStaticUnitCheck {
+      name = "aarch64-no-replay-whole-program";
+      ruffTargets = [
+        "src/focaccia/no_replay.py" "src/focaccia/native/tracer.py"
+        "src/focaccia/qemu/target.py" "tests/test_aarch64_no_replay.py"
+      ];
+      pytestTargets = [
+        "tests/test_aarch64_no_replay.py" "tests/test_no_replay.py"
+        "tests/test_native_whole_program.py" "tests/test_qemu_whole_program.py"
+      ];
+    };
+
+    x86NoReplaySourceContextCheck = mkStaticUnitCheck {
+      name = "x86-no-replay-source-context";
+      ruffTargets = [
+        "src/focaccia/trace.py" "src/focaccia/qemu/snapshot.py"
+        "src/focaccia/qemu/_qemu_tool.py" "tests/test_trace_completion.py"
+        "tests/test_qemu_matching.py" "tests/test_no_replay.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace_completion.py"
+        "tests/test_qemu_matching.py"
+        "tests/test_qemu_whole_program.py::test_collector_executes_and_validates_ordered_set_fs"
+      ];
+    };
+
+    nativeWholeProgramCaptureCheck = mkStaticUnitCheck {
+      name = "native-whole-program-capture";
+      ruffTargets = [ "src/focaccia/native/tracer.py" "tests/test_native_whole_program.py" ];
+      pytestTargets = [ "tests/test_native_whole_program.py" ];
     };
 
     nativeTerminalSyscallCheck = mkStaticUnitCheck {
@@ -1270,6 +1793,13 @@
         "-k"
         "multibit"
       ];
+    };
+
+    # Pure symbolic fixtures: no native ISA, debugger, RR, or memory-ordering claim.
+    aarch64LdapurSemanticsCheck = mkStaticUnitCheck {
+      name = "aarch64-ldapur-semantics";
+      ruffTargets = [ "tests/test_aarch64_ldapur.py" ];
+      pytestTargets = [ "tests/test_aarch64_ldapur.py" ];
     };
 
     aarch64RegisterSemanticsCheck = mkStaticUnitCheck {
@@ -1419,6 +1949,20 @@
       pytestTargets = [ "tests/test_qemu_transport.py" ];
     };
 
+    pluginWholeProgramTerminalEvidenceCheck = mkStaticUnitCheck {
+      name = "plugin-whole-program-terminal-evidence";
+      ruffTargets = [
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/tools/validate_qemu.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [
+        "tests/test_qemu_whole_program.py"
+        "-k"
+        "plugin_terminal_evidence or plugin_whole_program_rejects_before_connecting"
+      ];
+    };
+
     pluginStructuredReportCheck = mkStaticUnitCheck {
       name = "plugin-structured-validation-report";
       ruffTargets = [
@@ -1433,6 +1977,30 @@
         "tests/test_qemu_trace_output.py::test_quiet_plugin_validation_still_writes_structured_report"
         "tests/test_qemu_trace_output.py::test_plugin_validation_rejects_incomplete_trace_before_finish"
         "tests/test_qemu_trace_output.py::test_plugin_validation_aborts_peer_on_collection_failure"
+      ];
+    };
+
+    gdbSetFsSuccessorCheck = mkStaticUnitCheck {
+      name = "gdb-set-fs-successor";
+      ruffTargets = [
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py::test_gdb_set_fs_stops_at_immediate_syscall_successor"
+      ];
+    };
+
+    gdbSegmentSelectorWidthCheck = mkStaticUnitCheck {
+      name = "gdb-segment-selector-width";
+      ruffTargets = [
+        "src/focaccia/qemu/target.py"
+        "tests/test_gdb_program_state.py"
+      ];
+      pytestTargets = [
+        "tests/test_gdb_program_state.py"
+        "-k"
+        "segment_selector"
       ];
     };
 
@@ -1606,10 +2174,26 @@
       ];
       pytestTargets = [
         "tests/test_architecture.py::test_x86_mmx_registers_do_not_alias_simd_registers"
+        "tests/test_architecture.py::test_mmx_stack_mapping_rejects_non_mmx_registers"
+        "tests/test_architecture.py::test_mmx_stack_mapping_tracks_physical_slots"
         "tests/test_compare.py::test_mmx_source_detects_the_rex_movq_mismatch_without_zmm_state"
         "tests/test_gdb_program_state.py::test_gdb_reads_physical_mmx_value_from_logical_x87_stack"
         "tests/test_plugin_state_validity.py::test_plugin_reads_physical_mmx_value_from_logical_x87_stack"
         "tests/test_qemu_snapshot.py::test_mmx_source_planning_does_not_request_simd_state"
+      ];
+    };
+
+    xmmReadTransportCheck = mkStaticUnitCheck {
+      name = "qemu-xmm-read-transport";
+      ruffTargets = [ "src/focaccia/qemu/transport_profile.py" "tests/test_xmm_transport_profile.py" ];
+      pytestTargets = [ "tests/test_xmm_transport_profile.py" ];
+    };
+
+    wideVectorObservationCapabilityCheck = mkStaticUnitCheck {
+      name = "wide-vector-observation-capability";
+      ruffTargets = [ "src/focaccia/qemu/snapshot.py" "tests/test_qemu_snapshot.py" ];
+      pytestTargets = [
+        "tests/test_qemu_snapshot.py::test_wide_vector_observation_capability_rejects_unknown_upper_lanes"
       ];
     };
 
@@ -2197,6 +2781,55 @@
       ];
     };
 
+    aarch64SignalReturnDispatchCheck = mkStaticUnitCheck {
+      name = "aarch64-signal-return-dispatch";
+      ruffTargets = [ "src/focaccia/qemu/replay.py" "tests/test_aarch64_signal_replay.py" ];
+      pytestTargets = [ "tests/test_aarch64_signal_replay.py::test_aarch64_signal_frame_delivery_and_rt_sigreturn_round_trip" ];
+    };
+
+    currentDiagnosticStreamCheck = mkStaticUnitCheck {
+      name = "current-diagnostic-stream";
+      ruffTargets = [ "src/focaccia/utils.py" "tests/test_compare.py" ];
+      pytestTargets = [ "tests/test_compare.py::test_separator_uses_current_output_stream" ];
+    };
+
+    memoryMismatchLocalizationCheck = mkStaticUnitCheck {
+      name = "memory-mismatch-localization";
+      ruffTargets = [
+        "src/focaccia/compare.py"
+        "tests/test_compare.py"
+        "tests/test_qemu_report.py"
+      ];
+      pytestTargets = [
+        "tests/test_compare.py::test_symbolic_memory_validation_classifies_missing_and_incorrect_destinations"
+        "tests/test_compare.py::test_symbolic_memory_validation_checks_every_output_after_an_unavailable_range"
+        "tests/test_compare.py::test_symbolic_memory_validation_fails_closed_on_unavailable_dependencies"
+        "tests/test_qemu_report.py::test_structured_qemu_report_localizes_memory_mismatch"
+      ];
+    };
+
+    qemuWholeProgramCollectionCheck = mkStaticUnitCheck {
+      name = "qemu-whole-program-collection";
+      ruffTargets = [
+        "src/focaccia/match.py"
+        "src/focaccia/qemu/validation_server.py"
+        "src/focaccia/qemu/_qemu_tool.py"
+        "src/focaccia/qemu/target.py"
+        "src/focaccia/qemu/report.py"
+        "tests/test_qemu_whole_program.py"
+      ];
+      pytestTargets = [ "tests/test_qemu_whole_program.py" ];
+    };
+
+    wholeProgramTerminalAcceptanceCheck = mkStaticUnitCheck {
+      name = "whole-program-terminal-acceptance";
+      ruffTargets = [
+        "src/focaccia/qemu/report.py"
+        "tests/test_whole_program_report.py"
+      ];
+      pytestTargets = [ "tests/test_whole_program_report.py" ];
+    };
+
     terminalTraceReportingCheck = mkStaticUnitCheck {
       name = "terminal-trace-reporting";
       ruffTargets = [
@@ -2216,6 +2849,12 @@
         "tests/test_qemu_integration.py"
       ];
       pytestTargets = [ "tests/test_qemu_integration.py" ];
+    };
+
+    wholeProgramSmokeCheck = mkStaticUnitCheck {
+      name = "whole-program-smoke";
+      ruffTargets = [ "src/focaccia/tools/rr_qemu_smoke.py" "tests/test_rr_qemu_smoke.py" ];
+      pytestTargets = [ "tests/test_rr_qemu_smoke.py" ];
     };
 
     rrQemuSmokeHarnessCheck = mkStaticUnitCheck {
@@ -2317,6 +2956,17 @@
       ];
     };
 
+    traceCompletionPersistenceCheck = mkStaticUnitCheck {
+      name = "trace-completion-persistence";
+      ruffTargets = [
+        "src/focaccia/completion.py"
+        "src/focaccia/trace.py"
+        "src/focaccia/persistence.py"
+        "tests/test_trace_completion.py"
+      ];
+      pytestTargets = [ "tests/test_trace_completion.py" ];
+    };
+
     freshFileHashesCheck = mkStaticUnitCheck {
       name = "fresh-file-hashes";
       ruffTargets = [
@@ -2411,6 +3061,32 @@
       ];
     };
 
+    box64FlagObservationValidityCheck = mkStaticUnitCheck {
+      name = "box64-flag-observation-validity";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "box64_parser_does_not_treat_stale_materialized_flags_as_observed or box64_parser_keeps_legacy_deferred_flags_unknown"
+      ];
+    };
+
+    box64FusedPushCutpointCheck = mkStaticUnitCheck {
+      name = "box64-fused-push-cutpoint";
+      ruffTargets = [
+        "src/focaccia/parser.py"
+        "tests/test_trace.py"
+      ];
+      pytestTargets = [
+        "tests/test_trace.py"
+        "-k"
+        "box64_parser_groups_proven_fused_pushes_without_fabricating_boundary or box64_parser_does_not_group_ordinary_cmpxchg_boundary"
+      ];
+    };
+
     traceStructuralValidationCheck = mkStaticUnitCheck {
       name = "trace-structural-validation";
       ruffTargets = [
@@ -2471,6 +3147,19 @@
         "tests/test_persistence.py"
         "-k"
         "repeated_msgpack_decode or msgpack_transform_round_trip or msgpack_stream_rejects"
+      ];
+    };
+
+    transformSerializationValidationReuseCheck = mkStaticUnitCheck {
+      name = "transform-serialization-validation-reuse";
+      # Offline parsing/serialization fixtures; no native debugger or RR.
+      ruffTargets = [
+        "src/focaccia/persistence.py"
+        "tests/test_transform_serialization_reuse.py"
+      ];
+      pytestTargets = [
+        "tests/test_transform_serialization_reuse.py"
+        "tests/test_persistence.py"
       ];
     };
 
@@ -2678,6 +3367,18 @@
       pytestTargets = [
         "tests/test_match.py"
         "tests/test_qemu_matching.py"
+      ];
+    };
+
+    canonicalRegisterOutputCacheCheck = mkStaticUnitCheck {
+      name = "canonical-register-output-cache";
+      ruffTargets = [
+        "src/focaccia/arch/arch.py"
+        "src/focaccia/symbolic.py"
+        "tests/test_symbolic_composition.py"
+      ];
+      pytestTargets = [
+        "tests/test_symbolic_composition.py::test_canonical_output_cache_preserves_alias_unknown_and_mutation_semantics"
       ];
     };
 
@@ -2909,6 +3610,20 @@
         program = "${rrTool}/bin/rr";
       };
 
+      # Opt-in only: requires authorized same-ISA native ptrace/process-memory
+      # access. No RR, sandbox relaxations, or production tracing semantics.
+      native-terminal-observation = {
+        type = "app";
+        program = let
+          wrapper = pkgs.writeShellScriptBin "native-terminal-observation" ''
+            ulimit -c 0
+            exec ${python.interpreter} ${./tests/probes}/native_terminal_observation.py \
+              --lldb ${pkgs.lldb}/bin/lldb \
+              --fixtures ${nativeTerminalFixtures}/bin "$@"
+          '';
+        in "${wrapper}/bin/native-terminal-observation";
+      };
+
       uv-sync = {
         type = "app";
         program = "${uvSyncWrapper}/bin/uv-sync";
@@ -2996,7 +3711,19 @@
       property-core-models = propertyCoreModelsCheck;
       reproducer-memory-layout = reproducerMemoryLayoutCheck;
       reproducer-state-restoration = reproducerStateRestorationCheck;
+      reproducer-ymm-restoration = mkStaticUnitCheck {
+        name = "reproducer-ymm-restoration";
+        ruffTargets = [ "src/focaccia/reproducer.py" "tests/test_reproducer.py" ];
+        pytestTargets = [ "tests/test_reproducer.py" "-k" "ymm_restore" ];
+      };
+      reproducer-narrow-gpr-restoration = reproducerNarrowGprRestorationCheck;
+      reproducer-observed-upper-context = reproducerObservedUpperContextCheck;
+      reproducer-simd-mmx-restoration = reproducerSimdMmxRestorationCheck;
+      reproducer-aarch64-backend = reproducerAarch64BackendCheck;
+      aarch64-reproducer-stop-capture = aarch64ReproducerStopCaptureCheck;
       reproducer-fragment-fidelity = reproducerFragmentFidelityCheck;
+      no-replay-syscall-actions = noReplaySyscallActionsCheck;
+      no-replay-anonymous-mmap = noReplayAnonymousMmapCheck;
       register-api-migration = registerApiMigrationCheck;
       cli-imports = cliImportsCheck;
       native-read-pc = nativeReadPcCheck;
@@ -3007,6 +3734,7 @@
       cross-validate-option = crossValidateOptionCheck;
       native-event-matching = nativeEventMatchingCheck;
       speculative-synchronization = speculativeSynchronizationCheck;
+      lldb-segment-selector-observation = lldbSegmentSelectorObservationCheck;
       native-target-error-handling = nativeTargetErrorHandlingCheck;
       lldb-remote-state-event = lldbRemoteStateEventCheck;
       native-event-phase = nativeEventPhaseCheck;
@@ -3015,21 +3743,52 @@
       repeated-pc-materialization = repeatedPcMaterializationCheck;
       recorded-syscall-control-output = recordedSyscallControlOutputCheck;
       observed-division-control = observedDivisionControlCheck;
+      observed-popf-control = observedPopfControlCheck;
       defined-flag-cross-validation = definedFlagCrossValidationCheck;
       xmm-cross-validation = xmmCrossValidationCheck;
       empty-miasm-disassembly = emptyMiasmDisassemblyCheck;
       vex-disassembly-validation = vexDisassemblyValidationCheck;
+      native-disassembly-verification-reuse = nativeDisassemblyVerificationReuseCheck;
       lsl-environment-specialization = lslEnvironmentSpecializationCheck;
       rex-mmx-movq = rexMmxMovqCheck;
       native-signal-action = nativeSignalActionCheck;
       miasm-sse-support = miasmSseSupportCheck;
+      x86-ucomisd-concrete-resolution = x86UcomisdConcreteResolutionCheck;
+      x86-avx-logic-semantics = x86AvxLogicCheck;
+      partial-wide-vector-dependency = partialWideVectorDependencyCheck;
+      adaptive-unobservable-output-composition = adaptiveUnobservableOutputCompositionCheck;
+      native-remote-wide-vector-observation = nativeRemoteWideVectorObservationCheck;
+      native-narrow-register-alias = nativeNarrowRegisterAliasCheck;
+      x86-vector-persistence-roundtrip = x86VectorPersistenceRoundtripCheck;
+      x86-aligned-vector-moves = x86AlignedVectorMovesCheck;
       miasm-vmovdqu-support = miasmVmovdquSupportCheck;
       opt-in-capture-profiling = optInCaptureProfilingCheck;
       lldb-lock-prefix-disassembly = lldbLockPrefixDisassemblyCheck;
+      native-component-accounting = nativeComponentAccountingCheck;
       persistence-timing-separation = persistenceTimingSeparationCheck;
       qemu-validation-profile-components = qemuValidationProfileComponentsCheck;
+      qemu-stop-generation-cache = qemuStopGenerationCacheCheck;
       x86-syscall-entry-matching = x86SyscallEntryMatchingCheck;
       native-terminal-syscall = nativeTerminalSyscallCheck;
+      native-whole-program-capture = nativeWholeProgramCaptureCheck;
+      no-replay-exit-only-whole-program = noReplayExitOnlyCheck;
+      no-replay-ordered-set-fs = noReplaySetFsCheck;
+      no-replay-set-fs-continued-diagnostics = noReplaySetFsContinuedDiagnosticsCheck;
+      no-replay-syscall-continued-diagnostics = noReplaySyscallContinuedDiagnosticsCheck;
+      no-replay-context-relative-tid = noReplayContextTidCheck;
+      aarch64-no-replay-whole-program = aarch64NoReplayCheck;
+      x86-no-replay-source-context = x86NoReplaySourceContextCheck;
+      aarch64-dup-general-semantics = aarch64DupGeneralCheck;
+      aarch64-target-dczid-zeroing = aarch64DczvaCheck;
+      aarch64-native-dczid-observation = nativeDczidObservationCheck;
+      aarch64-syscall-pstate-observation = aarch64SyscallPstateCheck;
+      aarch64-carry-branch-aliases = aarch64BranchAliasesCheck;
+      aarch64-svc-successor-boundary = aarch64SvcBoundaryCheck;
+      aarch64-qemu-independent-cpu-context = aarch64QemuContextCheck;
+      aarch64-whole-program-source-context = aarch64SourceContextCheck;
+      ordered-store-snapshot-addresses = orderedStoreSnapshotAddressCheck;
+      aarch64-qemu-vector-observation = aarch64VectorObservationCheck;
+      native-post-exit-cross-validation = nativePostExitCrossValidationCheck;
       rr-lldb-syscall-boundary = rrLldbSyscallBoundaryCheck;
       native-gap-error-boundaries = nativeGapErrorBoundariesCheck;
       native-vector-register-byte-order = nativeVectorRegisterByteOrderCheck;
@@ -3039,6 +3798,7 @@
       register-validity = registerValidityCheck;
       multibit-flags = multibitFlagsCheck;
       aarch64-register-semantics = aarch64RegisterSemanticsCheck;
+      aarch64-ldapur-semantics = aarch64LdapurSemanticsCheck;
       memory-byte-order = memoryByteOrderCheck;
       syscall-model-boundary = syscallModelBoundaryCheck;
       explicit-trace-kinds = explicitTraceKindsCheck;
@@ -3049,7 +3809,10 @@
       materialized-snapshot-serialization = materializedSnapshotSerializationCheck;
       qemu-snapshot-trace-construction = qemuSnapshotTraceConstructionCheck;
       plugin-framed-transport = pluginFramedTransportCheck;
+      plugin-whole-program-terminal-evidence = pluginWholeProgramTerminalEvidenceCheck;
       plugin-structured-validation-report = pluginStructuredReportCheck;
+      gdb-set-fs-successor = gdbSetFsSuccessorCheck;
+      gdb-segment-selector-width = gdbSegmentSelectorWidthCheck;
       plugin-register-cache = pluginRegisterCacheCheck;
       plugin-connection-ownership = pluginConnectionOwnershipCheck;
       uv-sync-lock-integrity = uvSyncLockIntegrityCheck;
@@ -3087,15 +3850,27 @@
       qemu-structured-replay-report = qemuStructuredReplayReportCheck;
       non-destructive-qemu-reporting = nonDestructiveQemuReportingCheck;
       bounded-diagnostic-rendering = boundedDiagnosticRenderingCheck;
+      current-diagnostic-stream = currentDiagnosticStreamCheck;
+      memory-mismatch-localization = memoryMismatchLocalizationCheck;
+      qemu-whole-program-collection = qemuWholeProgramCollectionCheck;
+      whole-program-terminal-acceptance = wholeProgramTerminalAcceptanceCheck;
       terminal-trace-reporting = terminalTraceReportingCheck;
       rr-qemu-run-manifest = rrQemuRunManifestCheck;
       rr-qemu-smoke-harness = rrQemuSmokeHarnessCheck;
+      whole-program-smoke = wholeProgramSmokeCheck;
+      native-terminal-outcome = nativeTerminalOutcomeCheck;
+      qemu-terminal-outcome = qemuTerminalOutcomeCheck;
+      qemu-fatal-signal-termination = qemuFatalSignalTerminationCheck;
+      native-terminal-observation-harness = nativeTerminalObservationCheck;
+      native-terminal-observation-fixtures = nativeTerminalFixtures;
       scheduler-quarantine = schedulerQuarantineCheck;
       shared-snapshot-planner = sharedSnapshotPlannerCheck;
       adaptive-successor-source-planning = adaptiveSuccessorSourcePlanningCheck;
       linear-successor-planning = linearSuccessorPlanningCheck;
       bounded-no-skip-collector-planning = boundedNoSkipCollectorPlanningCheck;
+      qemu-xmm-read-transport = xmmReadTransportCheck;
       gdb-wide-registers = gdbWideRegisterCheck;
+      wide-vector-observation-capability = wideVectorObservationCapabilityCheck;
       declared-validation-cutpoints = declaredValidationCutpointsCheck;
       narrow-vector-observation = narrowVectorObservationCheck;
       narrow-vector-dependency-planning = narrowVectorDependencyPlanningCheck;
@@ -3115,11 +3890,15 @@
       msgpack-trace-roundtrip = msgpackTraceRoundtripCheck;
       legacy-trace-readers = legacyTraceReadersCheck;
       box64-adjacent-flags = box64AdjacentFlagsCheck;
+      box64-flag-observation-validity = box64FlagObservationValidityCheck;
+      box64-fused-push-cutpoint = box64FusedPushCutpointCheck;
       trace-structural-validation = traceStructuralValidationCheck;
       typed-empty-traces = typedEmptyTracesCheck;
       concrete-pc-diagnostic = concretePcDiagnosticCheck;
       matching-failure-diagnostics = matchingFailureDiagnosticsCheck;
       repeated-transform-decoding = repeatedTransformDecodingCheck;
+      trace-completion-persistence = traceCompletionPersistenceCheck;
+      transform-serialization-validation-reuse = transformSerializationValidationReuseCheck;
       persistence-adversarial-inputs = persistenceAdversarialInputsCheck;
       transition-boundary-matching = transitionBoundaryMatchingCheck;
       indexed-destination-matching = indexedDestinationMatchingCheck;
@@ -3134,6 +3913,7 @@
       comparison-error-classification = comparisonErrorClassificationCheck;
       defined-register-output-validation = definedRegisterOutputValidationCheck;
       shared-transition-matcher = sharedTransitionMatcherCheck;
+      canonical-register-output-cache = canonicalRegisterOutputCacheCheck;
       symbolic-composition = symbolicCompositionCheck;
       bounded-long-cutpoint-composition = boundedLongCutpointCompositionCheck;
       iterative-symbolic-dag-processing = iterativeSymbolicDagProcessingCheck;
@@ -3142,6 +3922,7 @@
       target-environment-symbols = targetEnvironmentSymbolsCheck;
       x86-extended-register-aliases = x86ExtendedRegisterAliasesCheck;
       aarch64-deterministic-replay = aarch64DeterministicReplayCheck;
+      aarch64-signal-return-dispatch = aarch64SignalReturnDispatchCheck;
       signal-extra-registers = signalExtraRegistersCheck;
       rr-standalone-lldb-compatibility =
         rrStandaloneLldbCompatibilityCheck;

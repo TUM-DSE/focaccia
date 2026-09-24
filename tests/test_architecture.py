@@ -8,6 +8,20 @@ from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform
 
 
+@pytest.mark.parametrize("name", ["MM8", "MM9", "MM", "MM00", "XMM0", "MMx", "RAX"])
+def test_mmx_stack_mapping_rejects_non_mmx_registers(name):
+    with pytest.raises(ValueError, match="Not an MMX register name"):
+        x86.mmx_logical_st_name(name, 0)
+
+
+@pytest.mark.parametrize("index", range(8))
+@pytest.mark.parametrize("top", range(8))
+def test_mmx_stack_mapping_tracks_physical_slots(index, top):
+    # Other status bits must not affect the three-bit x87 TOP field.
+    fstat = (top << 11) | 0xC7FF
+    assert x86.mmx_logical_st_name(f"mm{index}", fstat) == f"st{(index - top) % 8}"
+
+
 def test_architecture_identity_includes_endianness_and_serialized_name():
     little = supported_architectures["aarch64l"]
     big = supported_architectures["aarch64b"]

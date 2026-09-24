@@ -1,5 +1,7 @@
 from typing import cast
 
+import pytest
+
 from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch import aarch64, x86
@@ -573,3 +575,157 @@ def test_legacy_matcher_wrappers_are_non_mutating_and_share_the_engine():
     assert [item.range for item in matched_transforms] == [(0x1000, 0x1002)]
     assert [item.read_pc() for item in folded_states] == [0x1000, 0x1002]
     assert [item.range for item in folded_transforms] == [(0x1000, 0x1002)]
+
+
+def test_cutpoint_planning_requires_a_live_source_and_caches_composition():
+    first = changing_transform(0x1000, 0x1001, "RAX", 1)
+    second = changing_transform(0x1001, 0x1002, "RBX", 2)
+    matcher = TransitionMatcher(symbolic_trace(first, second, stop_address=0x1002))
+
+    assert matcher.current_destination_pc is None
+    assert matcher.plan_destination(0x1002) is None
+    assert matcher.plan_successor_dependencies() is None
+    assert matcher.observe(0x1000) is not None
+    assert matcher.current_destination_pc == 0x1001
+    assert matcher.plan_destination(0xDEAD) is None
+    planned = matcher.plan_destination(0x1002)
+    assert isinstance(planned, SymbolicTransform)
+    assert set(planned.changed_regs) == {"RAX", "RBX"}
+    assert matcher.plan_destination(0x1002) is planned
+    boundary = matcher.observe(0x1002)
+    assert boundary is not None
+    assert boundary.incoming is planned
+    assert matcher.done
+    assert matcher.plan_destination(0x1002) is None
+    assert matcher.plan_successor_dependencies() is None
+
+
+def test_successor_planning_stops_at_gap_without_claiming_dependencies_for_it():
+    first = SymbolicTransform(
+        1, {ExprId("RAX", 64): ExprId("RBX", 64)}, [], ARCH, 0x1000, 0x1001
+    )
+    gap = TraceGap(1, ARCH, 0x1001, 0x1002, "unsupported-semantics", "fixture gap")
+    stream = TransformStream(
+        iter((first, gap, transform(0x1002, 0x1003))),
+        environment(),
+        [0x1000, 0x1001, 0x1002],
+    )
+    matcher = TransitionMatcher(stream)
+    assert matcher.observe(0x1000) is not None
+    dependencies = matcher.plan_successor_dependencies()
+    assert dependencies is not None
+    assert dependencies.registers == frozenset({"RBX"})
+    assert stream.position == 2
+    assert not matcher.done
+    boundary = matcher.observe(0x1001)
+    assert boundary is not None
+    assert boundary.outgoing is gap
+    assert matcher.plan_successor_dependencies() is None
+    assert matcher.plan_destination(0x1003) is None
+    assert matcher.pending_transform is gap
+    assert matcher.done
+    assert diagnostic_codes(matcher) == {"symbolic-gap-without-cutpoint"}
+
+
+@pytest.mark.parametrize("failure", ["truncated", "discontinuous", "composition"])
+def test_successor_planning_failures_keep_diagnostics_and_only_known_dependencies(
+    failure, monkeypatch
+):
+    first = SymbolicTransform(
+        1, {ExprId("RAX", 64): ExprId("RBX", 64)}, [], ARCH, 0x1000, 0x1001
+    )
+    second = transform(0x2000 if failure == "discontinuous" else 0x1001, 0x1002)
+    items = [first] if failure == "truncated" else [first, second]
+    stream = TransformStream(iter(items), environment(), [first.addr, second.addr])
+    matcher = TransitionMatcher(stream)
+    assert matcher.observe(0x1000) is not None
+    original_append = SymbolicTransformComposer.append
+
+    def failing_append(self, item):
+        if item is second:
+            raise ValueError("fixture composition failure")
+        return original_append(self, item)
+
+    if failure == "composition":
+        monkeypatch.setattr(SymbolicTransformComposer, "append", failing_append)
+    dependencies = matcher.plan_successor_dependencies()
+    assert dependencies is not None
+    assert dependencies.registers == frozenset({"RBX"})
+    assert matcher.done
+    expected = {
+        "truncated": "symbolic-trace-truncated",
+        "discontinuous": "symbolic-trace-discontinuous",
+        "composition": "symbolic-composition-failed",
+    }[failure]
+    assert diagnostic_codes(matcher) == {expected}
+    assert matcher.diagnostics[0].transform_index == 1
+    assert matcher.diagnostics[0].level == "error"
+    assert matcher.observe(0x1002) is None
+
+
+@pytest.mark.parametrize("skip_unmatched", [False, True])
+@pytest.mark.parametrize("failure", ["truncated", "discontinuous"])
+def test_indexed_cutpoint_rejects_malformed_interior_in_both_matching_modes(
+    skip_unmatched, failure
+):
+    first = transform(0x1000, 0x1001)
+    second = transform(0x2000 if failure == "discontinuous" else 0x1001, 0x1002)
+    stream = TransformStream(
+        iter([first] if failure == "truncated" else [first, second]),
+        environment(stop_address=0x1002),
+        [first.addr, second.addr],
+    )
+    result = match_transitions(
+        [state(0x1000), state(0x1002)], stream, skip_unmatched=skip_unmatched
+    )
+    assert result.trace is not None
+    assert len(result.trace) == 0
+    assert not result.complete
+    expected = (
+        "symbolic-trace-truncated" if failure == "truncated" else "symbolic-trace-discontinuous"
+    )
+    assert diagnostic_codes(result) == {expected}
+    assert result.diagnostics[0].transform_index == 1
+
+
+def test_destination_planning_composition_failure_is_fatal(monkeypatch):
+    first = transform(0x1000, 0x1001)
+    second = transform(0x1001, 0x1002)
+    matcher = TransitionMatcher(symbolic_trace(first, second, stop_address=0x1002))
+    assert matcher.observe(0x1000) is not None
+    original_append = SymbolicTransformComposer.append
+
+    def failing_append(self, item):
+        if item is second:
+            raise ValueError("fixture composition failure")
+        return original_append(self, item)
+
+    monkeypatch.setattr(SymbolicTransformComposer, "append", failing_append)
+    assert matcher.plan_destination(0x1002) is None
+    assert matcher.done
+    assert diagnostic_codes(matcher) == {"symbolic-composition-failed"}
+    assert "fixture composition failure" in matcher.diagnostics[0].message
+    assert matcher.diagnostics[0].transform_index == 1
+
+
+def test_compatibility_match_returns_empty_lists_when_no_trace_can_be_built():
+    assert match_traces([ProgramState(ARCH)], []) == ([], [])
+
+
+def test_symbolic_exhaustion_read_failure_keeps_completed_transition_but_fails_closed():
+    item = transform(0x1000, 0x1001)
+
+    def broken_tail():
+        yield item
+        raise RuntimeError("fixture exhaustion failure")
+
+    result = match_transitions(
+        [state(0x1000), state(0x1001)],
+        TransformStream(broken_tail(), environment(), [item.addr]),
+    )
+    assert result.trace is not None
+    assert result.trace.transforms == (item,)
+    assert not result.complete
+    assert diagnostic_codes(result) == {"symbolic-trace-read-error"}
+    assert result.diagnostics[0].transform_index == 1
+    assert "fixture exhaustion failure" in result.diagnostics[0].message

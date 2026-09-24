@@ -13,6 +13,7 @@ from focaccia.native.lldb_target import (
     ConcreteMemoryError,
     ConcreteRegisterError,
     LLDBConcreteTarget,
+    _gdb_register_layout,
 )
 from focaccia.native.tracer import (
     SpeculativeDivergenceError,
@@ -717,6 +718,29 @@ def test_lldb_vector_reads_follow_the_target_byte_order(byteorder):
     assert concrete.read_register("V0") == value
 
 
+def test_lldb_narrow_alias_falls_back_to_exact_hardware_parent_slice():
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = "x86_64"
+    parent = object()
+
+    def get_register(name: str):
+        if name == "r11b":
+            raise ConcreteRegisterError("remote map has no r11b")
+        if name == "r11":
+            return parent
+        raise AssertionError(name)
+
+    cast(Any, concrete)._get_register = get_register
+    cast(Any, concrete)._read_scalar_register_value = (
+        lambda register, name: 0x11223344556677A5
+        if register is parent and name == "R11"
+        else (_ for _ in ()).throw(AssertionError((register, name)))
+    )
+
+    assert concrete.read_register("R11B") == 0xA5
+
+
 def test_lldb_80_bit_register_reads_preserve_all_bytes():
     value = 0x1234567890ABCDEFFEDC
     raw = value.to_bytes(10, byteorder="little")
@@ -738,6 +762,53 @@ def test_lldb_80_bit_register_reads_preserve_all_bytes():
     cast(Any, concrete)._get_register = lambda _name: WideRegister()
 
     assert concrete.read_register("ST0") == value
+
+
+def test_gdb_target_xml_layout_and_remote_zmm_preserve_nonzero_high_bits():
+    xml = '<target><feature><reg name="a" bitsize="16" regnum="0"/><reg name="zmm0h" bitsize="256" regnum="1"/></feature></target>'
+    assert _gdb_register_layout(xml)['zmm0h'] == (2, 32)
+    low_bytes = bytes(range(32))
+    high_bytes = bytes(range(32, 64))
+
+    class VectorData:
+        def ReadRawData(self, _error, offset: int, size: int) -> bytes:
+            return low_bytes[offset:offset + size]
+
+    register = SimpleNamespace(size=32, data=VectorData(), IsValid=lambda: True)
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = 'x86_64'
+    concrete._gdb_remote = True
+    concrete._gdb_layout = {'zmm0h': (2, 32)}
+    cast(Any, concrete)._send_gdb_packet = lambda packet: (b'xx' + high_bytes).hex()
+    cast(Any, concrete)._get_register = lambda name: register
+    assert concrete._read_gdb_remote_zmm('ZMM0') == int.from_bytes(low_bytes + high_bytes, 'little')
+
+
+@pytest.mark.parametrize('xml', [
+    '<target/>',
+    '<target><reg name="a" bitsize="7" regnum="0"/></target>',
+    '<target><reg name="a" bitsize="8" regnum="1"/></target>',
+    '<target><reg name="a" bitsize="8" regnum="0"/><reg name="a" bitsize="8" regnum="1"/></target>',
+    '<target><reg name="a" bitsize="bad" regnum="0"/></target>',
+])
+def test_gdb_target_xml_layout_rejects_missing_changed_or_malformed_registers(xml):
+    with pytest.raises(ConcreteRegisterError):
+        _gdb_register_layout(xml)
+
+
+def test_lldb_remote_zmm_rejects_missing_wrong_width_unknown_or_truncated_high_state():
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = 'x86_64'
+    concrete._gdb_remote = True
+    cast(Any, concrete)._get_register = lambda name: (_ for _ in ()).throw(AssertionError(name))
+    for layout, packet in [({}, '00' * 64), ({'zmm0h': (0, 16)}, '00' * 64),
+                           ({'zmm0h': (32, 32)}, 'xx'), ({'zmm0h': (32, 32)}, '00' * 40)]:
+        concrete._gdb_layout = layout
+        cast(Any, concrete)._send_gdb_packet = lambda _packet, value=packet: value
+        with pytest.raises(ConcreteRegisterError):
+            concrete._read_gdb_remote_zmm('ZMM0')
 
 
 def test_lldb_remote_x86_flags_width_uses_the_eflags_alias():
@@ -824,6 +895,80 @@ def test_lldb_remote_x86_flags_width_rejects_incomplete_flags_alias():
         concrete.read_flags()
 
 
+class SelectorRegister:
+    def __init__(self, size, value=0, error=None, valid=True):
+        self.size = size
+        self.value = value
+        self.error = error
+        self.valid = valid
+
+    def IsValid(self):
+        return self.valid
+
+    def GetValueAsUnsigned(self, error, _fallback):
+        if self.error is not None:
+            error.SetErrorString(self.error)
+        return self.value
+
+
+def selector_target(register):
+    concrete = object.__new__(LLDBConcreteTarget)
+    concrete.arch = x86.ArchX86()
+    concrete.archname = x86.archname
+    cast(Any, concrete)._get_register = lambda _name: register
+    return concrete
+
+
+@pytest.mark.parametrize("name", ["CS", "DS", "ES", "FS", "GS", "SS"])
+@pytest.mark.parametrize("size", [2, 4, 8])
+@pytest.mark.parametrize("value", [0, 0x33, 0xFFFF])
+def test_lldb_selector_container_preserves_verified_value(name, size, value):
+    concrete = selector_target(SelectorRegister(size, value))
+    assert concrete.read_register(name.lower()) == value
+
+
+@pytest.mark.parametrize("size", [4, 8])
+@pytest.mark.parametrize("value", [1 << 16, (1 << 31) | 0x33, 1 << 63, -1])
+def test_lldb_selector_container_rejects_nonzero_upper_bits(size, value):
+    concrete = selector_target(SelectorRegister(size, value))
+    with pytest.raises(ConcreteRegisterError, match="upper container bits"):
+        concrete.read_register("FS")
+
+
+@pytest.mark.parametrize("size", [2, 4, 8])
+def test_lldb_selector_container_rejects_unknown_value(size):
+    concrete = selector_target(SelectorRegister(size, error="selector unavailable"))
+    with pytest.raises(ConcreteRegisterError, match="selector unavailable"):
+        concrete.read_register("FS")
+
+
+@pytest.mark.parametrize("size", [1, 3, 16])
+def test_lldb_selector_container_rejects_unsupported_width(size):
+    concrete = selector_target(SelectorRegister(size))
+    with pytest.raises(ConcreteRegisterError, match="expected 2 bytes"):
+        concrete.read_register("FS")
+
+
+def test_lldb_selector_container_rejects_invalid_and_missing_registers():
+    concrete = selector_target(SelectorRegister(8, valid=False))
+    with pytest.raises(ConcreteRegisterError, match="FS is invalid"):
+        concrete.read_register("FS")
+
+    def missing(_name):
+        raise ConcreteRegisterError("Register fs not found")
+
+    cast(Any, concrete)._get_register = missing
+    with pytest.raises(ConcreteRegisterError, match="Register fs not found"):
+        concrete.read_register("FS")
+
+
+@pytest.mark.parametrize("name", ["AX", "FS_BASE", "GS_BASE"])
+def test_lldb_selector_container_does_not_relax_other_register_widths(name):
+    concrete = selector_target(SelectorRegister(4))
+    with pytest.raises(ConcreteRegisterError, match="has size 4, expected"):
+        concrete.read_register(name)
+
+
 def test_lldb_scalar_register_errors_do_not_fabricate_zero():
     class FailedRegister:
         size = 8
@@ -846,6 +991,9 @@ def test_lldb_scalar_register_errors_do_not_fabricate_zero():
 
 def test_lldb_memory_reads_reject_short_successful_results(monkeypatch):
     class ShortProcess:
+        def GetState(self) -> int:
+            return lldb_module.lldb.eStateStopped
+
         def ReadMemory(self, _address: int, _size: int, _error) -> bytes:
             return b"x"
 

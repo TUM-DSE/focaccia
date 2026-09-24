@@ -2092,7 +2092,11 @@ class AArch64ReplayEngine(X86ReplayEngine):
         data = context.target_state.read_memory(pointer, 24) if pointer else None
         return SignalAltstackReplayEffect(data)
 
-    def _validate_signal_return_entry(self, state: ReadableProgramState) -> None:
+    def _validate_signal_return_entry(
+        self,
+        state: ReadableProgramState,
+        post_event: SyscallEvent,
+    ) -> None:
         if not self.state.signal_frames:
             raise ReplayEventError("AArch64 rt_sigreturn has no delivered frame.")
         expected_sp = self.state.signal_frames[-1].frame.frame_address

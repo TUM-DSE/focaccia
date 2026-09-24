@@ -75,6 +75,7 @@ class SmokePlan:
     startup_timeout: float
     tools: SmokeToolchain
     artifacts: SmokeArtifacts
+    whole_program: bool = False
 
     @property
     def guest_argv(self) -> tuple[str, ...]:
@@ -84,6 +85,11 @@ class SmokePlan:
         guest = (str(self.binary), *self.guest_argv)
         remote_rr = f"127.0.0.1:{self.rr_port}"
         remote_qemu = f"127.0.0.1:{self.qemu_port}"
+        capture_scope = (
+            ("--whole-program", "--cross-validate")
+            if self.whole_program
+            else ("--start-address", hex(self.start_address), "--stop-address", hex(self.stop_address))
+        )
         return {
             "rr-record": (
                 self.tools.rr,
@@ -108,10 +114,7 @@ class SmokePlan:
                 str(self.artifacts.rr_trace),
                 "--output",
                 str(self.artifacts.oracle_trace),
-                "--start-address",
-                hex(self.start_address),
-                "--stop-address",
-                hex(self.stop_address),
+                *capture_scope,
                 str(self.binary),
                 *self.guest_argv,
             ),
@@ -150,8 +153,9 @@ class SmokePlan:
                 "binary": str(self.binary),
                 "argv": list(self.guest_argv),
                 "input": str(self.input_file),
-                "start_address": self.start_address,
-                "stop_address": self.stop_address,
+                "start_address": None if self.whole_program else self.start_address,
+                "stop_address": None if self.whole_program else self.stop_address,
+                "scope": "whole-program" if self.whole_program else "witness",
             },
             "ports": {"rr": self.rr_port, "qemu": self.qemu_port},
             "limits_seconds": {
@@ -419,6 +423,13 @@ def _load_accepted_validation(plan: SmokePlan) -> dict[str, Any]:
             "QEMU validation did not accept the reference fixture; see "
             f"{plan.artifacts.validation_report}."
         )
+    if plan.whole_program:
+        completion = document.get("completion")
+        if not isinstance(completion, dict) or (
+            completion.get("scope") != "whole-program"
+            or completion.get("complete") is not True
+        ):
+            raise SmokeRunError("Whole-program validation lacks verified completion.")
     replay = document.get("replay")
     if not isinstance(replay, dict) or replay.get("active") is not True:
         raise SmokeRunError("Validation report does not contain active replay coverage.")
@@ -538,6 +549,10 @@ def make_argparser() -> argparse.ArgumentParser:
         description="Run a bounded native x86-64 RR-to-QEMU Focaccia smoke test."
     )
     parser.add_argument("--run-directory", required=True)
+    parser.add_argument(
+        "--whole-program", action="store_true",
+        help="Cross-validate from program entry through a verified terminal action.",
+    )
     parser.add_argument("--rr", default=os.environ.get("FOCACCIA_RR"))
     parser.add_argument("--qemu", default=os.environ.get("FOCACCIA_QEMU_X86_64"))
     parser.add_argument("--capture", default=os.environ.get("FOCACCIA_CAPTURE_TRANSFORMS"))
@@ -593,6 +608,7 @@ def main() -> None:
         args.startup_timeout,
         tools,
         SmokeArtifacts.under(args.run_directory),
+        whole_program=args.whole_program,
     )
     if args.dry_run:
         print(json.dumps(plan.to_json(), indent=2, sort_keys=True))

@@ -125,6 +125,12 @@ class Arch:
 
     def get_reg_accessor(self, regname: str) -> RegisterAccessor | None:
         """Get the accessor for a mutable or constant register name."""
+        # Symbolic hot paths already carry canonical names. Avoid repeating
+        # architecture-specific normalization for those lookups, while retaining
+        # the normal alias/case behavior at external boundaries.
+        accessor = self._accessors.get(regname)
+        if accessor is not None:
+            return accessor
         normalized = self.to_regname(regname)
         return self._accessors.get(normalized) if normalized is not None else None
 

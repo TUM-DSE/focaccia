@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import struct
 from typing import cast
 
 import pytest
@@ -12,11 +13,14 @@ from focaccia.reproducer import (
     ExecutableFragment,
     FixedMemoryMapping,
     MemoryInitialization,
+    PackedRegisterRestore,
     RegisterRestore,
     Reproducer,
     ReproducerFragmentError,
     ReproducerMemoryError,
     ReproducerRegisterError,
+    X86StateRestorePlan,
+    extract_executable_fragment,
     plan_reproducer_memory,
     plan_x86_state_restore,
     single_transition_reproducer_trace,
@@ -126,6 +130,7 @@ def test_reproducer_memory_emission_uses_checked_exact_runtime_mappings():
     assert "movabsq $0x2000, %rsi" in setup
     assert "MAP_FIXED_NOREPLACE" in allocator
     assert "cmpq %rdi, %rax" in allocator
+    assert "cmpq $-17, %rax" in allocator
     assert "jne _reproducer_fail" in allocator
     assert ".org" not in reproducer.get_data()
     assert "movabsq $0x1ffc, %rax" in setup
@@ -212,7 +217,114 @@ def test_reproducer_state_restore_rejects_unsafe_or_unsupported_register_inputs(
     with pytest.raises(ReproducerRegisterError, match="cannot be safely restored"):
         plan_x86_state_restore(snapshot, ("TF",), target_pc=0x4000)
     with pytest.raises(ReproducerRegisterError, match="unsupported register class ZMM0"):
+        plan_x86_state_restore(snapshot, ("ZMM0",), target_pc=0x4000)
+
+
+@pytest.mark.parametrize("index", [0, 7, 8, 15])
+def test_simd_mmx_restores_canonical_known_xmm_without_zeroing_upper_bits(index):
+    from miasm.arch.x86.arch import mn_x86
+    from miasm.core.locationdb import LocationDB
+
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    value = 0xFFEEDDCCBBAA99887766554433221100
+    snapshot.write_register_bits(f"ZMM{index}", value, (1 << 128) - 1)
+    name = f"XMM{index}"
+    reproducer = make_reproducer(snapshot, FakeSymbolicInputs(registers=(name,)))
+
+    assert reproducer.register_plan().packed_registers == (PackedRegisterRestore(name, value),)
+    assert f"movdqu _restore_xmm{index}(%rip), %xmm{index}" in reproducer.get_regs()
+    assert "vmov" not in reproducer.get_regs()
+    assert "xor" not in reproducer.get_regs()
+    expected = Reproducer._byte_directives(value.to_bytes(16, "little"))[0]
+    assert f"_restore_xmm{index}:\n{expected}\n" in reproducer.get_data()
+    assert snapshot.known_register_bits()[f"ZMM{index}"][1] == (1 << 128) - 1
+    instruction = mn_x86.fromstring(
+        f"MOVDQU {name}, XMMWORD PTR [RIP + 0x10]", LocationDB(), 64
+    )
+    encodings = mn_x86.asm(instruction)
+    assert encodings
+    assert all(b"\x0f\x6f" in encoding for encoding in encodings)  # legacy opcode
+
+
+@pytest.mark.parametrize("index", [0, 7])
+def test_simd_mmx_restores_exact_mmx_with_valid_instruction(index):
+    from miasm.arch.x86.arch import mn_x86
+    from miasm.core.locationdb import LocationDB
+
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    value = 0xFEDCBA9876543210
+    name = f"MM{index}"
+    snapshot.write_register(name, value)
+    reproducer = make_reproducer(snapshot, FakeSymbolicInputs(registers=(name,)))
+
+    assert reproducer.register_plan().packed_registers == (PackedRegisterRestore(name, value),)
+    assert f"movq _restore_mm{index}(%rip), %mm{index}" in reproducer.get_regs()
+    assert "emms" not in reproducer.get_regs()
+    assert Reproducer._byte_directives(value.to_bytes(8, "little"))[0] in reproducer.get_data()
+    # Assemble the emitted operation with a resolved RIP-relative displacement.
+    instruction = mn_x86.fromstring(f"MOVQ {name}, QWORD PTR [RIP + 0x10]", LocationDB(), 64)
+    assert mn_x86.asm(instruction)
+
+
+@pytest.mark.parametrize("name,value", [("XMM16", 0), ("MM8", 0), ("MM0", -1), ("XMM0", 1 << 128)])
+def test_simd_mmx_restore_values_are_validated(name, value):
+    with pytest.raises(ValueError):
+        PackedRegisterRestore(name, value)
+
+
+@pytest.mark.parametrize("name,width", [("XMM0", 128), ("MM0", 64)])
+def test_simd_mmx_unknown_required_bits_fail_closed(name, width):
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register_bits(name, 0, (1 << (width - 1)) - 1)
+    with pytest.raises(ReproducerRegisterError, match="known value.*unknown bit mask"):
+        plan_x86_state_restore(snapshot, (name,), target_pc=0x4000)
+
+
+@pytest.mark.parametrize("upper_mask", [1 << 128, ((1 << 512) - 1) ^ ((1 << 128) - 1)])
+def test_simd_mmx_observed_upper_context_fails_closed(upper_mask):
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register_bits("ZMM0", 0, ((1 << 128) - 1) | upper_mask)
+    with pytest.raises(ReproducerRegisterError, match="observed upper context"):
         plan_x86_state_restore(snapshot, ("XMM0",), target_pc=0x4000)
+
+
+@pytest.mark.parametrize("index", range(16))
+def test_ymm_restore_exact_known_256_bits(index):
+    name = f"YMM{index}"
+    value = int.from_bytes(bytes(range(32)), "little")
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register(name, value)
+    plan = plan_x86_state_restore(snapshot, (name,), target_pc=0x4000)
+    assert plan.packed_registers == (PackedRegisterRestore(name, value),)
+    assert plan.packed_registers[0].size_bytes == 32
+    reproducer = make_reproducer(snapshot, FakeSymbolicInputs(registers=(name,)))
+    assert f"vmovdqu _restore_ymm{index}(%rip), %ymm{index}" in reproducer.get_regs()
+    expected = "\n".join(Reproducer._byte_directives(bytes(range(32))))
+    assert f"_restore_ymm{index}:\n{expected}\n" in reproducer.get_data()
+    assert snapshot.known_register_bits()[f"ZMM{index}"][1] == (1 << 256) - 1
+
+
+@pytest.mark.parametrize("mask", [(1 << 255) - 1, ((1 << 256) - 1) | (1 << 256)])
+def test_ymm_restore_unknown_or_avx512_context_fails_closed(mask):
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register_bits("ZMM0", 0, mask)
+    with pytest.raises(ReproducerRegisterError):
+        plan_x86_state_restore(snapshot, ("YMM0",), target_pc=0x4000)
+
+
+@pytest.mark.parametrize("name", ["YMM16", "ZMM0", "XMM16"])
+def test_simd_mmx_unsupported_widths_do_not_zero_unknown_context(name):
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register(name, 1)
+    with pytest.raises(ReproducerRegisterError, match="unsupported register class"):
+        plan_x86_state_restore(snapshot, (name,), target_pc=0x4000)
 
 
 def test_reproducer_state_restore_does_not_invent_unknown_base_register_bits():
@@ -222,6 +334,40 @@ def test_reproducer_state_restore_does_not_invent_unknown_base_register_bits():
 
     with pytest.raises(ReproducerRegisterError, match="complete base-register.*RAX"):
         plan_x86_state_restore(snapshot, ("AL",), target_pc=0x4000)
+
+
+def test_reproducer_state_restore_uses_known_32_bit_alias_without_inventing_upper_bits():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register("EDI", 0xDEADBEEF)
+
+    plan = plan_x86_state_restore(snapshot, ("EDI",), target_pc=0x4000)
+
+    assert plan.registers == (RegisterRestore("EDI", 0xDEADBEEF),)
+    reproducer = make_reproducer(snapshot, FakeSymbolicInputs(registers=("EDI",)))
+    assert "movl $0xdeadbeef, %edi" in reproducer.get_regs()
+    with pytest.raises(ReproducerRegisterError, match="complete base-register.*RDI"):
+        plan_x86_state_restore(snapshot, ("RDI",), target_pc=0x4000)
+
+
+def test_reproducer_narrow_input_preserves_observed_upper_context():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    snapshot.write_register("RBX", 0xA5A5A5A5DEADBEEF)
+    snapshot.write_register("RCX", 0x5A5A5A5ACAFEBABE)
+
+    plan = plan_x86_state_restore(snapshot, ("EBX", "ECX"), target_pc=0x4000)
+
+    assert plan.registers == (
+        RegisterRestore("RBX", 0xA5A5A5A5DEADBEEF),
+        RegisterRestore("RCX", 0x5A5A5A5ACAFEBABE),
+    )
+    reproducer = make_reproducer(snapshot, FakeSymbolicInputs(registers=("EBX", "ECX")))
+    restoration = reproducer.get_regs()
+    assert "movabsq $0xa5a5a5a5deadbeef, %rbx" in restoration
+    assert "movabsq $0x5a5a5a5acafebabe, %rcx" in restoration
+    assert "%ebx" not in restoration
+    assert "%ecx" not in restoration
 
 
 def test_exact_fragment_emission_preserves_bytes_and_uses_only_validation_inputs():
@@ -332,3 +478,130 @@ def test_single_transition_trace_binds_generated_binary_and_exact_bounds(tmp_pat
     assert trace.env.start_address == 0x401000
     assert trace.env.stop_address == 0x401005
     assert trace.env.architecture == x86.ArchX86().key
+
+
+@pytest.fixture
+def fragment_elf(tmp_path):
+    """An inert ELF fixture: no compiler, debugger, or guest execution."""
+    binary = tmp_path / "fragment.elf"
+    ident = b"\x7fELF\x02\x01\x01" + bytes(9)
+    header = struct.pack(
+        "<16sHHIQQQIHHHHHH", ident, 2, 62, 1, 0x4000, 64, 0, 0, 64, 56, 1, 64, 0, 0
+    )
+    code = b"\x90\x48\x89\xd8\xc3"
+    segment = struct.pack("<IIQQQQQQ", 1, 5, 0x1000, 0x4000, 0x4000, len(code), len(code), 0x1000)
+    binary.write_bytes((header + segment).ljust(0x1000, b"\x00") + code)
+    return binary
+
+
+def test_fragment_extraction_preserves_virtual_address_bytes(fragment_elf):
+    assert extract_executable_fragment(fragment_elf, 0x4000, 0x4005) == ExecutableFragment(
+        0x4000, 0x4005, b"\x90\x48\x89\xd8\xc3"
+    )
+    assert extract_executable_fragment(
+        fragment_elf, 0x4000, 0x4004, require_fallthrough=True
+    ) == ExecutableFragment(0x4000, 0x4004, b"\x90\x48\x89\xd8")
+
+
+@pytest.mark.parametrize(
+    ("end", "diagnostic"),
+    [(0x4002, "not instruction-aligned"), (0x4005, "changes control flow")],
+)
+def test_fragment_extraction_rejects_unsafe_entry_prefix(fragment_elf, end, diagnostic):
+    with pytest.raises(ReproducerFragmentError, match=diagnostic):
+        extract_executable_fragment(fragment_elf, 0x4000, end, require_fallthrough=True)
+
+
+@pytest.mark.parametrize("start,end", [(-1, 1), (1, 1), (2, 1), (0, (1 << 64) + 1)])
+def test_fragment_extraction_rejects_invalid_ranges_before_io(tmp_path, start, end):
+    with pytest.raises(ReproducerFragmentError, match="Invalid executable fragment range"):
+        extract_executable_fragment(tmp_path / "absent", start, end)
+
+
+def test_fragment_extraction_reports_io_failure_with_cause(tmp_path):
+    with pytest.raises(ReproducerFragmentError, match="Unable to extract executable range") as exc:
+        extract_executable_fragment(tmp_path / "absent", 0x4000, 0x4001)
+    assert isinstance(exc.value.__cause__, FileNotFoundError)
+
+
+@pytest.mark.parametrize(
+    "factory,args,diagnostic",
+    [
+        (ExecutableFragment, (-1, 1, b"xx"), "non-empty address range"),
+        (ExecutableFragment, (1, 1, b""), "non-empty address range"),
+        (ExecutableFragment, ((1 << 64) - 1, (1 << 64) + 1, b"xx"), "address width"),
+        (ExecutableFragment, (0, 2, b"x"), "byte length"),
+        (EntryPrefix, (-1, b"x"), "start does not fit"),
+        (EntryPrefix, (1 << 64, b"x"), "start does not fit"),
+        (EntryPrefix, (0, b""), "cannot be empty"),
+        (EntryPrefix, ((1 << 64) - 1, b"xx"), "address width"),
+        (RegisterRestore, ("RIP", 0), "Unsupported"),
+        (RegisterRestore, ("RAX", -1), "does not fit"),
+        (RegisterRestore, ("RAX", 1 << 64), "does not fit"),
+        (X86StateRestorePlan, (-1, (), None, 0, 0), "target PC"),
+        (X86StateRestorePlan, (1 << 64, (), None, 0, 0), "target PC"),
+        (X86StateRestorePlan, (0, (), None, -1, 0), "flag mask"),
+        (X86StateRestorePlan, (0, (), None, 1 << 64, 0), "flag mask"),
+        (X86StateRestorePlan, (0, (), None, 1, 2), "unrequested bits"),
+    ],
+)
+def test_fragment_and_state_plan_reject_invalid_contracts(factory, args, diagnostic):
+    with pytest.raises(ValueError, match=diagnostic):
+        factory(*args)
+
+
+def test_fragment_contracts_copy_mutable_bytes_and_accept_address_limit():
+    data = bytearray(b"\x90")
+    # Exercise defensive normalization at an untyped caller boundary.
+    fragment = ExecutableFragment((1 << 64) - 1, 1 << 64, cast(bytes, data))
+    prefix = EntryPrefix((1 << 64) - 1, cast(bytes, data))
+    data[0] = 0xCC
+    assert fragment.data == prefix.data == b"\x90"
+    assert prefix.end == fragment.end == 1 << 64
+
+
+@pytest.mark.parametrize(
+    "prefix,fragment,seed,diagnostic,error",
+    [
+        (None, None, -1, "signed immediate", ReproducerRegisterError),
+        (None, None, 1 << 31, "signed immediate", ReproducerRegisterError),
+        (EntryPrefix(0x3FFF, b"\x90"), None, 1, "exact entry prefix", ReproducerRegisterError),
+        (EntryPrefix(0x3FFF, b"\x90"), None, None, "requires an exact", ReproducerFragmentError),
+        (
+            EntryPrefix(0x3FFE, b"\x90"),
+            ExecutableFragment(0x4000, 0x4001, b"\x90"),
+            None,
+            "Entry prefix ends",
+            ReproducerFragmentError,
+        ),
+    ],
+)
+def test_fragment_constructor_rejects_incompatible_context(
+    prefix, fragment, seed, diagnostic, error
+):
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    with pytest.raises(error, match=diagnostic):
+        Reproducer(
+            "/unused",
+            [],
+            snapshot,
+            cast(SymbolicTransform, FakeSymbolicInputs()),
+            fragment=fragment,
+            entry_prefix=prefix,
+            condition_code_seed=seed,
+        )
+
+
+def test_fragment_constructor_rejects_symbolic_end_mismatch():
+    snapshot = ProgramState(x86.ArchX86())
+    snapshot.write_register("RIP", 0x4000)
+    transform = SymbolicTransform(1, {}, [], snapshot.arch, 0x4000, 0x4002)
+    with pytest.raises(ReproducerFragmentError, match="differs from symbolic range"):
+        Reproducer(
+            "/unused",
+            [],
+            snapshot,
+            transform,
+            fragment=ExecutableFragment(0x4000, 0x4001, b"\x90"),
+        )

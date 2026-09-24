@@ -4,13 +4,27 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import secrets
+import time
 from collections.abc import Iterable
 from contextlib import nullcontext
+from dataclasses import replace
+from pathlib import Path
 
 import focaccia.parser as parser
 from focaccia.arch import Arch, supported_architectures
 from focaccia.compare import compare_symbolic
+from focaccia.execution import ExecutionOutcome, ExecutionState, TerminalComparison
+from focaccia.no_replay import (
+    ExitAction,
+    NoReplayActionKind,
+    describe_no_replay_action,
+    no_replay_syscall_opcode,
+    prepare_no_replay_action,
+)
 from focaccia.match import MatchResult, TransitionMatcher
 from focaccia.qemu.snapshot import (
     collect_snapshot_plan,
@@ -24,7 +38,7 @@ from focaccia.qemu.profiling import (
     QEMUValidationProfiler,
     write_qemu_validation_profile,
 )
-from focaccia.qemu.report import write_validation_report
+from focaccia.qemu.report import TerminalActionValidation, write_validation_report
 from focaccia.qemu.transport import PluginListener, PluginTransport
 from focaccia.snapshot import ProgramState, ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTraceItem
@@ -125,6 +139,7 @@ class PluginStateIterator:
             f"Connected to QEMU plugin process {handshake.pid} using protocol "
             f"version {handshake.version}."
         )
+        self.pid = handshake.pid
         self.state = PluginProgramState(arch, self.transport)
 
     @classmethod
@@ -140,6 +155,7 @@ class PluginStateIterator:
         result._first_next = True
         result._closed = False
         result._listener = None
+        result.pid = None
         result.transport = transport
         result.state = PluginProgramState(arch, transport)
         return result
@@ -276,6 +292,110 @@ def collect_conc_trace(
         result.trace,
         (*result.diagnostics, *diagnostics),
         result.pending_transform,
+        result.consumed_transform_count,
+    )
+
+
+def _write_atomic_json(path: str, document: dict[str, object]) -> None:
+    destination = Path(path)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+
+
+def _plugin_terminal_completion(
+    qemu: PluginStateIterator,
+    symbolic: MaterializedTrace[SymbolicTraceItem] | TransformStream[SymbolicTraceItem],
+    matched: MatchResult,
+    ready_path: str,
+    evidence_path: str,
+    timeout_seconds: float,
+):
+    expected = symbolic.completion
+    if expected is None or matched.trace is None or matched.pending_transform is not None:
+        raise RuntimeError("Whole-program plugin collection lacks a bound final boundary.")
+    states = matched.trace.state_boundaries
+    if (
+        matched.consumed_transform_count != expected.transform_count
+        or not states
+        or states[-1].read_pc() != expected.final_pc
+    ):
+        raise RuntimeError("Whole-program plugin collection did not bind the declared final boundary.")
+    if expected.no_replay_exit is None:
+        raise RuntimeError("Plugin completion lacks independently instantiable exit-action evidence.")
+    final_state = states[-1]
+    action_state = qemu.state
+    if action_state.read_pc() != expected.final_pc:
+        raise RuntimeError("Plugin live terminal action is not at the bound final boundary.")
+    descriptor = describe_no_replay_action(action_state)
+    if descriptor != expected.terminal_action or descriptor.kind not in (
+        NoReplayActionKind.EXIT,
+        NoReplayActionKind.EXIT_GROUP,
+    ):
+        raise RuntimeError("Plugin final live action does not match the oracle descriptor.")
+    opcode = no_replay_syscall_opcode(action_state.arch.key)
+    if action_state.read_memory(expected.final_pc, len(opcode)) != opcode:
+        raise RuntimeError("Plugin final live instruction is not the supported terminal syscall.")
+    observed_action = prepare_no_replay_action(
+        action_state, single_thread=True, descriptor=descriptor
+    )
+    if not isinstance(observed_action, ExitAction):
+        raise RuntimeError("Plugin final live action is not a supported exit action.")
+
+    nonce = secrets.token_hex(32)
+    binding = {
+        "schema": "focaccia-plugin-terminal-ready-v1",
+        "nonce": nonce,
+        "pid": qemu.pid,
+        "binarySha256": symbolic.env.binary_hash,
+        "finalPc": expected.final_pc,
+        "transformCount": expected.transform_count,
+        "stateCount": expected.state_count,
+    }
+    qemu.finish()
+    _write_atomic_json(ready_path, binding)
+    deadline = time.monotonic() + timeout_seconds
+    evidence_file = Path(evidence_path)
+    while not evidence_file.is_file():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out waiting for independent plugin process outcome evidence.")
+        time.sleep(0.05)
+    evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+    if not isinstance(evidence, dict) or evidence.get("schema") != "focaccia-plugin-terminal-evidence-v1":
+        raise ValueError("Malformed plugin terminal evidence.")
+    for key in ("nonce", "pid", "binarySha256"):
+        if evidence.get(key) != binding[key]:
+            raise ValueError(f"Plugin terminal evidence has mismatched {key} binding.")
+    returncode = evidence.get("returncode")
+    if type(returncode) is not int:
+        raise ValueError("Plugin terminal evidence lacks an integer process return code.")
+    outcome = (
+        ExecutionOutcome(ExecutionState.EXITED, exit_status=returncode)
+        if returncode >= 0
+        else ExecutionOutcome(ExecutionState.EXITED, termination_signal=-returncode)
+    )
+    # Adaptive matching may retain fewer concrete cutpoints than oracle
+    # transforms.  Completion accounts for the consumed/composed semantic
+    # prefix, while the concrete trace keeps its own N+1 retained-boundary
+    # cardinality.
+    observed = replace(
+        expected,
+        transform_count=matched.consumed_transform_count,
+        state_count=matched.consumed_transform_count + 1,
+        outcome=outcome,
+        terminal_action=descriptor,
+        no_replay_exit=observed_action,
+        no_replay_set_fs=(),
+        no_replay_set_tid=(),
+        no_replay_mmap=(),
+    )
+    comparison = (
+        TerminalComparison.MATCH
+        if expected.no_replay_exit == observed_action
+        else TerminalComparison.MISMATCH
+    )
+    return observed, TerminalActionValidation(
+        expected.no_replay_exit, observed_action, comparison
     )
 
 
@@ -291,6 +411,9 @@ def start_validation_server(
     skip_unmatched: bool = False,
     report_path: str | None = None,
     profile_path: str | None = None,
+    terminal_ready_path: str | None = None,
+    terminal_evidence_path: str | None = None,
+    terminal_timeout_seconds: float = 1800.0,
 ) -> MatchResult:
     architecture = supported_architectures.get(guest_arch)
     if architecture is None:
@@ -315,6 +438,11 @@ def start_validation_server(
         raise ValueError(f"Unsupported symbolic trace type {trace_type!r}.")
 
     with trace_file:
+        from focaccia.completion import TraceScope
+
+        whole_program = symb_transforms.scope is TraceScope.WHOLE_PROGRAM
+        if whole_program and (terminal_ready_path is None or terminal_evidence_path is None):
+            raise ValueError("Plugin whole-program validation requires typed terminal evidence paths.")
         with PluginStateIterator(socket_path, architecture) as qemu:
             try:
                 tracing_measurement = (
@@ -337,9 +465,14 @@ def start_validation_server(
                         matched.trace,
                         diagnostics=matched.diagnostics,
                     )
-                if not matched.complete:
+                structurally_incomplete = (
+                    matched.trace is None or matched.pending_transform is not None
+                )
+                if (whole_program and structurally_incomplete) or (
+                    not whole_program and not matched.complete
+                ):
                     raise RuntimeError(
-                        "Plugin validation did not produce a complete transition trace."
+                        "Plugin validation did not produce a structurally complete transition trace."
                     )
 
                 if output:
@@ -359,21 +492,40 @@ def start_validation_server(
                         with open(output, "w") as output_file:
                             serialize_snapshots(MaterializedTrace(states, env), output_file)
 
+                observed_completion = None
+                terminal_action_validation = None
+                if whole_program:
+                    assert terminal_ready_path is not None
+                    assert terminal_evidence_path is not None
+                    observed_completion, terminal_action_validation = _plugin_terminal_completion(
+                        qemu,
+                        symb_transforms,
+                        matched,
+                        terminal_ready_path,
+                        terminal_evidence_path,
+                        terminal_timeout_seconds,
+                    )
+
                 if report_path:
                     write_validation_report(
                         report_path,
                         validation_report,
                         None,
                         matched,
+                        scope=symb_transforms.scope,
+                        expected_completion=getattr(symb_transforms, "completion", None),
+                        observed_completion=observed_completion,
+                        terminal_action_validation=terminal_action_validation,
                     )
 
                 if profiler is not None:
                     profiler.finish_total()
                     write_qemu_validation_profile(profile_path, profiler.snapshot())
 
-                # FINISH is sent only after every requested structured artifact
-                # has been persisted. The guest then continues naturally.
-                qemu.finish()
+                # Witness traces detach after artifacts are durable. Whole-program
+                # traces detached before waiting for independently observed exit.
+                if not whole_program:
+                    qemu.finish()
             except Exception:
                 try:
                     qemu.abort()

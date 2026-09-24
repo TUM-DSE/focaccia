@@ -1,6 +1,14 @@
 import pytest
 from miasm.core.locationdb import LocationDB
-from miasm.expression.expression import ExprCompose, ExprId, ExprInt, ExprMem, ExprOp
+from miasm.expression.expression import (
+    ExprCompose,
+    ExprCond,
+    ExprId,
+    ExprInt,
+    ExprMem,
+    ExprOp,
+    ExprSlice,
+)
 
 from focaccia.arch import aarch64, x86
 from focaccia.miasm_util import MiasmSymbolResolver, eval_expr, expression_depth
@@ -39,6 +47,44 @@ def zero_extend(expression, width: int):
     if expression.size == width:
         return expression
     return ExprCompose(expression, ExprInt(0, width - expression.size))
+
+
+@pytest.mark.parametrize(
+    ("x1", "expected"),
+    [(0x7FFFFFFF, 0x1008), (0xFFFFFFFF, 0xFF8)],
+)
+def test_aarch64_scalar_bit_slice_resolves_from_known_full_register(x1, expected):
+    arch = aarch64.ArchAArch64("little")
+    concrete = state(arch, X1=x1, X2=0x1000)
+    sign = ExprSlice(ExprId("X1", 64), 31, 32)
+    signed_offset = ExprCond(sign, ExprInt(-8 & ((1 << 64) - 1), 64), ExprInt(8, 64))
+    expression = ExprId("X2", 64) + signed_offset
+
+    assert _TransformEvaluator(concrete, []).evaluate(expression) == expected
+
+
+def test_register_slice_evaluation_preserves_resolver_overrides():
+    arch = aarch64.ArchAArch64("little")
+    concrete = state(arch)
+
+    class OverrideResolver(MiasmSymbolResolver):
+        def __init__(self):
+            super().__init__(concrete, LocationDB())
+            self.calls = []
+
+        def resolve_register(self, regname):
+            self.calls.append(regname)
+            return {"X1": 1 << 31}.get(regname)
+
+    resolver = OverrideResolver()
+    expression = ExprCond(
+        ExprSlice(ExprId("X1", 64), 31, 32),
+        ExprInt(1, 64),
+        ExprInt(0, 64),
+    )
+
+    assert eval_expr(expression, resolver) == ExprInt(1, 64)
+    assert resolver.calls == ["X1"]
 
 
 def test_deep_expression_composition_evaluation_and_dependencies_are_iterative(
@@ -204,6 +250,57 @@ def test_undefined_shift_flag_propagates_until_a_later_definition():
     )
     redefined = shift.composed_with(defined)
     assert redefined.validation_register_outputs()["OF"] == ExprInt(1, 1)
+
+
+def test_canonical_output_cache_preserves_alias_unknown_and_mutation_semantics():
+    little = aarch64.ArchAArch64("little")
+    big = aarch64.ArchAArch64("big")
+    for arch in (little, big):
+        alias_write = transform(
+            arch,
+            0x1000,
+            0x1004,
+            {ExprId("W0", 32): ExprInt(0x12345678, 32)},
+        )
+        first = alias_write.canonical_register_outputs()
+        assert first == {"X0": ExprInt(0x12345678, 64)}
+        assert alias_write.validation_register_outputs() == first
+
+        # Returned mappings are snapshots: caller mutation cannot poison reuse.
+        first["X0"] = ExprInt(0, 64)
+        assert alias_write.canonical_register_outputs()["X0"] == ExprInt(0x12345678, 64)
+
+        # changed_regs is a compatibility-public mapping. A content-keyed cache
+        # must observe direct replacement rather than returning the old equation.
+        alias_write.changed_regs["W0"] = ExprInt(0xAABBCCDD, 32)
+        assert alias_write.canonical_register_outputs() == {
+            "X0": ExprInt(0xAABBCCDD, 64)
+        }
+        assert alias_write.validation_register_outputs() == {
+            "X0": ExprInt(0xAABBCCDD, 64)
+        }
+
+    partial = transform(
+        X86,
+        0x2000,
+        0x2001,
+        {ExprId("AL", 8): ExprInt(0x5A, 8)},
+    )
+    assert partial.canonical_register_outputs()["RAX"] == ExprCompose(
+        ExprInt(0x5A, 8), ExprId("RAX", 64)[8:64]
+    )
+
+    unknown = SymbolicTransform(
+        1,
+        {ExprId("OF", 1): ExprId("FOCACCIA_UNDEFINED_OF_2000", 1)},
+        [],
+        X86,
+        0x2000,
+        0x2001,
+    )
+    assert unknown.validation_register_outputs() == {}
+    unknown.concat(transform(X86, 0x2001, 0x2002, {ExprId("OF", 1): ExprInt(1, 1)}))
+    assert unknown.validation_register_outputs() == {"OF": ExprInt(1, 1)}
 
 
 def test_single_alias_writes_expose_complete_base_register_outputs():

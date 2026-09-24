@@ -1,4 +1,11 @@
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
+
+from focaccia.completion import TraceScope
+
+
+class SimpleNamespace(_SimpleNamespace):
+    """Fake trace contract includes the default legacy scope."""
+    scope = TraceScope.UNSPECIFIED
 
 import pytest
 
@@ -157,7 +164,7 @@ def test_quiet_plugin_validation_still_writes_structured_report(
     monkeypatch.setattr(
         validation_server,
         "write_validation_report",
-        lambda *args: writes.append(args),
+        lambda *args, **_kwargs: writes.append(args),
     )
     monkeypatch.setattr(
         validation_server,

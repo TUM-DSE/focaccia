@@ -40,6 +40,7 @@ class SnapshotPlanningError(ValueError):
 class MemoryDependency:
     expression: ExprMem
     address_state: AddressState
+    transform: SymbolicTransform | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +92,13 @@ def merge_snapshot_plans(*plans: SnapshotPlan) -> SnapshotPlan:
     architecture = plans[0].architecture
     registers: set[str] = set()
     memory: list[MemoryDependency] = []
-    seen_memory: set[tuple[ExprMem, AddressState]] = set()
+    seen_memory: set[tuple[ExprMem, AddressState, int]] = set()
     for plan in plans:
         if plan.architecture != architecture:
             raise SnapshotPlanningError("Candidate snapshot plans use different architectures.")
         registers.update(plan.registers)
         for dependency in plan.memory:
-            key = (dependency.expression, dependency.address_state)
+            key = (dependency.expression, dependency.address_state, id(dependency.transform))
             if key not in seen_memory:
                 seen_memory.add(key)
                 memory.append(dependency)
@@ -117,7 +118,7 @@ def plan_minimal_snapshot(
     if isinstance(incoming, SymbolicTransform):
         registers.update(incoming.validation_register_outputs())
         memory.extend(
-            MemoryDependency(write.destination, "previous") for write in incoming.memory_writes
+            MemoryDependency(write.destination, "previous", incoming) for write in incoming.memory_writes
         )
 
     if isinstance(outgoing, SymbolicTransform):
@@ -128,9 +129,9 @@ def plan_minimal_snapshot(
         )
 
     unique_memory: list[MemoryDependency] = []
-    seen_memory: set[tuple[ExprMem, AddressState]] = set()
+    seen_memory: set[tuple[ExprMem, AddressState, int]] = set()
     for dependency in memory:
-        key = (dependency.expression, dependency.address_state)
+        key = (dependency.expression, dependency.address_state, id(dependency.transform))
         if key in seen_memory:
             continue
         seen_memory.add(key)
@@ -141,6 +142,44 @@ def plan_minimal_snapshot(
         tuple(sorted(registers)),
         tuple(unique_memory),
     )
+
+
+def plan_aarch64_scalar_context(
+    current_state: ReadableProgramState, *, include_dczid: bool = False,
+) -> SnapshotPlan:
+    """Retain live source GPRs before adaptive cross-block composition.
+
+    Whole-program libc loops can converge beyond the basic-block dependency
+    lookahead. Later memory-write addresses must use the original source's
+    registers, never a reread of the already advanced target. This fixed-size
+    context does not invent memory or imply unsupported sysregs are observed.
+    """
+    if current_state.arch.archname != 'aarch64':
+        raise SnapshotPlanningError('AArch64 scalar context requires an AArch64 state.')
+    registers = ('PC', 'SP', 'CPSR', *[f'X{i}' for i in range(31)])
+    if include_dczid:
+        registers += ('DCZID_EL0',)
+    return SnapshotPlan(current_state.arch, registers, ())
+
+
+def plan_x86_scalar_context(current_state: ReadableProgramState) -> SnapshotPlan:
+    """Retain actual scalar inputs before adaptive cross-block composition.
+
+    Successor lookahead deliberately stops at a control-flow boundary. A later
+    converged cutpoint can nevertheless compose across that boundary, so its
+    source-relative stack or general-register address inputs must already be
+    present in the retained source state. This observes the live target values;
+    unavailable registers remain explicit snapshot issues.
+    """
+    if current_state.arch.archname != 'x86_64':
+        raise SnapshotPlanningError('x86 scalar context requires an x86-64 state.')
+    registers = (
+        'RIP', 'RFLAGS',
+        'RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+        'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15',
+        'FS', 'GS', 'FS_BASE', 'GS_BASE',
+    )
+    return SnapshotPlan(current_state.arch, registers, ())
 
 
 def plan_symbolic_dependencies(
@@ -160,6 +199,26 @@ def plan_symbolic_dependencies(
     )
 
 
+def unavailable_validation_outputs(
+    current_state: ReadableProgramState,
+    outgoing: SymbolicTraceItem | None,
+) -> set[str]:
+    """Probe stable backend register observability before choosing a cutpoint.
+
+    Values are not retained here and no unknown bits are inferred.  The caller
+    may instead compose through a later architectural memory effect.
+    """
+    if not isinstance(outgoing, SymbolicTransform):
+        return set()
+    unavailable: set[str] = set()
+    for register in outgoing.validation_register_outputs():
+        try:
+            current_state.read_register(register)
+        except RegisterAccessError:
+            unavailable.add(register)
+    return unavailable
+
+
 def collect_snapshot_plan(
     previous_state: ReadableProgramState,
     current_state: ReadableProgramState,
@@ -177,7 +236,11 @@ def collect_snapshot_plan(
             f"snapshot architecture {plan.architecture}."
         )
 
-    snapshot = ProgramState(plan.architecture)
+    snapshot = ProgramState(
+        plan.architecture,
+        execution_tid=current_state.execution_tid,
+        allocation_bases=current_state.allocation_bases,
+    )
     snapshot.write_register("PC", current_state.read_pc())
     issues: list[SnapshotIssue] = []
 
@@ -201,7 +264,11 @@ def collect_snapshot_plan(
             raise SnapshotPlanningError(f"Non-byte memory expression width {expression.size}.")
         address_state = previous_state if dependency.address_state == "previous" else current_state
         try:
-            address = eval_symbol(expression.ptr, address_state)
+            address = (
+                dependency.transform.eval_memory_address(expression.ptr, address_state)
+                if dependency.transform is not None
+                else eval_symbol(expression.ptr, address_state)
+            )
         except (RegisterAccessError, MemoryAccessError, SymbolEvaluationError, ValueError) as error:
             issues.append(
                 SnapshotIssue(

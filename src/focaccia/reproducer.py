@@ -29,6 +29,12 @@ _X86_GPR_RESTORE_ORDER = (
     "R11",
 )
 _X86_RESTORABLE_FLAG_NAMES = ("CF", "PF", "AF", "ZF", "SF", "DF", "OF")
+_X86_32_BIT_GPR_ALIASES = {
+    "RAX": "EAX", "RBX": "EBX", "RCX": "ECX", "RDX": "EDX",
+    "RSI": "ESI", "RDI": "EDI", "RBP": "EBP",
+    "R8": "R8D", "R9": "R9D", "R10": "R10D", "R11": "R11D",
+    "R12": "R12D", "R13": "R13D", "R14": "R14D", "R15": "R15D",
+}
 
 
 class ReproducerMemoryError(Exception):
@@ -139,10 +145,35 @@ class RegisterRestore:
     value: int
 
     def __post_init__(self) -> None:
-        if self.register not in {*_X86_GPR_RESTORE_ORDER, "RSP"}:
+        aliases = set(_X86_32_BIT_GPR_ALIASES.values())
+        if self.register not in {*_X86_GPR_RESTORE_ORDER, "RSP", *aliases}:
             raise ValueError(f"Unsupported x86-64 restore register {self.register}.")
-        if self.value < 0 or self.value >= _X86_ADDRESS_SPACE_SIZE:
-            raise ValueError(f"Value for {self.register} does not fit in 64 bits.")
+        width = 32 if self.register in aliases else 64
+        if self.value < 0 or self.value >= 1 << width:
+            raise ValueError(f"Value for {self.register} does not fit in {width} bits.")
+
+
+@dataclass(frozen=True, slots=True)
+class PackedRegisterRestore:
+    """Exact SIMD/MMX input; AVX restoration is limited to YMM0–15."""
+
+    register: str
+    value: int
+
+    def __post_init__(self) -> None:
+        width = self.size_bytes * 8
+        if not 0 <= self.value < 1 << width:
+            raise ValueError(f"Value for {self.register} does not fit in {width} bits.")
+
+    @property
+    def size_bytes(self) -> int:
+        if self.register in {f"XMM{i}" for i in range(16)}:
+            return 16
+        if self.register in {f"YMM{i}" for i in range(16)}:
+            return 32
+        if self.register in {f"MM{i}" for i in range(8)}:
+            return 8
+        raise ValueError(f"Unsupported packed restore register {self.register}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +185,7 @@ class X86StateRestorePlan:
     stack_pointer: RegisterRestore | None
     flags_mask: int
     flags_value: int
+    packed_registers: tuple[PackedRegisterRestore, ...] = ()
 
     def __post_init__(self) -> None:
         if self.target_pc < 0 or self.target_pc >= _X86_ADDRESS_SPACE_SIZE:
@@ -280,7 +312,8 @@ def plan_x86_state_restore(
             raise RuntimeError(f"x86-64 has no {name} flag accessor.")
         restorable_flag_mask |= accessor.mask
 
-    required_bases: set[str] = set()
+    required_bases: dict[str, str] = {}
+    packed_restores: dict[str, PackedRegisterRestore] = {}
     flags_mask = 0
     flags_value = 0
     for requested_name in sorted(set(used_registers)):
@@ -312,18 +345,60 @@ def plan_x86_state_restore(
             flags_value = (flags_value & ~accessor.mask) | (value & accessor.mask)
             continue
         if base == "RSP" or base in _X86_GPR_RESTORE_ORDER:
-            required_bases.add(base)
+            alias = _X86_32_BIT_GPR_ALIASES.get(base)
+            restore_name = normalized if normalized == alias else base
+            if restore_name == alias:
+                try:
+                    snapshot.read_register(base)
+                except RegisterAccessError:
+                    pass
+                else:
+                    # A 32-bit write zero-extends and would discard observed
+                    # transition context in the upper half. Preserve the full
+                    # observed value when it is available; use the alias only
+                    # when those upper bits are genuinely unknown.
+                    restore_name = base
+            previous = required_bases.get(base)
+            if previous is None or previous == alias and restore_name == base:
+                required_bases[base] = restore_name
+            continue
+        if normalized in {f"XMM{i}" for i in range(16)}:
+            value = read_required(normalized)
+            _, validity = snapshot.known_register_bits().get(base, (0, 0))
+            if validity & ~accessor.mask:
+                raise ReproducerRegisterError(
+                    f"Input {normalized} has observed upper context in {base}; "
+                    "wide SIMD restoration is unsupported."
+                )
+            packed_restores[base] = PackedRegisterRestore(normalized, value)
+            continue
+        if normalized in {f"YMM{i}" for i in range(16)}:
+            value = read_required(normalized)
+            _, validity = snapshot.known_register_bits().get(base, (0, 0))
+            if validity & ~accessor.mask:
+                raise ReproducerRegisterError(
+                    f"Input {normalized} has observed upper context in {base}; "
+                    "AVX512 restoration is unsupported."
+                )
+            packed_restores[base] = PackedRegisterRestore(normalized, value)
+            continue
+        if base in {f"MM{i}" for i in range(8)}:
+            packed_restores[base] = PackedRegisterRestore(base, read_required(base))
             continue
         raise ReproducerRegisterError(f"Input {normalized} uses unsupported register class {base}.")
 
     restores: list[RegisterRestore] = []
     stack_pointer: RegisterRestore | None = None
     for register in _X86_GPR_RESTORE_ORDER:
-        if register in required_bases:
+        restore_name = required_bases.get(register)
+        if restore_name is not None:
             restores.append(
                 RegisterRestore(
-                    register,
-                    read_required(register, complete_base=True),
+                    restore_name,
+                    read_required(
+                        restore_name,
+                        complete_base=restore_name == register,
+                    ),
                 )
             )
     if "RSP" in required_bases:
@@ -338,6 +413,7 @@ def plan_x86_state_restore(
         stack_pointer,
         flags_mask,
         flags_value & flags_mask,
+        tuple(packed_restores[name] for name in sorted(packed_restores)),
     )
 
 
@@ -564,8 +640,20 @@ class Reproducer:
                     "popfq",
                 )
             )
+        for packed in plan.packed_registers:
+            instruction = {8: "movq", 16: "movdqu", 32: "vmovdqu"}[packed.size_bytes]
+            lines.append(
+                f"{instruction} _restore_{packed.register.lower()}(%rip), "
+                f"%{packed.register.lower()}"
+            )
         for restore in plan.registers:
-            lines.append(f"movabsq ${restore.value:#x}, %{restore.register.lower()}")
+            instruction = (
+                "movl" if restore.register in _X86_32_BIT_GPR_ALIASES.values()
+                else "movabsq"
+            )
+            lines.append(
+                f"{instruction} ${restore.value:#x}, %{restore.register.lower()}"
+            )
         if self.condition_code_seed is not None:
             if plan.flags_mask:
                 raise ReproducerRegisterError(
@@ -659,6 +747,13 @@ class Reproducer:
         return "\n".join(
             (
                 "_alloc:",
+                # Reuse an exact existing guest mapping (commonly the initial
+                # stack). Old QEMU may silently ignore MAP_FIXED_NOREPLACE.
+                "movq $(PROT_READ | PROT_WRITE), %rdx",
+                "movq $syscall_mprotect, %rax",
+                "syscall",
+                "testq %rax, %rax",
+                "je _reproducer_allocated",
                 "movq $(PROT_READ | PROT_WRITE), %rdx",
                 "movq $(MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE), %r10",
                 "movq $-1, %r8",
@@ -666,7 +761,15 @@ class Reproducer:
                 "movq $syscall_mmap, %rax",
                 "syscall",
                 "cmpq %rdi, %rax",
+                "je _reproducer_allocated",
+                # The requested page may already be an exact writable guest
+                # mapping (most notably the initial stack).  Linux returns
+                # -EEXIST for MAP_FIXED_NOREPLACE in that case.  Preserve the
+                # mapping and let the exact byte stores below prove writability;
+                # every other result remains a hard failure.
+                "cmpq $-17, %rax",
                 "jne _reproducer_fail",
+                "_reproducer_allocated:",
                 "ret",
                 "",
             )
@@ -705,7 +808,13 @@ class Reproducer:
         asm += f"MAP_ANONYMOUS = 0x20\n"
         asm += f"MAP_FIXED_NOREPLACE = 0x100000\n"
         asm += f"syscall_mmap = 9\n"
+        asm += f"syscall_mprotect = 10\n"
         asm += f"\n"
+        if self.entry_prefix is None:
+            for restore in self.register_plan().packed_registers:
+                asm += f"_restore_{restore.register.lower()}:\n"
+                data = restore.value.to_bytes(restore.size_bytes, "little")
+                asm += "\n".join(self._byte_directives(data)) + "\n"
 
         return asm
 

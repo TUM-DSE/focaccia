@@ -1,7 +1,7 @@
 import pytest
 
 from focaccia.arch import aarch64, x86
-from focaccia.snapshot import MemoryAccessError, ProgramState, RegisterAccessError
+from focaccia.snapshot import MemoryAccessError, ProgramState, RegisterAccessError, SparseMemory
 
 @pytest.fixture
 def arch():
@@ -218,6 +218,10 @@ def test_known_register_views_and_repr_preserve_partial_aliases():
     assert "Snapshot (x86_64)" in rendered
     assert "'AH': '0xab'" in rendered
     assert "'RBX': '0x42'" in rendered
+
+
+def test_sparse_memory_empty_range_mask_has_no_valid_bits():
+    assert SparseMemory._range_mask(17, 0) == 0
 
 
 def test_program_state_memory_methods_preserve_address_order():

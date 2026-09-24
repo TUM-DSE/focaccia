@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import shutil
 import ctypes
 import signal
@@ -9,7 +8,7 @@ from collections.abc import Callable
 from os import PathLike
 from functools import total_ordering
 from hashlib import sha256
-from typing import Protocol
+from typing import Protocol, TextIO
 
 
 @total_ordering
@@ -91,7 +90,9 @@ def get_envp() -> list[str]:
     return [f"{k}={v}" for k, v in os.environ.items()]
 
 
-def print_separator(separator: str = "-", stream=sys.stdout, count: int = 80):
+def print_separator(
+    separator: str = "-", stream: TextIO | None = None, count: int = 80
+) -> None:
     maxtermsize = count
     termsize = shutil.get_terminal_size((80, 20)).columns
     print(separator * min(termsize, maxtermsize), file=stream)

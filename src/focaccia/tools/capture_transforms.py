@@ -44,6 +44,8 @@ def make_argparser() -> argparse.ArgumentParser:
                       default=False,
                       action='store_true',
                       help='Capture transforms in debug mode to identify errors in Focaccia itself')
+    prog.add_argument('--whole-program', action='store_true',
+                      help='Capture through a verified terminal action (RR or static SET_FS/exit); prohibits witness bounds')
     prog.add_argument('--start-address',
                       default=None,
                       type=utils.to_int,
@@ -98,12 +100,17 @@ def create_symbolic_tracer(
     ``--debug`` controls logging only; semantic cross-validation is enabled
     exclusively by ``--cross-validate``.
     """
+    whole_program = getattr(args, 'whole_program', False)
+    if whole_program and (env.start_address is not None or env.stop_address is not None):
+        raise ValueError('Whole-program capture prohibits witness bounds.')
+    options = {'whole_program': True} if whole_program else {}
     return tracer_factory(
         env,
         remote=args.remote,
         cross_validate=args.cross_validate,
         force=args.force,
         profiler=profiler,
+        **options,
     )
 
 

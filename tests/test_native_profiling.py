@@ -15,7 +15,7 @@ def test_profiling_is_disabled_by_default():
 
 
 def test_profiler_accumulates_components_without_double_counting_nested_spans():
-    readings = iter((10.0, 13.0, 20.0, 22.5, 30.0, 30.25))
+    readings = iter((10.0, 11.0, 12.0, 13.0, 20.0, 22.5, 30.0, 30.25))
     profiler = TraceProfiler(lambda: next(readings))
 
     concrete = profiler.start("concrete")
@@ -78,6 +78,9 @@ def test_profile_report_is_plain_json_without_schema_version(tmp_path):
     write_capture_profile(destination, profiler.snapshot())
 
     document = json.loads(destination.read_text())
+    accounting = document.pop("accounting")
+    assert accounting["method"] == "exclusive-components-v1"
+    assert accounting["traceUnassignedSeconds"] == 0.0
     assert document == {
         "status": "passed",
         "timings": {

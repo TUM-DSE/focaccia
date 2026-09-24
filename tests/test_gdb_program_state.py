@@ -74,6 +74,9 @@ class FakeValue:
 
 
 class FakeFrame:
+    def is_valid(self) -> bool:
+        return True
+
     def __init__(self, registers: dict[str, FakeRawValue | FakeValue | FakeVectorValue]):
         self.registers = registers
         self.reads: list[str] = []
@@ -95,6 +98,12 @@ class FakeMemory:
 
 
 class FakeInferior:
+    def is_valid(self):
+        return True
+
+    def threads(self):
+        return [SimpleNamespace(is_running=lambda: False, is_stopped=lambda: True)]
+
     def __init__(self, memory: dict[int, int]):
         self.memory = memory
         self.reads: list[tuple[int, int]] = []
@@ -123,9 +132,74 @@ def load_target_module(monkeypatch):
     dynamic_gdb.error = FakeGDBError
     dynamic_gdb.MemoryError = FakeGDBMemoryError
     dynamic_gdb.lookup_type = lambda name: name
+    dynamic_gdb.set_convenience_variable = lambda name, value: None
+    dynamic_gdb.selected_thread = lambda: None
     monkeypatch.setitem(sys.modules, "gdb", fake_gdb)
     sys.modules.pop("focaccia.qemu.target", None)
     return importlib.import_module("focaccia.qemu.target")
+
+
+def test_gdb_state_checks_stop_once_then_uses_generation_token(monkeypatch):
+    target = load_target_module(monkeypatch)
+    process = FakeInferior({0x1000: 0x90})
+    frame = FakeFrame({"rax": FakeValue(7, 8)})
+    connector = object.__new__(target.GDBServerConnector)
+    connector._process = process
+    connector.arch = x86.ArchX86()
+    connector._stop_generation = 4
+    stopped_checks = 0
+
+    def require_stopped() -> None:
+        nonlocal stopped_checks
+        stopped_checks += 1
+
+    connector._require_stopped = require_stopped
+    thread = object()
+    monkeypatch.setattr(target.gdb, "selected_frame", lambda: frame, raising=False)
+    monkeypatch.setattr(target.gdb, "selected_thread", lambda: thread, raising=False)
+    monkeypatch.setattr(
+        target.gdb, "selected_inferior", lambda: process, raising=False
+    )
+
+    state = connector.current_state()
+    assert state.read_register("RAX") == 7
+    assert state.read_memory(0x1000, 1) == b"\x90"
+    assert stopped_checks == 1
+
+    monkeypatch.setattr(target.gdb, "selected_inferior", lambda: object())
+    with pytest.raises(RuntimeError, match="stop context changed"):
+        state.read_register("RBX")
+
+    monkeypatch.setattr(target.gdb, "selected_inferior", lambda: process)
+    connector._advance_stop_generation()
+    with pytest.raises(RuntimeError, match="stop context changed"):
+        state.read_register("RBX")
+
+
+def test_gdb_target_writes_invalidate_existing_state(monkeypatch):
+    target = load_target_module(monkeypatch)
+    connector = object.__new__(target.GDBServerConnector)
+    connector._process = SimpleNamespace(write_memory=lambda _address, _data: None)
+    connector._stop_generation = 2
+    connector._require_stopped = lambda: None
+    commands: list[str] = []
+    monkeypatch.setattr(
+        target.gdb,
+        "execute",
+        lambda command, **_kwargs: commands.append(command),
+        raising=False,
+    )
+
+    connector.write_target_register("rax", 1)
+    connector.write_target_memory(0x1000, b"x")
+    connector.skip(0x2000)
+    monkeypatch.setattr(
+        target.gdb, "selected_inferior", lambda: connector._process, raising=False
+    )
+    connector._record_debugger_mutation(SimpleNamespace())
+
+    assert connector._stop_generation == 6
+    assert commands == ["set $rax = 0x1", "set $pc = 0x2000"]
 
 
 def test_gdb_state_caches_base_registers_and_flag_aliases(monkeypatch):
@@ -146,6 +220,71 @@ def test_gdb_state_caches_base_registers_and_flag_aliases(monkeypatch):
     assert state.read_register("RFLAGS") == (1 << 0) | (1 << 6) | (3 << 12)
     assert frame.reads == ["rax", "eflags"]
 
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+@pytest.mark.parametrize("selector", ["CS", "DS", "ES", "FS", "GS", "SS"])
+@pytest.mark.parametrize("value", [0, 0x33, 0xFFFF])
+def test_gdb_segment_selector_transport_width(monkeypatch, selector, value):
+    target = load_target_module(monkeypatch)
+    frame = FakeFrame({selector.lower(): FakeValue(value, 4)})
+    state = target.GDBProgramState(FakeInferior({}), frame, x86.ArchX86())
+    assert state.read_register(selector) == value
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+@pytest.mark.parametrize("value", [0x10000, 0xFFFF0033, -1, 1 << 32])
+def test_gdb_segment_selector_rejects_reserved_bits(monkeypatch, value):
+    target = load_target_module(monkeypatch)
+    frame = FakeFrame({"fs": FakeValue(value, 4)})
+    state = target.GDBProgramState(FakeInferior({}), frame, x86.ArchX86())
+    with pytest.raises(RegisterAccessError, match="Nonzero reserved bits"):
+        state.read_register("FS")
+    assert not state.test_register("FS")
+    sys.modules.pop("focaccia.qemu.target", None)
+
+
+def test_gdb_set_fs_stops_at_immediate_syscall_successor(monkeypatch):
+    from types import SimpleNamespace
+
+    from test_no_replay import set_fs_states
+
+    target = load_target_module(monkeypatch)
+    before, after = set_fs_states()
+    boundary = SimpleNamespace(
+        descriptor=target.describe_no_replay_action(before),
+        transform_index=0,
+        base=0x404178,
+    )
+    iterator = target.GDBServerStateIterator.__new__(target.GDBServerStateIterator)
+    iterator._no_replay_exit_only = SimpleNamespace(no_replay_set_fs=(boundary,))
+    iterator._no_replay_set_fs_position = 0
+    iterator._no_replay_source = (before.read_pc(), 0, 0)
+    iterator._observed_no_replay_set_fs = []
+    iterator._terminal_reason = None
+    iterator.current_state = lambda: before
+    iterator._require_stopped = lambda: None
+    iterator.is_exited = lambda: False
+    breakpoints = []
+
+    class SuccessorBreakpoint:
+        def __init__(self, address, *, internal):
+            assert address == "*0x4017c2" and internal is True
+            breakpoints.append(self)
+
+        def delete(self):
+            breakpoints.remove(self)
+
+    monkeypatch.setattr(target.gdb, "Breakpoint", SuccessorBreakpoint)
+
+    def resume(command):
+        assert command == "continue" and len(breakpoints) == 1
+        iterator.current_state = lambda: after
+
+    iterator._resume = resume
+    assert iterator._execute_no_replay_set_fs() is after
+    assert breakpoints == []
+    assert iterator._no_replay_set_fs_position == 1
     sys.modules.pop("focaccia.qemu.target", None)
 
 
@@ -295,9 +434,13 @@ def test_gdb_step_stops_at_first_guest_signal(monkeypatch):
         stop_signal = "SIGSEGV"
 
     fake_gdb.SignalEvent = FakeSignalEvent
+    fake_gdb.StopEvent = FakeSignalEvent
+    inferior = FakeInferior({})
+    fake_gdb.selected_inferior = lambda: inferior
     fake_gdb.selected_frame = lambda: FakeFrame({"pc": FakeValue(0x401014, 8)})
     connector = object.__new__(target.GDBServerConnector)
     connector._terminal_reason = None
+    connector._process = inferior
     connector.is_exited = lambda: False
     commands: list[str] = []
 
@@ -679,6 +822,7 @@ def test_startup_mmap_uses_existing_syscall_without_writing_rx_text(monkeypatch)
     connector.write_target_register = write_register
     connector.write_target_memory = lambda address, data: writes.append((address, data))
     connector.skip = lambda pc: write_register("rip", pc)
+    fake_gdb.selected_inferior = lambda: inferior
     fake_gdb.selected_frame = lambda: frame
 
     class TemporaryBreakpoint:
@@ -747,6 +891,7 @@ def test_startup_mmap_uses_static_executable_without_vdso(monkeypatch):
 
     connector.write_target_register = write_register
     connector.skip = lambda pc: write_register("rip", pc)
+    fake_gdb.selected_inferior = lambda: inferior
     fake_gdb.selected_frame = lambda: frame
 
     class TemporaryBreakpoint:
@@ -818,6 +963,8 @@ def test_gdb_signal_replay_writes_and_verifies_legacy_x86_vector_state(monkeypat
     )
     connector = object.__new__(target.GDBServerConnector)
     connector.current_state = lambda: state
+    connector._require_stopped = lambda: None
+    connector._stop_generation = 0
 
     connector.write_signal_handler_extra_registers(extra)
 
