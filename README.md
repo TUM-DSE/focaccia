@@ -96,6 +96,41 @@ use the installed tools and that the AST matches its manifest.
 using the pinned package, without RR or native debugger attachment. Both checks
 are available on `aarch64-linux` and `x86_64-linux`.
 
+### Live TIR/QEMU smoke without record/replay
+
+```bash
+nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-smoke"
+# Or run the sandboxed check and retain its artifacts in the Nix output:
+nix build .#checks.aarch64-linux.tir-no-replay-e2e
+```
+
+This runs the static AArch64 program in
+[`reproducers/tir-arithmetic/program.S`](reproducers/tir-arithmetic/program.S)
+under the pinned QEMU user emulator. TIR generates the reference transformations
+directly from the ELF's executable bytes, without reading emulator outputs or
+running a native reference process. The ordinary Focaccia GDB validation path
+then collects actual QEMU states and compares them against that reference.
+Neither RR nor native debugger attachment/ptrace is used. The QEMU GDB stub uses
+a Unix socket in an owner-only temporary directory, with event-driven readiness;
+no TCP debugger port is exposed.
+
+The witness covers seven supported arithmetic instructions, including 64-bit
+wraparound, 32-bit signed overflow and zero-extension, SP arithmetic, and NZCV
+flags. Register setup, entry/exit branches, and the exit syscall are outside the
+validated region. Two clean runs must be accepted: one observing each instruction
+and one composing all seven transformations between two cutpoints. Two additional
+runs deliberately flip the guest's carry flag through GDB at the final boundary;
+both must report a **confirmed carry mismatch**. This is controlled detector
+validation, not a newly discovered QEMU bug. All four guests must exit normally
+after the debugger detaches.
+
+The run directory must not already exist. It retains the fixture/TIR provenance
+manifest, symbolic `oracle.json`, and per-case concrete states, structured reports,
+commands, logs, and injection evidence. `result.json` summarizes all four cases.
+Reports intentionally use `scope: witness`: `trace.complete` confirms the bounded
+region, while whole-program completion remains unclaimed. The default Focaccia
+build remains TIR-free; this app and its check are explicit opt-ins.
+
 ## How To Use
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.

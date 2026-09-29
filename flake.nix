@@ -240,6 +240,57 @@
     '';
 
     # Build only: these native fixtures are never executed by flake checks.
+    tirSmokeFixture = pkgs.stdenvNoCC.mkDerivation {
+      pname = "tir-arithmetic-fixture";
+      version = "1";
+      src = ./reproducers/tir-arithmetic;
+      nativeBuildInputs = [ pkgs.llvmPackages_18.llvm pkgs.llvmPackages_18.lld pkgs.python3 ];
+      dontConfigure = true;
+      buildPhase = ''
+        llvm-mc -triple=aarch64-linux-gnu -filetype=obj program.S -o program.o
+        ld.lld -m aarch64elf -static -e _start -Ttext=0x400000 program.o -o program.elf
+        llvm-nm --defined-only program.elf > symbols.txt
+        python - <<'PY'
+        import hashlib, json
+        from pathlib import Path
+        symbols = {parts[2]: int(parts[0], 16) for line in Path("symbols.txt").read_text().splitlines()
+                   if len(parts := line.split()) == 3}
+        start, stop = symbols["tir_region_begin"], symbols["tir_region_end"]
+        assert stop - start == 7 * 4
+        Path("manifest.json").write_text(json.dumps({"schema": 1, "start": start, "stop": stop,
+            "sha256": hashlib.sha256(Path("program.elf").read_bytes()).hexdigest()}, indent=2) + "\n")
+        PY
+      '';
+      installPhase = ''
+        mkdir -p "$out"
+        cp program.elf program.S manifest.json "$out/"
+      '';
+    };
+
+    # Test-only debugger wrapper. GDB communicates with QEMU's remote stub; it
+    # never attaches to a host process. Injection is disabled unless the harness
+    # supplies its explicit final-boundary PC and evidence path.
+    tirSmokeGdb = pkgs.writeShellScriptBin "tir-smoke-gdb" ''
+      exec ${gdbInternal}/bin/gdb \
+        -ex 'set confirm off' -ex 'source ${./tests/probes/tir_carry_injection.gdb}' \
+        "$@" -ex detach
+    '';
+
+    tirSmokeRunner = pkgs.writeShellApplication {
+      name = "tir-no-replay-smoke";
+      runtimeInputs = [ pythonEnv ];
+      text = ''
+        exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} \
+          --fixture ${tirSmokeFixture} \
+          --oracle ${tirOracle}/bin/focaccia-tir-oracle \
+          --qemu ${pkgs.qemu-user}/bin/qemu-aarch64 \
+          --gdb ${tirSmokeGdb}/bin/tir-smoke-gdb \
+          --validator ${pythonEnv}/bin/validate-qemu \
+          --tir-revision ${tir.rev} \
+          "$@"
+      '';
+    };
+
     nativeTerminalFixtures = pkgs.stdenv.mkDerivation {
       name = "native-terminal-observation-fixtures";
       src = ./tests/probes;
@@ -3595,6 +3646,8 @@
 
       rr = rrTool;
 
+      tir-no-replay-fixture = tirSmokeFixture;
+      tir-no-replay-smoke = tirSmokeRunner;
       tir-oracle = tirOracle;
       tir-translator = tirPackages.tiramisu;
       tir-asl-specification = tirPackages.asl-specification;
@@ -3606,6 +3659,10 @@
     };
 
     apps = {
+      tir-no-replay-smoke = {
+        type = "app";
+        program = "${tirSmokeRunner}/bin/tir-no-replay-smoke";
+      };
       # Query derivation metadata through the client, without building optional
       # inputs or requiring a Nix daemon inside a sandboxed check.
       check-default-without-tir = {
@@ -3758,6 +3815,18 @@
 
 
     checks = {
+      tir-no-replay-harness = mkStaticUnitCheck {
+        name = "tir-no-replay-harness";
+        ruffTargets = [ "tests/probes/tir_no_replay_smoke.py" "tests/test_tir_no_replay_smoke.py" ];
+        pytestTargets = [ "tests/test_tir_no_replay_smoke.py" ];
+      };
+      # Requires private Unix sockets and an unprivileged QEMU user process.
+      # No native debugger attachment, ptrace, RR, or host configuration changes.
+      tir-no-replay-e2e = pkgs.runCommand "tir-no-replay-e2e" {
+        nativeBuildInputs = [ tirSmokeRunner ];
+      } ''
+        tir-no-replay-smoke --run-directory "$out"
+      '';
       default-without-tir = pkgs.runCommand "focaccia-default-without-tir" {
         # Runtime closure check. The companion app checks the full build graph
         # without requiring every source/tool output in that graph to be realized.
