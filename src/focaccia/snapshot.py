@@ -186,6 +186,14 @@ class ReadableProgramState:
     def read_memory(self, addr: int, size: int) -> bytes:
         raise NotImplementedError("ReadableProgramState.read_memory is abstract.")
 
+    def read_instructions(self, addr: int, size: int) -> bytes:
+        """Read instruction bytes, allowing live targets to remove debugger traps.
+
+        Materialized snapshots contain original bytes and use ordinary memory
+        reads. Native targets retain their breakpoint-aware overrides.
+        """
+        return self.read_memory(addr, size)
+
 
 class ProgramState(ReadableProgramState):
     """A concrete program-state observation with explicit validity."""

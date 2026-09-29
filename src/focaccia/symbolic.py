@@ -1,4 +1,4 @@
-"""Tools and utilities for execution with Miasm."""
+"""Shared symbolic transformations and Miasm instruction-semantics support."""
 
 from __future__ import annotations
 

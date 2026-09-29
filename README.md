@@ -35,15 +35,50 @@ Update this dependency deliberately with `nix flake update tir`.
 
 ```bash
 nix develop .#tir                # editable Focaccia + Rust/LLVM + packaged TIR data
+nix build .#tir-oracle            # specification-derived instruction oracle
 nix build .#tir-translator        # installed translator and inspection tools
 nix build .#tir-asl-specification # generated AST and provenance manifest
 nix develop .#tir -c tiramisu-translate --help
+nix run .#tir-oracle -- 4194304 420400f1 # SUBS X2, X2, #1 at 0x400000
 ```
 
-The opt-in shell provides the packaged AST, x86-64 runtime archive, and linker
-through TIR's environment configuration. The default Focaccia package and
-semantic backend are unchanged; this dependency setup does not yet implement
-TIR-based validation.
+The opt-in shell provides the packaged AST, x86-64 runtime archive, linker, and
+`focaccia-tir-oracle`. Capture selects instruction semantics with
+`--semantics-backend miasm|tir`; Miasm remains the default. For example, use
+`nix develop .#tir -c capture-transforms --help` to inspect the capture options.
+Native capture still requires its usual debugger/RR permissions.
+
+The initial TIR backend supports the AArch64 **ADD/ADDS/SUB/SUBS immediate**
+instruction class in little-endian, user-mode configuration, including 32-bit
+writes, stack-pointer operands, and NZCV flags. A Focaccia-owned Rust helper uses
+the pinned ASL frontend and specializer, then exports the residual computation
+into Focaccia's existing symbolic-expression representation. It does not invoke
+LLVM or Miasm's instruction semantics. Miasm is still used for disassembly and
+as the expression library; composition, comparison, and trace persistence retain
+their existing formats.
+
+Build Rust-helper changes with `nix build .#tir-oracle`. Nix places the helper
+in the fetched TIR workspace and resolves its lockfile offline using only the
+crate versions vendored from TIR's pinned `Cargo.lock`; the helper's relative
+Cargo paths are for that assembled workspace, not a sibling checkout.
+
+The typed specification is prepared once by Nix. The helper derives each
+instruction's transformation with runtime registers left symbolic, and the
+Python adapter caches it by address and exact instruction bytes. It rejects
+other instruction classes, unsupported residual operations or state updates,
+and code overlapping the specification profile's known memory. It also checks
+that the residual's instruction metadata matches the requested bytes. Memory,
+vector, floating-point, branch, and syscall instruction semantics are outside
+this first backend's scope. Unsupported instructions never fall back to Miasm;
+normal capture fails, while `--force` retains the existing explicit trace-gap
+behavior. `FOCACCIA_TIR_ORACLE` can select the helper executable.
+
+The dedicated `checks.<system>.tir-oracle-validation` exercises real
+specification-derived arithmetic through evaluation, composition, serialization,
+and mismatch detection. `checks.<system>.instruction-semantic-backends` covers
+backend selection, protocol failures, and fake-target capture/gap behavior.
+These checks need neither RR nor native debugger attachment. They do not claim
+that native TIR-backed application capture has been exercised.
 
 `checks.<system>.tir-package-contract` verifies that the Python environment can
 use the installed tools and that the AST matches its manifest.

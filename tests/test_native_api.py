@@ -37,6 +37,7 @@ from focaccia.native.tracer import (
     SymbolicTracer,
 )
 from focaccia.snapshot import ProgramState, ReadableProgramState
+from focaccia.semantics import MiasmBackend
 from focaccia.symbolic import (
     DisassemblyContext,
     Instruction,
@@ -1321,6 +1322,7 @@ def test_force_mode_records_unknown_symbolic_outputs_as_trace_gap(
     monkeypatch.setattr(tracer_module, "timebound", unsupported_output)
 
     tracer = object.__new__(SymbolicTracer)
+    tracer.semantics_backend = MiasmBackend()
     tracer.env = _environment()
     tracer.force = True
     tracer.cross_validate = False
@@ -1442,6 +1444,7 @@ def test_force_mode_records_symbolic_failure_as_trace_gap(monkeypatch):
     monkeypatch.setattr(tracer_module, "timebound", fail_symbolically)
 
     tracer = object.__new__(SymbolicTracer)
+    tracer.semantics_backend = MiasmBackend()
     tracer.env = _environment()
     tracer.force = True
     tracer.cross_validate = False

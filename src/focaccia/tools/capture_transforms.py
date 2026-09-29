@@ -44,6 +44,8 @@ def make_argparser() -> argparse.ArgumentParser:
                       default=False,
                       action='store_true',
                       help='Capture transforms in debug mode to identify errors in Focaccia itself')
+    prog.add_argument('--semantics-backend', default='miasm', choices=['miasm', 'tir'],
+                      help='Instruction semantics backend (default: miasm)')
     prog.add_argument('--whole-program', action='store_true',
                       help='Capture through a verified terminal action (RR or static SET_FS/exit); prohibits witness bounds')
     prog.add_argument('--start-address',
@@ -104,6 +106,12 @@ def create_symbolic_tracer(
     if whole_program and (env.start_address is not None or env.stop_address is not None):
         raise ValueError('Whole-program capture prohibits witness bounds.')
     options = {'whole_program': True} if whole_program else {}
+    backend_name = getattr(args, 'semantics_backend', 'miasm')
+    if backend_name == 'tir':
+        from focaccia.tir_backend import TirBackend
+        options['semantics_backend'] = TirBackend()
+    elif backend_name != 'miasm':
+        raise ValueError(f'Unknown semantics backend: {backend_name}')
     return tracer_factory(
         env,
         remote=args.remote,

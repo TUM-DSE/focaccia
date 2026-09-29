@@ -96,7 +96,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 markers = [
-	"integration: requires a debugger, emulator, RR replay, or a running guest program; run only from a dedicated flake check",
+	"integration: requires a packaged oracle, debugger, emulator, RR replay, or a running guest program; run only from a dedicated flake check",
 ]
 
 [tool.coverage.run]
@@ -130,11 +130,13 @@ core_modules = [
     "src/focaccia/reproducer.py",
     "src/focaccia/reproducer_aarch64.py",
     "src/focaccia/snapshot.py",
+    "src/focaccia/semantics.py",
     "src/focaccia/symbolic.py",
     "src/focaccia/trace.py",
     "src/focaccia/utils.py",
 ]
 integration_prefixes = [
+    "src/focaccia/tir_backend.py",
     "src/focaccia/cli.py",
     "src/focaccia/native/",
     "src/focaccia/parser.py",
@@ -207,6 +209,10 @@ branches = 90
 [tool.focaccia.coverage.ratchets."src/focaccia/snapshot.py"]
 statements = 94
 branches = 89
+
+[tool.focaccia.coverage.ratchets."src/focaccia/semantics.py"]
+statements = 100
+branches = 100
 
 [tool.focaccia.coverage.ratchets."src/focaccia/symbolic.py"]
 statements = 81

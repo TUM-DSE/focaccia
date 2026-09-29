@@ -402,3 +402,47 @@ def test_context_tid_contract_rejects_unsupported_context(failure):
         before.write_register('RFLAGS', 0x302)
     with pytest.raises(UnsupportedNoReplayAction):
         validate_set_tid_transition(before, after, 11399)
+
+
+def test_native_capture_uses_injected_semantics_backend(monkeypatch):
+    from miasm.expression.expression import Expr, ExprInt
+    seen = []
+
+    class Backend:
+        name = 'fixture'
+
+        def generate(self, instruction, state, context) -> tuple[ExprInt | None, dict[Expr, Expr]]:
+            seen.append((instruction.addr, state.arch.key, context.arch.key))
+            next_pc = ExprInt(instruction.addr + instruction.length, 64)
+            return next_pc, {context.lifter.pc: next_pc}
+
+    monkeypatch.setattr('focaccia.semantics.run_instruction',
+                        lambda *args: pytest.fail('default semantic engine was used'))
+    capture = make_capture(monkeypatch, Target())
+    capture.semantics_backend = Backend()
+    trace = capture.trace()
+    assert len(trace) == 1
+    assert trace[0].range == (0x1000, 0x1001)
+    assert seen == [(0x1000, capture.target.arch.key, capture.target.arch.key)]
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_native_capture_preserves_unsupported_backend_as_failure_or_gap(monkeypatch, force):
+    from focaccia.symbolic import TraceGap, UnsupportedInstructionError
+
+    class Backend:
+        name = 'fixture'
+
+        def generate(self, instruction, state, context):
+            raise UnsupportedInstructionError('fixture unsupported instruction')
+
+    capture = make_capture(monkeypatch, Target())
+    capture.semantics_backend = Backend()
+    capture.force = force
+    if not force:
+        with pytest.raises(UnsupportedInstructionError):
+            capture.trace()
+    else:
+        trace = capture.trace()
+        assert len(trace) == 1 and isinstance(trace[0], TraceGap)
+        assert trace[0].range == (0x1000, 0x1001)

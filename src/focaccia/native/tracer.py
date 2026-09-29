@@ -41,7 +41,7 @@ from focaccia.no_replay import (
 from focaccia.symbolic import allocation_base_symbol
 from focaccia.utils import timebound, TimeoutError
 from focaccia.trace import MaterializedTrace, TraceEnvironment
-from focaccia.miasm_util import MiasmSymbolResolver
+from focaccia.semantics import InstructionSemanticsBackend, MiasmBackend
 from focaccia.snapshot import (
     MemoryAccessError,
     ReadableProgramState,
@@ -59,7 +59,6 @@ from focaccia.symbolic import (
     SymbolicTransform,
     TraceGap,
     UnsupportedInstructionError,
-    run_instruction,
 )
 from focaccia.deterministic import (
     CursorState,
@@ -1051,8 +1050,10 @@ class SpeculativeTracer(ReadableProgramState):
 
 
 class SymbolicTracer:
-    """A symbolic tracer that uses `LLDBConcreteTarget` with Miasm to simultaneously execute a
-    program with concrete state and collect its symbolic transforms
+    """Trace concrete native execution and collect transforms from a semantic backend.
+
+    Miasm remains the default; alternative backends share the same stepping,
+    cross-validation, action handling, and trace-gap machinery.
     """
 
     def __init__(
@@ -1063,6 +1064,7 @@ class SymbolicTracer:
         cross_validate: bool = False,
         profiler: TraceProfiler | None = None,
         whole_program: bool = False,
+        semantics_backend: InstructionSemanticsBackend | None = None,
     ):
         if whole_program and (env.start_address is not None or env.stop_address is not None):
             raise ValueError("Whole-program capture prohibits witness bounds.")
@@ -1072,6 +1074,9 @@ class SymbolicTracer:
         self.remote = remote
         self.cross_validate = cross_validate
         self.profiler = profiler
+        self.semantics_backend: InstructionSemanticsBackend = (
+            semantics_backend if semantics_backend is not None else MiasmBackend()
+        )
         self.target = SpeculativeTracer(self.create_debug_target())
 
     def _profile_start(self, component: ProfileComponent) -> float | None:
@@ -1584,24 +1589,26 @@ class SymbolicTracer:
                 else None
             )
 
-            observed_mrs = self._observe_native_dczid_mrs(instruction, tid) if no_replay_exit_only else None
+            observed_mrs = (
+                self._observe_native_dczid_mrs(instruction, tid)
+                if no_replay_exit_only and isinstance(self.semantics_backend, MiasmBackend)
+                else None
+            )
             if observed_mrs is not None:
                 strace.append(observed_mrs)
                 self._profile_finish('symbolic', symbolic_start)
                 continue
 
-            # Run instruction
-            conc_state = MiasmSymbolResolver(self.target, ctx.loc_db)
-
+            # Run instruction through the configured semantic backend.
             symbolic_error: BaseException | None = None
             gap_reason: GapReason = "unsupported-semantics"
             try:
                 new_pc, modified = timebound(
                     time_limit,
-                    run_instruction,
-                    instruction.instr,
-                    conc_state,
-                    ctx.lifter,
+                    self.semantics_backend.generate,
+                    instruction,
+                    self.target,
+                    ctx,
                 )
                 if terminal_event:
                     new_pc, modified = _terminal_syscall_transition(

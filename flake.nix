@@ -59,6 +59,7 @@
 
     python = pkgs.python312;
     tirPackages = tir.packages.${system};
+    tirOracle = import ./nix/tir-oracle.nix { inherit tir system; };
 
     musl-pkgs = import nixpkgs {
       inherit system;
@@ -456,6 +457,8 @@
         "src/focaccia/qemu/x86.py"
         "src/focaccia/reproducer.py"
         "src/focaccia/rr"
+        "src/focaccia/semantics.py"
+        "src/focaccia/tir_backend.py"
         "src/focaccia/snapshot.py"
         "src/focaccia/symbolic.py"
         "src/focaccia/tools/capture_transforms.py"
@@ -3580,6 +3583,7 @@
 
       rr = rrTool;
 
+      tir-oracle = tirOracle;
       tir-translator = tirPackages.tiramisu;
       tir-asl-specification = tirPackages.asl-specification;
       tir-runtime-x86_64 = tirPackages.tirrt-runtime-x86_64;
@@ -3665,7 +3669,8 @@
         inherit (tir.devShells.${system}.default)
           TIR_ASL_AST TIR_RUNTIME_ARCHIVE TIR_CC
           LLVM_CONFIG_PATH LLVM_SYS_181_PREFIX LIBCLANG_PATH RUSTFLAGS RUST_BACKTRACE;
-        packages = [ devEnv tirPackages.tiramisu ];
+        packages = [ devEnv tirPackages.tiramisu tirOracle ];
+        FOCACCIA_TIR_ORACLE = "${tirOracle}/bin/focaccia-tir-oracle";
         env = uvEnv;
         shellHook = uvShellHook;
       };
@@ -3726,6 +3731,26 @@
 
 
     checks = {
+      instruction-semantic-backends = mkStaticUnitCheck {
+        name = "instruction-semantic-backends";
+        ruffTargets = [ "src/focaccia/semantics.py" "src/focaccia/tir_backend.py"
+          "src/focaccia/native/tracer.py" "src/focaccia/tools/capture_transforms.py"
+          "tests/test_semantics_backend.py" "tests/test_tir_backend.py" ];
+        pytestTargets = [ "tests/test_semantics_backend.py" "tests/test_tir_backend.py"
+          "tests/test_native_whole_program.py" ];
+      };
+      tir-oracle-validation = pkgs.stdenvNoCC.mkDerivation {
+        name = "tir-oracle-validation";
+        src = staticUnitSource;
+        dontBuild = true;
+        doCheck = true;
+        nativeCheckInputs = [ pythonStaticUnitEnv tirOracle ];
+        FOCACCIA_TIR_ORACLE = "${tirOracle}/bin/focaccia-tir-oracle";
+        checkPhase = ''
+          python -m pytest -q -m integration tests/test_tir_oracle.py
+        '';
+        installPhase = "mkdir -p $out";
+      };
       # Exercise the pinned GitHub package through the Focaccia dependency graph.
       tir-packaged-translation = tir.checks.${system}.packaged-translation;
       tir-package-contract = pkgs.runCommand "focaccia-tir-package-contract" {
