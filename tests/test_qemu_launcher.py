@@ -77,6 +77,24 @@ def test_plugin_report_is_supported_without_enabling_replay_options():
     validate_backend_options(parser, plugin)
 
 
+def test_plugin_backend_accepts_declared_coarse_cutpoint():
+    parser = make_argparser()
+    plugin = parser.parse_args(
+        [
+            "--symb-trace",
+            "/tmp/trace",
+            "--use-socket",
+            "/tmp/plugin",
+            "--guest-arch",
+            "aarch64l",
+            "--cutpoint-address",
+            "0x401000",
+        ]
+    )
+    validate_backend_options(parser, plugin)
+    assert plugin.cutpoint_address == [0x401000]
+
+
 def test_run_manifest_requires_gdb_replay_artifacts():
     parser = make_argparser()
     missing = parser.parse_args(

@@ -13,7 +13,14 @@ use std::{
 use tir::{module::Module, primitives::Primitive, syntax::*};
 
 type Result<T> = std::result::Result<T, String>;
-const CLASS: &str = "decode_aarch64_integer_arithmetic_add_sub_immediate";
+const CLASSES: &[&str] = &[
+    "decode_aarch64_integer_arithmetic_add_sub_immediate",
+    "decode_aarch64_integer_arithmetic_add_sub_shiftedreg",
+    "decode_aarch64_integer_conditional_select",
+    "decode_aarch64_integer_logical_immediate",
+    "decode_aarch64_integer_shift_variable",
+    "decode_aarch64_integer_bitfield",
+];
 const MAX_BITS: u32 = 128;
 
 // Module's name tables are HashMaps. Store them in a stable order so preparing
@@ -28,11 +35,23 @@ struct PreparedModule {
 }
 impl From<Module<TypedMeta>> for PreparedModule {
     fn from(module: Module<TypedMeta>) -> Self {
-        let Module { entries, names, base_hints, next_var, arch } = module;
+        let Module {
+            entries,
+            names,
+            base_hints,
+            next_var,
+            arch,
+        } = module;
         Self {
             entries,
-            names: names.iter().map(|(id, name)| (id.as_u32(), name.clone())).collect(),
-            base_hints: base_hints.iter().map(|(id, name)| (id.as_u32(), name.clone())).collect(),
+            names: names
+                .iter()
+                .map(|(id, name)| (id.as_u32(), name.clone()))
+                .collect(),
+            base_hints: base_hints
+                .iter()
+                .map(|(id, name)| (id.as_u32(), name.clone()))
+                .collect(),
             next_var,
             arch,
         }
@@ -42,21 +61,33 @@ impl From<PreparedModule> for Module<TypedMeta> {
     fn from(module: PreparedModule) -> Self {
         Self {
             entries: module.entries,
-            names: std::sync::Arc::new(module.names.into_iter().map(|(id, name)| (VarId::from_u32(id), name)).collect()),
-            base_hints: std::sync::Arc::new(module.base_hints.into_iter().map(|(id, name)| (VarId::from_u32(id), name)).collect()),
+            names: std::sync::Arc::new(
+                module
+                    .names
+                    .into_iter()
+                    .map(|(id, name)| (VarId::from_u32(id), name))
+                    .collect(),
+            ),
+            base_hints: std::sync::Arc::new(
+                module
+                    .base_hints
+                    .into_iter()
+                    .map(|(id, name)| (VarId::from_u32(id), name))
+                    .collect(),
+            ),
             next_var: module.next_var,
             arch: module.arch,
         }
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 struct Expression {
     bits: u32,
     #[serde(flatten)]
     node: Node,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Node {
     Constant {
@@ -125,6 +156,35 @@ enum Value {
     Scalar(Expression),
     Integer(u64),
 }
+
+fn replicate(value: Expression, count: u64) -> Result<Expression> {
+    let count = u32::try_from(count).map_err(|_| "invalid bit replication")?;
+    if count == 0
+        || value
+            .bits
+            .checked_mul(count)
+            .is_none_or(|bits| bits > MAX_BITS)
+    {
+        return Err("invalid bit replication".into());
+    }
+    fn balanced(value: &Expression, count: u32) -> Expression {
+        if count == 1 {
+            return value.clone();
+        }
+        let low_count = count / 2;
+        let high_count = count - low_count;
+        let high = balanced(value, high_count);
+        let low = balanced(value, low_count);
+        Expression {
+            bits: high.bits + low.bits,
+            node: Node::Concat {
+                high: Box::new(high),
+                low: Box::new(low),
+            },
+        }
+    }
+    Ok(balanced(&value, count))
+}
 fn scalar(value: Value) -> Result<Expression> {
     match value {
         Value::Scalar(e) => Ok(e),
@@ -187,6 +247,7 @@ fn project(value: Value, key: &str, typ: &TypedTyp) -> Result<Value> {
 struct Exporter {
     primitives: HashMap<VarId, Primitive>,
     budget: usize,
+    assumptions: Vec<(Expression, bool)>,
 }
 impl Exporter {
     fn eval(&mut self, expression: &TypedExpr, env: &mut HashMap<VarId, Value>) -> Result<Value> {
@@ -211,6 +272,39 @@ impl Exporter {
                 let result = self.eval(body, env);
                 if let Some(old) = old { env.insert(*id, old); } else { env.remove(id); }
                 result
+            }
+            // AArch64 ShiftReg calls the LSR helper only on its nonzero branch;
+            // that helper asserts `amount > 0`. Admit the assertion only when
+            // the enclosing path condition proves that exact Bits value is
+            // nonzero. Every other wildcard/unit assertion still fails closed.
+            Let { var: LExpr::Wildcard, typ: TypBase::Unit, rhs, body } => {
+                let Assert { cond } = &rhs.kind else {
+                    return Err("unsupported wildcard unit binding".into());
+                };
+                let App { fun, args } = &cond.kind else {
+                    return Err("unsupported residual assertion".into());
+                };
+                let Id(id) = fun.kind else {
+                    return Err("indirect residual assertion".into());
+                };
+                if self.primitives.get(&id) != Some(&Primitive::GtBits) || args.len() != 2 {
+                    return Err("unproven residual assertion".into());
+                }
+                let left = scalar(self.eval(&args[0], env)?)?;
+                let right = scalar(self.eval(&args[1], env)?)?;
+                let zero = constant_value(&right) == Some(BigUint::from(0u8));
+                let guarded_nonzero = self.assumptions.iter().rev().any(|(condition, truth)| {
+                    let Node::Binary { op, left: tested, right } = &condition.node else {
+                        return false;
+                    };
+                    tested.as_ref() == &left
+                        && constant_value(right) == Some(BigUint::from(0u8))
+                        && ((*op == "ne" && *truth) || (*op == "eq" && !*truth))
+                });
+                if left.bits != right.bits || !zero || !guarded_nonzero {
+                    return Err("unproven residual assertion".into());
+                }
+                self.eval(body, env)
             }
             Field { base, field } => { let base = self.eval(base, env)?; project(base, field, &expression.meta.typ) }
             ArrayIndex { base, index } => {
@@ -251,8 +345,12 @@ impl Exporter {
             }
             If { cond, then_body, else_body } => {
                 let condition = scalar(self.eval(cond, env)?)?;
+                self.assumptions.push((condition.clone(), true));
                 let then_value = scalar(self.eval(then_body, env)?)?;
+                self.assumptions.pop();
+                self.assumptions.push((condition.clone(), false));
                 let else_value = scalar(self.eval(else_body, env)?)?;
+                self.assumptions.pop();
                 let bits = width(&expression.meta.typ)?;
                 if condition.bits != 1 || then_value.bits != bits || else_value.bits != bits { return Err("ill-typed conditional".into()); }
                 Ok(Value::Scalar(Expression { bits, node: Node::Ite { condition: Box::new(condition), then_value: Box::new(then_value), else_value: Box::new(else_value) } }))
@@ -303,6 +401,7 @@ impl Exporter {
                 }
             }
             AddBits | SubBits | EqBits | NeBits | AndBits | OrBits | EorBits | AndBool | OrBool
+            | ShlBits | LshrBits | AshrBits
                 if args.len() == 2 =>
             {
                 let left = scalar(args.remove(0))?;
@@ -319,6 +418,9 @@ impl Exporter {
                     AndBits | AndBool => "and",
                     OrBits | OrBool => "or",
                     EorBits => "xor",
+                    ShlBits => "shl",
+                    LshrBits => "lshr",
+                    AshrBits => "ashr",
                     _ => unreachable!(),
                 };
                 Expression {
@@ -330,6 +432,15 @@ impl Exporter {
                     },
                 }
             }
+            ReplicateBits if args.len() == 2 => {
+                let value = scalar(args.remove(0))?;
+                let count = integer(args.remove(0))?;
+                let replicated = replicate(value, count)?;
+                if replicated.bits != bits {
+                    return Err("replication width mismatch".into());
+                }
+                replicated
+            }
             _ => return Err(format!("unsupported TIR primitive {primitive:?}")),
         };
         Ok(Value::Scalar(expression))
@@ -338,6 +449,13 @@ impl Exporter {
 fn constant_value(expression: &Expression) -> Option<BigUint> {
     match &expression.node {
         Node::Constant { value } => BigUint::from_str_radix(value.strip_prefix("0x")?, 16).ok(),
+        Node::Concat { high, low } => {
+            Some((constant_value(high)? << low.bits) | constant_value(low)?)
+        }
+        Node::Slice { value, start } => {
+            let mask = (BigUint::from(1u8) << expression.bits) - BigUint::from(1u8);
+            Some((constant_value(value)? >> start) & mask)
+        }
         _ => None,
     }
 }
@@ -408,7 +526,8 @@ fn configured_spec() -> Result<Module<TypedMeta>> {
     let path = std::env::var("FOCACCIA_TIR_MODULE")
         .map_err(|_| "missing prepared specification module")?;
     bincode::deserialize::<PreparedModule>(&std::fs::read(path).map_err(|e| e.to_string())?)
-        .map(Module::from).map_err(|e| e.to_string())
+        .map(Module::from)
+        .map_err(|e| e.to_string())
 }
 fn transform(
     typed: &Module<TypedMeta>,
@@ -427,7 +546,7 @@ fn transform(
         }
     }
     let (iclass, pruned) = specializer::specializer::prune_to_iclass(&typed, opcode);
-    if iclass != CLASS {
+    if !CLASSES.contains(&iclass.as_str()) {
         return Err(format!("unsupported instruction class {iclass}"));
     }
     let pins = KnownState::config_defaults(pruned.arch());
@@ -455,6 +574,7 @@ fn transform(
     let mut exporter = Exporter {
         primitives,
         budget: 20_000,
+        assumptions: Vec::new(),
     };
     let value = exporter.eval(
         &body,

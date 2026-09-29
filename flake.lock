@@ -204,17 +204,17 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1786641041,
-        "narHash": "sha256-brpRRahW8i9zfiwB4EbGerNJsIngNzlt0/HGKwvTTU0=",
+        "lastModified": 1790716038,
+        "narHash": "sha256-91EDD+v3iZo6EYBlcnXZzQdhsPMll04v7kibdgkunoA=",
         "ref": "refs/heads/master",
-        "rev": "83e4033ef58f5eb377807e6449115ec9d801d314",
-        "revCount": 120190,
+        "rev": "c4a59f86e25b221be6419a181eef79c2836d6fe3",
+        "revCount": 120191,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
       },
       "original": {
-        "rev": "83e4033ef58f5eb377807e6449115ec9d801d314",
+        "rev": "c4a59f86e25b221be6419a181eef79c2836d6fe3",
         "submodules": true,
         "type": "git",
         "url": "https://github.com/TUM-DSE/focaccia-qemu.git"

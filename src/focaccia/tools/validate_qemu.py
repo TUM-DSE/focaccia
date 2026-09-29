@@ -195,8 +195,6 @@ def validate_backend_options(
             parser.error("--guest-arch is required with --use-socket")
         if args.run_manifest is not None or args.run_input:
             parser.error("run-manifest verification currently requires the GDB backend")
-        if args.cutpoint_address:
-            parser.error("--cutpoint-address currently requires the GDB backend")
         if (args.plugin_terminal_ready is None) != (args.plugin_terminal_evidence is None):
             parser.error("plugin terminal readiness and evidence paths must be provided together")
     elif args.remote is None:
@@ -357,6 +355,7 @@ def main() -> None:
                 args.profile_report,
                 args.plugin_terminal_ready,
                 args.plugin_terminal_evidence,
+                cutpoint_addresses=tuple(args.cutpoint_address),
             )
         except Exception as error:
             if args.report is not None and not Path(args.report).is_file():

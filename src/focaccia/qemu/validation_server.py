@@ -122,11 +122,15 @@ class PluginStateIterator:
         arch: Arch,
         *,
         listener: PluginListener | None = None,
+        cutpoint_addresses: tuple[int, ...] = (),
     ):
         self.socket_path = socket_path
         self.arch = arch
         self._first_next = True
         self._closed = False
+        self.cutpoint_addresses = cutpoint_addresses
+        if tuple(sorted(set(cutpoint_addresses))) != cutpoint_addresses:
+            raise ValueError("Plugin cutpoints must be unique and strictly increasing.")
         self._listener = listener or PluginListener(socket_path, arch)
         try:
             self._listener.start()
@@ -147,6 +151,8 @@ class PluginStateIterator:
         cls,
         transport: PluginTransport,
         arch: Arch,
+        *,
+        cutpoint_addresses: tuple[int, ...] = (),
     ) -> PluginStateIterator:
         """Build a non-listening iterator for deterministic backend tests."""
         result = object.__new__(cls)
@@ -154,6 +160,7 @@ class PluginStateIterator:
         result.arch = arch
         result._first_next = True
         result._closed = False
+        result.cutpoint_addresses = cutpoint_addresses
         result._listener = None
         result.pid = None
         result.transport = transport
@@ -164,8 +171,12 @@ class PluginStateIterator:
         return self
 
     def next_cutpoint_pc(self, matcher: TransitionMatcher) -> int | None:
-        """Declare the next symbolic destination before the guest advances."""
-        return matcher.current_destination_pc
+        """Declare the next configured or immediate destination before advancing."""
+        current = self.state.read_pc()
+        return next(
+            (address for address in self.cutpoint_addresses if address > current),
+            matcher.current_destination_pc,
+        )
 
     def __next__(self) -> PluginProgramState:
         if self._closed:
@@ -414,6 +425,7 @@ def start_validation_server(
     terminal_ready_path: str | None = None,
     terminal_evidence_path: str | None = None,
     terminal_timeout_seconds: float = 1800.0,
+    cutpoint_addresses: tuple[int, ...] = (),
 ) -> MatchResult:
     architecture = supported_architectures.get(guest_arch)
     if architecture is None:
@@ -443,7 +455,9 @@ def start_validation_server(
         whole_program = symb_transforms.scope is TraceScope.WHOLE_PROGRAM
         if whole_program and (terminal_ready_path is None or terminal_evidence_path is None):
             raise ValueError("Plugin whole-program validation requires typed terminal evidence paths.")
-        with PluginStateIterator(socket_path, architecture) as qemu:
+        with PluginStateIterator(
+            socket_path, architecture, cutpoint_addresses=cutpoint_addresses
+        ) as qemu:
             try:
                 tracing_measurement = (
                     profiler.measure("tracing") if profiler is not None else nullcontext()

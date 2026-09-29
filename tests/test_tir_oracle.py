@@ -150,6 +150,38 @@ def test_stack_pointer_mapping(backend):
     assert tx.eval_register_transforms(state(SP=0x8000))["SP"] == 0x8010
 
 
+def test_issue_2248_exact_seven_instruction_chain_is_tir_derived(backend, monkeypatch):
+    monkeypatch.setattr(
+        "focaccia.semantics.run_instruction", lambda *a: pytest.fail("Miasm semantics used")
+    )
+    codes = [
+        "5f0003eb",  # cmp x2, x3
+        "eca79f9a",  # cset x12, lt
+        "8b1d0012",  # and w11, w12, #0xff
+        "7f010071",  # cmp w11, #0
+        "ee039fda",  # csetm x14, ne
+        "cd25c49a",  # lsr x13, x14, x4
+        "a01d4093",  # sxtb x0, w13
+    ]
+    transforms = [transform(backend, code, PC + 4 * index) for index, code in enumerate(codes)]
+    composer = SymbolicTransformComposer(transforms[0], track_dependencies=True)
+    for item in transforms[1:]:
+        composer.append(item)
+    combined = composer.finish()
+    actual = combined.eval_register_transforms(state(X2=0, X3=1, X4=2))
+    assert actual == {
+        "CPSR": 1 << 29,
+        "PC": PC + 28,
+        "X0": MASK,
+        "X11": 1,
+        "X12": 1,
+        "X13": 0x3FFFFFFFFFFFFFFF,
+        "X14": MASK,
+    }
+    assert set(combined.get_used_registers()) == {"CPSR", "X2", "X3", "X4"}
+    assert combined.get_used_memory_addresses() == []
+
+
 def test_composition_preserves_dependencies_and_flags(backend):
     first = transform(backend, "420400f1")
     second = transform(backend, "43080091", PC + 4)  # ADD X3, X2, #2

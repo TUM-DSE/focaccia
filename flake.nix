@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=83e4033ef58f5eb377807e6449115ec9d801d314&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=c4a59f86e25b221be6419a181eef79c2836d6fe3&submodules=1";
       flake = true;
     };
 
@@ -241,39 +241,47 @@
 
     # Build only: these native fixtures are never executed by flake checks.
     tirSmokeFixture = pkgs.stdenvNoCC.mkDerivation {
-      pname = "tir-arithmetic-fixture";
+      pname = "tir-issue-2248-fixture";
       version = "1";
-      src = ./reproducers/tir-arithmetic;
+      dontUnpack = true;
       nativeBuildInputs = [ pkgs.llvmPackages_18.llvm pkgs.llvmPackages_18.lld pkgs.python3 ];
-      dontConfigure = true;
       buildPhase = ''
-        llvm-mc -triple=aarch64-linux-gnu -filetype=obj program.S -o program.o
-        ld.lld -m aarch64elf -static -e _start -Ttext=0x400000 program.o -o program.elf
+        llvm-mc -triple=aarch64-linux-gnu -filetype=obj ${./reproducers/issue-2248.S} -o witness.o
+        llvm-mc -triple=aarch64-linux-gnu -filetype=obj ${./reproducers/issue-2248-tir/start.S} -o start.o
+        ld.lld -m aarch64elf -static -e _start -Ttext=0x400000 start.o witness.o -o program.elf
         llvm-nm --defined-only program.elf > symbols.txt
         python - <<'PY'
         import hashlib, json
         from pathlib import Path
         symbols = {parts[2]: int(parts[0], 16) for line in Path("symbols.txt").read_text().splitlines()
                    if len(parts := line.split()) == 3}
-        start, stop = symbols["tir_region_begin"], symbols["tir_region_end"]
-        assert stop - start == 7 * 4
-        Path("manifest.json").write_text(json.dumps({"schema": 1, "start": start, "stop": stop,
-            "sha256": hashlib.sha256(Path("program.elf").read_bytes()).hexdigest()}, indent=2) + "\n")
+        start = symbols["callme"]
+        image = Path("program.elf").read_bytes()
+        # callme contains seven witness instructions followed by RET. Stop at RET.
+        stop = start + 7 * 4
+        expected = bytes.fromhex("5f0003ebeca79f9a8b1d00127f010071ee039fdacd25c49aa01d4093")
+        # The live harness independently extracts and checks these ELF bytes.
+        assert stop - start == len(expected)
+        Path("manifest.json").write_text(json.dumps({
+            "schema": 1, "start": start, "stop": stop,
+            "sha256": hashlib.sha256(image).hexdigest(),
+            "source_sha256": hashlib.sha256(Path("${./reproducers/issue-2248.S}").read_bytes()).hexdigest(),
+            "wrapper_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/start.S}").read_bytes()).hexdigest(),
+        }, indent=2) + "\n")
         PY
       '';
       installPhase = ''
         mkdir -p "$out"
-        cp program.elf program.S manifest.json "$out/"
+        cp program.elf manifest.json "$out/"
+        cp ${./reproducers/issue-2248.S} "$out/issue-2248.S"
+        cp ${./reproducers/issue-2248-tir/start.S} "$out/start.S"
       '';
     };
 
-    # Test-only debugger wrapper. GDB communicates with QEMU's remote stub; it
-    # never attaches to a host process. Injection is disabled unless the harness
-    # supplies its explicit final-boundary PC and evidence path.
+    # GDB communicates only with QEMU's remote stub and detaches after the
+    # bounded final state. It never mutates guest state or attaches to the host.
     tirSmokeGdb = pkgs.writeShellScriptBin "tir-smoke-gdb" ''
-      exec ${gdbInternal}/bin/gdb \
-        -ex 'set confirm off' -ex 'source ${./tests/probes/tir_carry_injection.gdb}' \
-        "$@" -ex detach
+      exec ${gdbInternal}/bin/gdb -ex 'set confirm off' "$@" -ex detach
     '';
 
     tirSmokeRunner = pkgs.writeShellApplication {
@@ -283,10 +291,14 @@
         exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} \
           --fixture ${tirSmokeFixture} \
           --oracle ${tirOracle}/bin/focaccia-tir-oracle \
-          --qemu ${pkgs.qemu-user}/bin/qemu-aarch64 \
+          --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 \
+          --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/bin/qemu-aarch64 \
+          --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
+          --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/lib/plugins/libfocaccia.so \
           --gdb ${tirSmokeGdb}/bin/tir-smoke-gdb \
           --validator ${pythonEnv}/bin/validate-qemu \
           --tir-revision ${tir.rev} \
+          --qemu-revision c4a59f86e25b221be6419a181eef79c2836d6fe3 \
           "$@"
       '';
     };
@@ -2299,7 +2311,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "83e4033ef58f5eb377807e6449115ec9d801d314";
+      assert qemu-submodule.rev == "c4a59f86e25b221be6419a181eef79c2836d6fe3";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];

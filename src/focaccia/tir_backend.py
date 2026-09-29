@@ -85,13 +85,27 @@ class _ExpressionDecoder:
             left = self.decode(node["left"], depth + 1)
             right = self.decode(node["right"], depth + 1)
             op = node["op"]
-            if op not in ("add", "sub", "eq", "ne", "and", "or", "xor"):
+            if op not in (
+                "add",
+                "sub",
+                "eq",
+                "ne",
+                "and",
+                "or",
+                "xor",
+                "shl",
+                "lshr",
+                "ashr",
+            ):
                 raise ValueError("Unsupported oracle binary operation")
             expected_bits = 1 if op in ("eq", "ne") else left.size
             if left.size != right.size or bits != expected_bits:
                 raise ValueError("Oracle binary operation width mismatch")
             if op == "sub":
                 return left - right
+            if op in ("shl", "lshr", "ashr"):
+                names = {"shl": "<<", "lshr": ">>", "ashr": "a>>"}
+                return ExprOp(names[op], left, right)
             if op in ("eq", "ne"):
                 # XOR is zero exactly on equality; ExprCond tests nonzero.
                 unequal = ExprInt(int(op == "ne"), 1)

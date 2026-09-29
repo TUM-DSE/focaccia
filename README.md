@@ -52,9 +52,11 @@ packaged AST, x86-64 runtime archive, and linker. Capture selects semantics with
 `nix develop .#tir -c capture-transforms --help` to inspect the capture options.
 Native capture still requires its usual debugger/RR permissions.
 
-The initial TIR backend supports the AArch64 **ADD/ADDS/SUB/SUBS immediate**
-instruction class in little-endian, user-mode configuration, including 32-bit
-writes, stack-pointer operands, and NZCV flags. A Focaccia-owned Rust helper uses
+The opt-in TIR backend supports the AArch64 integer classes needed by the
+bounded issue #2248 witness: add/subtract immediate and shifted-register,
+conditional select, logical immediate, variable shift, and bitfield. This also
+covers 32-bit writes, stack-pointer operands, NZCV flags, and the original
+ADD/ADDS/SUB/SUBS-immediate validation set. A Focaccia-owned Rust helper uses
 the pinned ASL frontend and specializer, then exports the residual computation
 into Focaccia's existing symbolic-expression representation. It does not invoke
 LLVM or Miasm's instruction semantics. Miasm is still used for disassembly and
@@ -68,8 +70,9 @@ Cargo paths are for that assembled workspace, not a sibling checkout.
 
 The typed specification is prepared once by Nix. The helper derives each
 instruction's transformation with runtime registers left symbolic, and the
-Python adapter caches it by address and exact instruction bytes. It rejects
-other instruction classes, unsupported residual operations or state updates,
+Python adapter caches it by address and exact instruction bytes. Its class
+allowlist is deliberately limited to those classes; unsupported residual
+operations or state updates are rejected,
 and code overlapping the specification profile's known memory. It also checks
 that the residual's instruction metadata matches the requested bytes. Memory,
 vector, floating-point, branch, and syscall instruction semantics are outside
@@ -104,32 +107,36 @@ nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-smoke"
 nix build .#checks.aarch64-linux.tir-no-replay-e2e
 ```
 
-This runs the static AArch64 program in
-[`reproducers/tir-arithmetic/program.S`](reproducers/tir-arithmetic/program.S)
-under the pinned QEMU user emulator. TIR generates the reference transformations
-directly from the ELF's executable bytes, without reading emulator outputs or
-running a native reference process. The ordinary Focaccia GDB validation path
-then collects actual QEMU states and compares them against that reference.
-Neither RR nor native debugger attachment/ptrace is used. The QEMU GDB stub uses
-a Unix socket in an owner-only temporary directory, with event-driven readiness;
-no TCP debugger port is exposed.
+This links the canonical
+[`reproducers/issue-2248.S`](reproducers/issue-2248.S) witness with a freestanding
+lifecycle wrapper. Symbol-derived bounds cover its seven instructions and stop
+before `ret`; setup, return, and the exit syscall remain outside the semantics
+claim. TIR derives all seven transformations directly from the exact ELF bytes,
+without emulator output, native capture, Miasm instruction semantics, or RR.
 
-The witness covers seven supported arithmetic instructions, including 64-bit
-wraparound, 32-bit signed overflow and zero-extension, SP arithmetic, and NZCV
-flags. Register setup, entry/exit branches, and the exit syscall are outside the
-validated region. Two clean runs must be accepted: one observing each instruction
-and one composing all seven transformations between two cutpoints. Two additional
-runs deliberately flip the guest's carry flag through GDB at the final boundary;
-both must report a **confirmed carry mismatch**. This is controlled detector
-validation, not a newly discovered QEMU bug. All four guests must exit normally
-after the debugger detaches.
+The harness uses only the QEMU submodule's pinned fixed and regression-injected
+packages. Its four required cases distinguish observation effects from the bug:
 
-The run directory must not already exist. It retains the fixture/TIR provenance
-manifest, symbolic `oracle.json`, and per-case concrete states, structured reports,
-commands, logs, and injection evidence. `result.json` summarizes all four cases.
+- fixed QEMU, granular GDB stepping: accepted with 7 transitions/8 states;
+- fixed QEMU, coarse plugin cutpoints: accepted with 1 transition/2 states;
+- injected QEMU, granular stepping: accepted, proving stepping suppresses the
+  optimizer chain;
+- injected QEMU, coarse plugin cutpoints: one **confirmed X0 mismatch**, with no
+  possible/incomplete errors.
+
+The coarse plugin installs callbacks only at the witness boundaries, so no
+per-instruction transaction splits the translated block. The granular GDB stub
+uses a private Unix socket and never changes guest state. There is no synthetic
+register injection, native debugger attachment, ptrace, or TCP listener. Every
+case detaches at the bounded final state and the freestanding guest then exits
+with status zero.
+
+The run directory must not already exist. It retains fixture, source, wrapper,
+TIR, QEMU executable, plugin, and oracle hashes/revisions, plus `oracle.json` and
+per-case commands, logs, states, and reports. `result.json` summarizes the matrix.
 Reports intentionally use `scope: witness`: `trace.complete` confirms the bounded
-region, while whole-program completion remains unclaimed. The default Focaccia
-build remains TIR-free; this app and its check are explicit opt-ins.
+region, while whole-program completion remains unclaimed. The default Focaccia build remains TIR-free; this app and its check are explicit
+opt-ins.
 
 ## How To Use
 
