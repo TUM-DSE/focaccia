@@ -34,6 +34,8 @@ SSH access to that repository, but no sibling TIR checkout is needed.
 Update this dependency deliberately with `nix flake update tir`.
 
 ```bash
+nix build .                     # default Focaccia, without TIR build dependencies
+nix build .#focaccia-tir         # opt-in Focaccia package with the TIR oracle
 nix develop .#tir                # editable Focaccia + Rust/LLVM + packaged TIR data
 nix build .#tir-oracle            # specification-derived instruction oracle
 nix build .#tir-translator        # installed translator and inspection tools
@@ -42,8 +44,10 @@ nix develop .#tir -c tiramisu-translate --help
 nix run .#tir-oracle -- 4194304 420400f1 # SUBS X2, X2, #1 at 0x400000
 ```
 
-The opt-in shell provides the packaged AST, x86-64 runtime archive, linker, and
-`focaccia-tir-oracle`. Capture selects instruction semantics with
+The `focaccia`/default package does not build or depend on TIR. The separate
+`focaccia-tir` output includes the oracle and configures its path for
+`bin/capture-transforms`; the optional development shell also provides the
+packaged AST, x86-64 runtime archive, and linker. Capture selects semantics with
 `--semantics-backend miasm|tir`; Miasm remains the default. For example, use
 `nix develop .#tir -c capture-transforms --help` to inspect the capture options.
 Native capture still requires its usual debugger/RR permissions.
@@ -79,6 +83,12 @@ and mismatch detection. `checks.<system>.instruction-semantic-backends` covers
 backend selection, protocol failures, and fake-target capture/gap behavior.
 These checks need neither RR nor native debugger attachment. They do not claim
 that native TIR-backed application capture has been exercised.
+`checks.<system>.default-without-tir` checks the default package's runtime closure,
+and `checks.<system>.focaccia-tir-package` exercises the opt-in package.
+`nix run .#check-default-without-tir` additionally checks the full transitive build
+graph without building every compiler and source archive in that graph.
+A full `nix flake check` includes optional TIR checks; an ordinary `nix build`
+only builds the default package.
 
 `checks.<system>.tir-package-contract` verifies that the Python environment can
 use the installed tools and that the AST matches its manifest.

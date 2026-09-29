@@ -3574,6 +3574,18 @@
         propagatedBuildInputs = (old.propagatedBuildInputs or []) ++ [ pkgs.lldb ];
       });
 
+      # Optional build: keep the default Python/Miasm package free of TIR.
+      focaccia-tir = pkgs.symlinkJoin {
+        name = "focaccia-tir-0.1.0";
+        paths = [ focaccia tirOracle ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          wrapProgram "$out/bin/capture-transforms" \
+            --set-default FOCACCIA_TIR_ORACLE "${tirOracle}/bin/focaccia-tir-oracle"
+        '';
+        meta.mainProgram = "focaccia";
+      };
+
       dev = devEnv;
 
       qemu-plugin = qemu-submodule.packages.${system}.default;
@@ -3594,6 +3606,21 @@
     };
 
     apps = {
+      # Query derivation metadata through the client, without building optional
+      # inputs or requiring a Nix daemon inside a sandboxed check.
+      check-default-without-tir = {
+        type = "app";
+        program = let
+          check = pkgs.writeShellApplication {
+            name = "check-default-without-tir";
+            runtimeInputs = [ pkgs.nix pkgs.python3 ];
+            text = ''
+              nix derivation show --recursive ${self}#packages.${system}.default \
+                | python ${./nix/check-default-without-tir.py}
+            '';
+          };
+        in "${check}/bin/check-default-without-tir";
+      };
       default = {
         type = "app";
         program = "${packages.focaccia}/bin/focaccia";
@@ -3731,6 +3758,43 @@
 
 
     checks = {
+      default-without-tir = pkgs.runCommand "focaccia-default-without-tir" {
+        # Runtime closure check. The companion app checks the full build graph
+        # without requiring every source/tool output in that graph to be realized.
+        exportReferencesGraph = [ "default-runtime-graph" packages.focaccia ];
+        nativeBuildInputs = [ pkgs.python3 ];
+      } ''
+        python - <<'PY'
+        from pathlib import Path
+        paths = {line for line in Path("default-runtime-graph").read_text().splitlines()
+                 if line.startswith("/nix/store/")}
+        assert paths, "default runtime graph was empty"
+        tir_markers = ("-focaccia-tir-", "-tiramisu-", "-tirrt-", "-tir-core-",
+                       "-armv8-a-asl-spec-", "-asl-parser-")
+        forbidden = sorted(path for path in paths
+                           if any(marker in Path(path).name for marker in tir_markers))
+        assert not forbidden, f"TIR leaked into the default runtime closure: {forbidden}"
+        PY
+        mkdir -p "$out"
+        cp default-runtime-graph "$out/"
+      '';
+      focaccia-tir-package = pkgs.runCommand "focaccia-tir-package" {
+        nativeBuildInputs = [ pkgs.python3 ];
+      } ''
+        unset FOCACCIA_TIR_ORACLE
+        ${packages.focaccia-tir}/bin/capture-transforms --help
+        ${packages.focaccia-tir}/bin/focaccia --help
+        mkdir -p "$out"
+        ${packages.focaccia-tir}/bin/focaccia-tir-oracle 4194304 420400f1 > "$out/transform.json"
+        python - "$out/transform.json" <<'PY'
+        import json, sys
+        with open(sys.argv[1]) as stream:
+            result = json.load(stream)
+        assert result["status"] == "ok"
+        assert result["instruction"] == "420400f1"
+        assert set(result["outputs"]) == {"PC", "X2", "N", "Z", "C", "V"}
+        PY
+      '';
       instruction-semantic-backends = mkStaticUnitCheck {
         name = "instruction-semantic-backends";
         ruffTargets = [ "src/focaccia/semantics.py" "src/focaccia/tir_backend.py"

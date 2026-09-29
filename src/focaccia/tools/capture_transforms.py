@@ -45,7 +45,7 @@ def make_argparser() -> argparse.ArgumentParser:
                       action='store_true',
                       help='Capture transforms in debug mode to identify errors in Focaccia itself')
     prog.add_argument('--semantics-backend', default='miasm', choices=['miasm', 'tir'],
-                      help='Instruction semantics backend (default: miasm)')
+                      help='Instruction semantics backend (default: miasm; tir requires the optional focaccia-tir build)')
     prog.add_argument('--whole-program', action='store_true',
                       help='Capture through a verified terminal action (RR or static SET_FS/exit); prohibits witness bounds')
     prog.add_argument('--start-address',
