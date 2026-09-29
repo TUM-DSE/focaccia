@@ -25,6 +25,32 @@ direnv allow
 
 Using `nix develop` directly remains equivalent.
 
+### TIR backend development
+
+The `tir` flake input tracks the `carbonara` branch of `TUM-DSE/airlift` on
+GitHub using SSH (`git+ssh://git@github.com/TUM-DSE/airlift.git?ref=carbonara&shallow=1`);
+`flake.lock` pins the exact revision and its build dependencies. Fetching requires
+SSH access to that repository, but no sibling TIR checkout is needed.
+Update this dependency deliberately with `nix flake update tir`.
+
+```bash
+nix develop .#tir                # editable Focaccia + Rust/LLVM + packaged TIR data
+nix build .#tir-translator        # installed translator and inspection tools
+nix build .#tir-asl-specification # generated AST and provenance manifest
+nix develop .#tir -c tiramisu-translate --help
+```
+
+The opt-in shell provides the packaged AST, x86-64 runtime archive, and linker
+through TIR's environment configuration. The default Focaccia package and
+semantic backend are unchanged; this dependency setup does not yet implement
+TIR-based validation.
+
+`checks.<system>.tir-package-contract` verifies that the Python environment can
+use the installed tools and that the AST matches its manifest.
+`checks.<system>.tir-packaged-translation` translates and executes a small guest
+using the pinned package, without RR or native debugger attachment. Both checks
+are available on `aarch64-linux` and `x86_64-linux`.
+
 ## How To Use
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.

@@ -8,6 +8,10 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
+    # Track the development branch; flake.lock pins the exact tested revision.
+    # Keep TIR's own toolchain/nixpkgs pins rather than replacing its tested build inputs.
+    tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=carbonara&shallow=1";
+
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -46,6 +50,7 @@
     pyproject-build-systems,
     qemu-submodule,
     rr-submodule,
+    tir,
     ...
   }:
   flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
@@ -53,6 +58,7 @@
     pkgs = import nixpkgs { inherit system; };
 
     python = pkgs.python312;
+    tirPackages = tir.packages.${system};
 
     musl-pkgs = import nixpkgs {
       inherit system;
@@ -3574,6 +3580,10 @@
 
       rr = rrTool;
 
+      tir-translator = tirPackages.tiramisu;
+      tir-asl-specification = tirPackages.asl-specification;
+      tir-runtime-x86_64 = tirPackages.tirrt-runtime-x86_64;
+
       default = focaccia;
     } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
       x86-file-read-fixture = x86FileReadFixture;
@@ -3647,6 +3657,19 @@
     };
 
     devShells = {
+      # Opt-in while the semantic backend is being integrated. Existing Python
+      # environments and the default Focaccia package remain unchanged.
+      tir = pkgs.mkShell {
+        inputsFrom = [ tir.devShells.${system}.default ];
+        # inputsFrom merges dependencies, not arbitrary environment attributes.
+        inherit (tir.devShells.${system}.default)
+          TIR_ASL_AST TIR_RUNTIME_ARCHIVE TIR_CC
+          LLVM_CONFIG_PATH LLVM_SYS_181_PREFIX LIBCLANG_PATH RUSTFLAGS RUST_BACKTRACE;
+        packages = [ devEnv tirPackages.tiramisu ];
+        env = uvEnv;
+        shellHook = uvShellHook;
+      };
+
       default = pkgs.mkShell {
         packages = [ devEnv ];
         env = uvEnv;
@@ -3703,6 +3726,37 @@
 
 
     checks = {
+      # Exercise the pinned GitHub package through the Focaccia dependency graph.
+      tir-packaged-translation = tir.checks.${system}.packaged-translation;
+      tir-package-contract = pkgs.runCommand "focaccia-tir-package-contract" {
+        nativeBuildInputs = [ pythonStaticUnitEnv tirPackages.tiramisu ];
+      } ''
+        mkdir -p "$out"
+        python - "$out" <<'PY'
+        import hashlib
+        import json
+        import pathlib
+        import subprocess
+        import sys
+        import tomllib
+        import focaccia
+
+        output = pathlib.Path(sys.argv[1])
+        subprocess.run(["tiramisu-translate", "--help"], check=True)
+        version = subprocess.check_output(["tiramisu-translate", "--version"], text=True)
+        profile_text = subprocess.check_output(["tiramisu-arch-dump"], text=True)
+        profile = tomllib.loads(profile_text)
+        assert profile["id"] == "aarch64", profile["id"]
+        assert profile["machine"]["xlen"] == 64
+        spec = pathlib.Path("${tirPackages.asl-specification}")
+        manifest = json.loads((spec / "manifest.json").read_text())
+        assert manifest["schemaVersion"] == 1
+        assert hashlib.sha256((spec / "ast.json").read_bytes()).hexdigest() == manifest["astSha256"]
+        assert pathlib.Path("${tirPackages.tirrt-runtime-x86_64}/lib/libtirrt_rt.a").is_file()
+        (output / "profile.toml").write_text(profile_text)
+        (output / "version.txt").write_text(version)
+        PY
+      '';
       static-unit-checks = staticUnitChecks;
       focaccia-tests = staticUnitChecks;
       core-branch-coverage = coreBranchCoverageCheck;
