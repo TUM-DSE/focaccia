@@ -12,6 +12,7 @@ from focaccia.qemu.transport import (
     EVENT_AARCH64_SVC_ENTRY,
     EVENT_AARCH64_SVC_SUCCESSOR,
     EVENT_STORE,
+    EVENT_TRANSLATION_BLOCK,
     FINISH_ACK,
     HANDSHAKE_ACK,
     PLUGIN_API_VERSION,
@@ -329,6 +330,28 @@ def test_event_stream_retains_store_value_and_typed_svc_entry_successor():
     assert (store.address, store.value, store.epoch) == (0x4003, b"ABCD", 7)
     assert (entry.kind, entry.auxiliary, entry.address) == (EVENT_AARCH64_SVC_ENTRY, 96, 0x4003)
     assert (successor.kind, successor.address, successor.auxiliary) == (EVENT_AARCH64_SVC_SUCCESSOR, 0x1000, 123)
+    transport.close()
+    peer.close()
+
+
+def test_event_stream_accepts_contiguous_translation_block_descriptor():
+    client, peer = socket.socketpair()
+    peer.sendall(event(EVENT_TRANSLATION_BLOCK, 1, 2, pc=0x4000,
+                       address=0x4008, size=3))
+    transport = PluginTransport(client, aarch64.ArchAArch64("little"))
+    block = transport.receive_event()
+    assert (block.pc, block.address, block.size) == (0x4000, 0x4008, 3)
+    transport.close()
+    peer.close()
+
+
+def test_event_stream_rejects_noncontiguous_translation_block_descriptor():
+    client, peer = socket.socketpair()
+    peer.sendall(event(EVENT_TRANSLATION_BLOCK, 1, 2, pc=0x4000,
+                       address=0x400c, size=3))
+    transport = PluginTransport(client, aarch64.ArchAArch64("little"))
+    with pytest.raises(PluginProtocolError, match="translation-block"):
+        transport.receive_event()
     transport.close()
     peer.close()
 

@@ -109,26 +109,32 @@ with empty argv additions, an empty environment, and the explicit
 `max,sve=off` QEMU CPU profile. The oracle covers every dynamic instruction
 from the ELF entry to the live exit_group SVC boundary.
 
-The lockstep plugin wire format binds executable, argv, environment, and CPU
-manifests; emits strictly ordered, monotonic cutpoint/store/SVC events; and
-checks each delayed store against guest memory at its declared epoch. Interior
-set_tid_address is bound to the plugin process identity. Terminal completion is
-independently supplied by the parent after the plugin detaches and QEMU exits.
+The unversioned lockstep plugin wire format binds executable, argv, environment,
+and CPU manifests. In online mode it emits every executed translation block as
+a contiguous ordered-PC descriptor plus global syscall entry/return events. It
+installs no instruction or memory callbacks that could inhibit TCG optimization.
+The validator resolves each descriptor only against executable bytes in the
+immutable, hash-bound ELF. On the block's first execution it lazily asks TIR for
+missing instruction transformations, caches both instruction specializations
+and composed blocks, evaluates the composed semantics at the live source state,
+and compares at the next TB or external-action boundary. TIR's ordered stores
+remain ordered evidence, while their final write ranges are read and checked at
+the next boundary. Interior set_tid_address is bound to the plugin process
+identity.
 
 Fixed QEMU naturally exits 0 and is accepted with complete whole-program and
-terminal evidence. The regression-injected package naturally exits 1 and may
-follow a different control path; a path-specific oracle is therefore generated
-from its logged instruction addresses. Every logged opcode is checked against
-the same immutable ELF and every transition is independently derived from TIR,
-so buggy instruction semantics are never used as an oracle. Validation still
-reports exactly one confirmed `X0` mismatch at the witness and exits 1. No
-debugger, ptrace, RR, Miasm semantics, or synthetic guest-state mutation
-participates.
+terminal evidence. The regression-injected package naturally exits 1; its own
+single execution exposes its actual blocks online and reports exactly one
+confirmed `X0` mismatch at the witness. Each case launches QEMU exactly once.
+There is no preliminary discovery execution, precomputed dynamic path oracle,
+debugger stepping, ptrace, RR, Miasm semantics, or synthetic guest-state
+mutation. Unsupported instructions, non-ELF block bytes, event gaps, unmatched
+stores/actions, and incomplete terminal evidence fail closed.
 
-The run directory retains both control-flow discoveries, TIR oracles, source and
-binary hashes, complete instruction-class census, event evidence, commands,
-states, and reports. `result.json` summarizes the two cases. The default
-Focaccia build remains TIR-free; this app and its check are explicit opt-ins.
+The run directory retains source and binary identities, exact commands, ordered
+block/store/syscall evidence, cache statistics, terminal evidence, and reports.
+`result.json` summarizes the two cases. The default Focaccia build remains
+TIR-free; this app and its check are explicit opt-ins.
 
 ## How To Use
 

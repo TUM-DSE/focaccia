@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=d92ddb83b8fc47914979b90abd81178acf226185&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=697afb267c64ab979e17d5b275ce9c818532d9bc&submodules=1";
       flake = true;
     };
 
@@ -307,12 +307,6 @@
       '';
     };
 
-    # GDB communicates only with QEMU's remote stub and detaches after the
-    # bounded final state. It never mutates guest state or attaches to the host.
-    tirSmokeGdb = pkgs.writeShellScriptBin "tir-smoke-gdb" ''
-      exec ${gdbInternal}/bin/gdb -ex 'set confirm off' "$@" -ex detach
-    '';
-
     tirSmokeRunner = pkgs.writeShellApplication {
       name = "tir-no-replay-smoke";
       runtimeInputs = [ pythonEnv ];
@@ -324,10 +318,8 @@
           --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/bin/qemu-aarch64 \
           --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
           --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/lib/plugins/libfocaccia.so \
-          --gdb ${tirSmokeGdb}/bin/tir-smoke-gdb \
-          --validator ${pythonEnv}/bin/validate-qemu \
           --tir-revision ${tir.rev} \
-          --qemu-revision d92ddb83b8fc47914979b90abd81178acf226185 \
+          --qemu-revision 697afb267c64ab979e17d5b275ce9c818532d9bc \
           "$@"
       '';
     };
@@ -481,6 +473,8 @@
         ./pyproject.toml
         ./src/focaccia
         ./tests
+        ./reproducers/issue-2248-tir/main.c
+        ./reproducers/issue-2248-tir/callme.S
         ./reproducers/issue-2248-tir/instruction-classes.json
       ];
     };
@@ -2341,7 +2335,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "55c77368248e4bd1218c3d74fc57d93c4b0d72a0";
+      assert qemu-submodule.rev == "697afb267c64ab979e17d5b275ce9c818532d9bc";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -3862,8 +3856,8 @@
         ruffTargets = [ "tests/probes/tir_no_replay_smoke.py" "tests/test_tir_no_replay_smoke.py" ];
         pytestTargets = [ "tests/test_tir_no_replay_smoke.py" ];
       };
-      # Requires private Unix sockets and an unprivileged QEMU user process.
-      # No native debugger attachment, ptrace, RR, or host configuration changes.
+      # Each case is one optimizer-faithful QEMU execution over private Unix sockets.
+      # No discovery run, offline path oracle, debugger, ptrace, or RR is involved.
       tir-no-replay-e2e = pkgs.runCommand "tir-no-replay-e2e" {
         nativeBuildInputs = [ tirSmokeRunner ];
       } ''

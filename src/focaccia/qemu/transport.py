@@ -51,6 +51,7 @@ EVENT_CUTPOINT = 1
 EVENT_STORE = 2
 EVENT_AARCH64_SVC_ENTRY = 3
 EVENT_AARCH64_SVC_SUCCESSOR = 4
+EVENT_TRANSLATION_BLOCK = 5
 
 _TARGET_NAMES = {
     ("x86_64", "little"): "x86_64",
@@ -289,7 +290,7 @@ class PluginTransport:
         )
         if flags or any(padding) or kind not in {
             EVENT_CUTPOINT, EVENT_STORE, EVENT_AARCH64_SVC_ENTRY,
-            EVENT_AARCH64_SVC_SUCCESSOR,
+            EVENT_AARCH64_SVC_SUCCESSOR, EVENT_TRANSLATION_BLOCK,
         }:
             raise PluginProtocolError("Plugin returned a malformed event frame.")
         if sequence != self._last_sequence + 1 or epoch <= self._last_epoch:
@@ -297,6 +298,16 @@ class PluginTransport:
         if kind == EVENT_STORE:
             if size not in (1, 2, 4, 8, 16) or any(value[size:]):
                 raise PluginProtocolError("Plugin returned a malformed store event.")
+        elif kind == EVENT_TRANSLATION_BLOCK:
+            if (
+                size == 0
+                or size > 1_048_576
+                or pc % 4
+                or address != pc + (size - 1) * 4
+                or auxiliary != 0
+                or any(value)
+            ):
+                raise PluginProtocolError("Plugin returned a malformed translation-block event.")
         elif size != 0 or any(value):
             raise PluginProtocolError("Plugin returned payload bytes for a non-store event.")
         self._last_sequence = sequence

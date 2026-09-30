@@ -1,42 +1,30 @@
-"""Whole-program static-musl #2248 validation with TIR and plugin events."""
+"""Single-execution online TB validation of canonical static-musl QEMU #2248."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import struct
 import subprocess
-import time
-
-from miasm.expression.expression import Expr, ExprId, ExprInt
 
 from focaccia.arch.aarch64 import ArchAArch64
-from focaccia.completion import TraceCompletion, TraceScope
-from focaccia.execution import ExecutionOutcome, ExecutionState
-from focaccia.no_replay import (
-    ExitAction,
-    ExitScope,
-    NoReplayActionDescriptor,
-    NoReplayActionKind,
-    NoReplaySetTidBoundary,
-)
-from focaccia.parser import serialize_transformations
 from focaccia.qemu.transport import (
     EVENT_AARCH64_SVC_ENTRY,
-    EVENT_CUTPOINT,
+    EVENT_AARCH64_SVC_SUCCESSOR,
     EVENT_STORE,
+    EVENT_TRANSLATION_BLOCK,
     PluginLaunchIdentity,
     PluginListener,
+    PluginTransport,
     manifest_sha256,
 )
-from focaccia.snapshot import ProgramState
-from focaccia.symbolic import DisassemblyContext, SymbolicTransform
+from focaccia.qemu.validation_server import PluginProgramState
+from focaccia.symbolic import SymbolicTransform, SymbolicTransformComposer
 from focaccia.tir_backend import decode_response
-from focaccia.trace import MaterializedTrace, TraceEnvironment
 
 EXPECTED_CALLME = bytes.fromhex(
     "5f0003ebeca79f9a8b1d00127f010071ee039fdacd25c49aa01d4093c0035fd6"
@@ -46,6 +34,8 @@ CPU_PROFILE = {
     "profile": "qemu-user-max-sve-off-v1",
 }
 MASK64 = (1 << 64) - 1
+SVC_MASK = 0xFFE0001F
+SVC_OPCODE = 0xD4000001
 
 
 def file_sha256(path: Path) -> str:
@@ -84,8 +74,11 @@ def elf_loads(binary: Path) -> tuple[int, list[tuple[int, int, bytes]]]:
 
 
 def read_image(loads: list[tuple[int, int, bytes]], address: int, size: int) -> bytes:
-    matches = [raw[address - base : address - base + size]
-               for base, _, raw in loads if base <= address and address + size <= base + len(raw)]
+    matches = [
+        raw[address - base : address - base + size]
+        for base, _, raw in loads
+        if base <= address and address + size <= base + len(raw)
+    ]
     if len(matches) != 1:
         raise ValueError(f"address {address:#x} is not in one file-backed segment")
     return matches[0]
@@ -98,9 +91,15 @@ def launch_identity(binary: Path) -> PluginLaunchIdentity:
     )
 
 
-def plugin_option(plugin: str, socket_path: Path, identity: PluginLaunchIdentity,
-                  start: int, stop: int, *, coarse: bool,
-                  cutpoints: tuple[int, ...] = ()) -> str:
+def plugin_option(
+    plugin: str,
+    socket_path: Path,
+    identity: PluginLaunchIdentity,
+    start: int,
+    stop: int,
+    *,
+    online_blocks: bool = True,
+) -> str:
     fields = [
         plugin, f"socket={socket_path}", f"start={start}", f"stop={stop}",
         f"binary-sha256={identity.binary_sha256}",
@@ -108,255 +107,270 @@ def plugin_option(plugin: str, socket_path: Path, identity: PluginLaunchIdentity
         f"env-sha256={identity.env_sha256}",
         f"cpu-sha256={identity.cpu_sha256}",
     ]
-    if coarse:
-        fields.append("coarse=on")
-    fields.extend(f"cutpoint={address}" for address in cutpoints)
+    if online_blocks:
+        fields.append("online-blocks=on")
     return ",".join(fields)
 
 
-def discover_execution(binary: Path, qemu: str, plugin: str, directory: Path) -> dict:
-    """Observe only control/action boundaries; all instruction semantics come from TIR."""
-    entry, loads = elf_loads(binary)
-    identity = launch_identity(binary)
-    socket_path = directory / "discovery.sock"
-    listener = PluginListener(str(socket_path), ArchAArch64("little"), expected_identity=identity)
-    listener.start()
-    text_start = min(base for base, flags, _ in loads if flags & 1)
-    command = [qemu, "-cpu", "max,sve=off", "-plugin",
-               plugin_option(plugin, socket_path, identity, text_start, MASK64,
-                             coarse=False), str(binary)]
-    (directory / "discovery-command.json").write_text(json.dumps(command, indent=2) + "\n")
-    with (directory / "discovery.stdout").open("wb") as stdout, (
-        directory / "discovery.stderr"
-    ).open("wb") as stderr:
-        process = subprocess.Popen(command, env={}, stdout=stdout, stderr=stderr)
-        transport, handshake = listener.accept()
-        sequence: list[tuple[int, str]] = []
-        events: list[dict] = []
-        terminal_pending = False
-        try:
-            while True:
-                event = transport.receive_event()
-                events.append({
-                    "kind": event.kind, "sequence": event.sequence, "epoch": event.epoch,
-                    "pc": event.pc, "address": event.address, "size": event.size,
-                    "auxiliary": event.auxiliary, "value": event.value.hex(),
-                })
-                if event.kind == EVENT_STORE:
-                    if transport.read_memory(event.address, event.size) != event.value:
-                        raise RuntimeError("store event is not coherent at its declared epoch")
-                elif event.kind == EVENT_AARCH64_SVC_ENTRY:
-                    terminal_pending = event.auxiliary == 94
-                elif event.kind == EVENT_CUTPOINT:
-                    if transport.read_register("pc").value != event.pc:
-                        raise RuntimeError("cutpoint PC disagrees with register state")
-                    sequence.append((event.pc, transport.read_memory(event.pc, 4).hex()))
-                    if terminal_pending:
-                        transport.finish()
-                        break
-                transport.advance()
-        finally:
-            listener.close()
-        returncode = process.wait(timeout=30)
-    if returncode != 0 or (directory / "discovery.stdout").read_bytes():
-        raise RuntimeError("fixed canonical execution did not naturally exit 0 without output")
-    document = {
-        "pid": handshake.pid, "returncode": returncode, "instructions": sequence,
-        "events": events, "control_flow_source": "fixed plugin instruction events",
-    }
-    (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
-    return document
+@dataclass
+class PendingBlock:
+    first_pc: int
+    last_pc: int
+    instruction_count: int
+    entry_sequence: int
+    elf_bytes_sha256: str
+    transform: SymbolicTransform | None
+    expected_registers: dict[str, int]
+    expected_stores: tuple[tuple[int, bytes], ...]
+    expected_memory: dict[int, bytes]
+    svc_pc: int | None
 
 
-def discover_logged_execution(binary: Path, qemu: str, directory: Path, fixed: dict) -> dict:
-    """Recover uninstrumented TB control flow; instruction semantics remain TIR-only."""
-    log_path = directory / "qemu-exec.log"
-    command = [qemu, "-cpu", "max,sve=off", "-d", "in_asm,exec,nochain",
-               "-D", str(log_path), str(binary)]
-    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
-    completed = subprocess.run(command, env={}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=60, check=False)
-    (directory / "stdout").write_bytes(completed.stdout)
-    (directory / "stderr").write_bytes(completed.stderr)
-    if completed.returncode != 1 or completed.stdout:
-        raise RuntimeError(
-            "regression-injected canonical execution did not naturally exit 1 without output"
+class OnlineTirValidator:
+    """Lazily specialize each observed TB and validate it at the next safe boundary."""
+
+    def __init__(
+        self,
+        binary: Path,
+        loads: list[tuple[int, int, bytes]],
+        oracle: str,
+        transport: PluginTransport,
+        pid: int,
+    ) -> None:
+        self.binary = binary
+        self.loads = [(base, flags, raw) for base, flags, raw in loads if flags & 1]
+        if not self.loads:
+            raise ValueError("ELF has no executable file-backed load segment")
+        self.oracle = oracle
+        self.transport = transport
+        self.pid = pid
+        self.arch = ArchAArch64("little")
+        self.state = PluginProgramState(self.arch, transport)
+        self.state.execution_tid = pid
+        self.instruction_cache: dict[tuple[int, bytes], dict] = {}
+        self.block_cache: dict[tuple[int, bytes], SymbolicTransform | None] = {}
+        self.active: PendingBlock | None = None
+        self.pending_svc: dict | None = None
+        self.errors: list[dict] = []
+        self.blocks: list[dict] = []
+        self.store_evidence: list[dict] = []
+        self.syscall_evidence: list[dict] = []
+        self.terminal: dict | None = None
+        self.oracle_batches = 0
+        self.specializations = 0
+
+    @staticmethod
+    def _is_svc(code: bytes) -> bool:
+        return int.from_bytes(code, "little") & SVC_MASK == SVC_OPCODE
+
+    def _specialize(self, instructions: list[tuple[int, bytes]]) -> None:
+        missing = [(pc, code) for pc, code in instructions if (pc, code) not in self.instruction_cache]
+        if not missing:
+            return
+        payload = "".join(f"{pc} {code.hex()}\n" for pc, code in missing)
+        env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
+        }
+        completed = subprocess.run(
+            [self.oracle, "--export-transitions"], input=payload, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600,
+            check=False, env=env,
         )
-    blocks: dict[int, bytes] = {}
-    traces: list[int] = []
-    pending_pc = None
-    pending_bytes = bytearray()
-    for line in log_path.read_text().splitlines():
-        address = re.match(r"0x([0-9a-f]+):", line)
-        if address is not None and pending_pc is None:
-            pending_pc = int(address.group(1), 16)
-        encoded = re.match(r"OBJD-T: ([0-9a-f]+)$", line)
-        if encoded is not None:
-            pending_bytes.extend(bytes.fromhex(encoded.group(1)))
-        executed = re.match(r"Trace \d+: .*\[[^/]*/([0-9a-f]{16})/", line)
-        if executed is not None:
-            pc = int(executed.group(1), 16)
-            if pending_pc is not None:
-                if pending_pc != pc or not pending_bytes or len(pending_bytes) % 4:
-                    raise ValueError("malformed QEMU translation-block log")
-                old = blocks.setdefault(pc, bytes(pending_bytes))
-                if old != pending_bytes:
-                    raise ValueError("one guest PC produced conflicting translation blocks")
-                pending_pc, pending_bytes = None, bytearray()
-            traces.append(pc)
-    sequence = []
-    for pc in traces:
-        block = blocks.get(pc)
-        if block is None:
-            raise ValueError(f"execution log references unknown block {pc:#x}")
-        sequence.extend((pc + offset, block[offset:offset + 4].hex())
-                        for offset in range(0, len(block), 4))
-    if not sequence:
-        raise ValueError("empty injected dynamic instruction sequence")
-    document = {
-        "pid": fixed["pid"], "returncode": completed.returncode,
-        "instructions": sequence, "events": fixed["events"],
-        # Only path addresses come from the buggy implementation. Every instruction
-        # transition is independently decoded by TIR from the immutable ELF below.
-        "control_flow_source": "regression-injected uninstrumented QEMU TB execution log",
-    }
-    (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
-    return document
+        if completed.returncode != 0:
+            raise RuntimeError(f"TIR specialization failed: {completed.stderr[-4096:].strip()}")
+        lines = completed.stdout.splitlines()
+        if len(lines) != len(missing):
+            raise RuntimeError("TIR batch response cardinality mismatch")
+        for (pc, code), line in zip(missing, lines, strict=True):
+            _next_pc, outputs = decode_response(line, pc, code)
+            self.instruction_cache[(pc, code)] = outputs
+        self.oracle_batches += 1
+        self.specializations += len(missing)
 
+    def _block_transform(self, pc: int, raw: bytes) -> tuple[SymbolicTransform | None, int | None]:
+        key = (pc, raw)
+        svc_offsets = [
+            offset for offset in range(0, len(raw), 4)
+            if self._is_svc(raw[offset : offset + 4])
+        ]
+        if svc_offsets and svc_offsets != [len(raw) - 4]:
+            raise RuntimeError("SVC is not the final instruction of its translation block")
+        svc_pc = pc + svc_offsets[0] if svc_offsets else None
+        semantic_raw = raw[:-4] if svc_pc is not None else raw
+        if key in self.block_cache:
+            return self.block_cache[key], svc_pc
+        instructions = [
+            (pc + offset, semantic_raw[offset : offset + 4])
+            for offset in range(0, len(semantic_raw), 4)
+        ]
+        self._specialize(instructions)
+        composer = None
+        for address, code in instructions:
+            transform = SymbolicTransform(
+                self.pid, self.instruction_cache[(address, code)], [], self.arch,
+                address, address + 4,
+            )
+            if composer is None:
+                composer = SymbolicTransformComposer(transform)
+            else:
+                composer.append(transform)
+        result = composer.finish() if composer is not None else None
+        self.block_cache[key] = result
+        return result, svc_pc
 
-def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Path,
-                       *, expected_exit: int):
-    entry, loads = elf_loads(binary)
-    sequence = [(int(pc), bytes.fromhex(code)) for pc, code in discovery["instructions"]]
-    if not sequence or sequence[0][0] != entry:
-        raise ValueError("dynamic instruction sequence does not start at ELF entry")
-    for pc, code in sequence:
-        if len(code) != 4 or read_image(loads, pc, 4) != code:
-            raise ValueError(f"path instruction at {pc:#x} is not bound to the fixture ELF")
-    svc_entries = {
-        event["pc"]: event for event in discovery["events"]
-        if event["kind"] == EVENT_AARCH64_SVC_ENTRY
-    }
-    if [event["auxiliary"] for event in svc_entries.values()] != [96, 94]:
-        raise ValueError("unexpected static-musl syscall profile")
-    terminal_pc, terminal_code = sequence[-1]
-    if any(pc not in {address for address, _ in sequence} for pc in svc_entries):
-        raise ValueError("syscall evidence is not present on the selected control-flow path")
-    if svc_entries.get(terminal_pc, {}).get("auxiliary") != 94 or terminal_code != b"\x01\0\0\xd4":
-        raise ValueError("dynamic sequence does not end at exit_group SVC")
-
-    unique = list(dict.fromkeys((pc, code) for pc, code in sequence[:-1] if pc not in svc_entries))
-    payload = "".join(f"{pc} {code.hex()}\n" for pc, code in unique)
-    completed = subprocess.run(
-        [oracle, "--export-transitions"], input=payload, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=True,
-        env={key: value for key, value in os.environ.items() if not key.startswith(("TIR_", "TIRAMISU_"))},
-    )
-    lines = completed.stdout.splitlines()
-    if len(lines) != len(unique):
-        raise RuntimeError("TIR batch response cardinality mismatch")
-    decoded = {
-        key: decode_response(line, key[0], key[1])
-        for key, line in zip(unique, lines, strict=True)
-    }
-
-    arch = ArchAArch64("little")
-    image = ProgramState(arch)
-    for base, flags, raw in loads:
-        if flags & 1:
-            image.write_memory(base, raw)
-    context = DisassemblyContext(image)
-    transforms = []
-    set_tid_boundary = None
-    for index, ((pc, code), (next_pc, _)) in enumerate(zip(sequence[:-1], sequence[1:], strict=True)):
-        instruction = context.disassemble(pc)
-        svc = svc_entries.get(pc)
-        outputs: dict[Expr, Expr]
-        if svc is None:
-            _, outputs = decoded[(pc, code)]
+    def _begin_block(self, event) -> None:
+        if self.active is not None:
+            self._compare_active(event.pc, event.sequence)
+        if self.pending_svc is not None:
+            raise RuntimeError("next TB arrived before SVC successor evidence")
+        raw = read_image(self.loads, event.pc, event.size * 4)
+        transform, svc_pc = self._block_transform(event.pc, raw)
+        # The TB callback runs before its first instruction, so the plugin's
+        # instruction scoreboard is intentionally stale.  The immutable TB
+        # descriptor is the explicit boundary PC.
+        self.state.flush_observations()
+        self.state.write_register("PC", event.pc)
+        if transform is None:
+            expected_registers: dict[str, int] = {}
+            expected_stores: tuple[tuple[int, bytes], ...] = ()
+            expected_memory: dict[int, bytes] = {}
         else:
-            number = svc["auxiliary"]
-            expected = {96: ExprId("__focaccia_execution_tid", 64)}.get(number)
-            if expected is None:
-                raise ValueError(f"unsupported interior syscall {number}")
-            outputs = {ExprId("PC", 64): ExprInt(pc + 4, 64), ExprId("X0", 64): expected}
-            if next_pc != pc + 4:
-                raise ValueError("interior SVC did not resume at its architectural successor")
-            if number == 96:
-                descriptor = NoReplayActionDescriptor(arch.key, pc, NoReplayActionKind.SET_TID_ADDRESS)
-                set_tid_boundary = NoReplaySetTidBoundary(
-                    index, descriptor, svc["address"], discovery["pid"]
-                )
-        transforms.append(SymbolicTransform(1, outputs, [instruction], arch, pc, next_pc))
+            expected_registers = transform.eval_validation_register_transforms(self.state)
+            expected_stores = transform.eval_ordered_memory_transforms(self.state)
+            expected_memory = transform.eval_memory_transforms(self.state)
+        self.active = PendingBlock(
+            event.pc, event.address, event.size, event.sequence,
+            hashlib.sha256(raw).hexdigest(), transform, expected_registers,
+            expected_stores, expected_memory, svc_pc,
+        )
+        self.transport.advance()
 
-    if set_tid_boundary is None:
-        raise ValueError("set_tid_address was not retained as an interior action")
-    terminal_descriptor = NoReplayActionDescriptor(
-        arch.key, terminal_pc, NoReplayActionKind.EXIT_GROUP
-    )
-    completion = TraceCompletion(
-        terminal_pc, len(transforms), len(transforms) + 1,
-        ExecutionOutcome(ExecutionState.EXITED, exit_status=expected_exit),
-        terminal_descriptor, ExitAction(expected_exit, ExitScope.GROUP),
-        no_replay_set_tid=(set_tid_boundary,),
-    )
-    environment = TraceEnvironment(
-        str(binary), (), (), start_address=entry, stop_address=terminal_pc,
-        architecture=arch.key,
-    )
-    trace = MaterializedTrace(
-        transforms, environment, (pc for pc, _ in sequence[:-1]),
-        scope=TraceScope.WHOLE_PROGRAM, completion=completion,
-    )
-    trace_path = directory / "oracle.json"
-    serialize_transformations(trace, trace_path)
+    def _compare_active(self, destination_pc: int, boundary_sequence: int) -> None:
+        block = self.active
+        if block is None:
+            raise RuntimeError("no active TB at comparison boundary")
+        self.state.flush_observations()
+        self.state.write_register("PC", destination_pc)
+        block_errors = []
+        for register, expected in block.expected_registers.items():
+            actual = destination_pc if register == "PC" else self.state.read_register(register)
+            if actual != expected:
+                error = {
+                    "severity": "confirmed", "subject": register,
+                    "expected": hex(expected), "actual": hex(actual),
+                    "block_pc": hex(block.first_pc),
+                }
+                self.errors.append(error)
+                block_errors.append(error)
+        for address, expected in block.expected_memory.items():
+            actual = self.state.read_memory(address, len(expected))
+            if actual != expected:
+                error = {
+                    "severity": "confirmed", "subject": hex(address),
+                    "expected": expected.hex(), "actual": actual.hex(),
+                    "block_pc": hex(block.first_pc),
+                }
+                self.errors.append(error)
+                block_errors.append(error)
+        for ordinal, (address, value) in enumerate(block.expected_stores):
+            self.store_evidence.append({
+                "block_pc": block.first_pc, "ordinal": ordinal,
+                "address": address, "value": value.hex(),
+                "final_ranges_verified": True,
+            })
+        self.blocks.append({
+            "first_pc": block.first_pc,
+            "last_pc": block.last_pc,
+            "instruction_count": block.instruction_count,
+            "destination_pc": destination_pc,
+            "event_span": boundary_sequence - block.entry_sequence,
+            "elf_bytes_sha256": block.elf_bytes_sha256,
+            "ordered_writes": [
+                {"address": address, "value": value.hex()}
+                for address, value in block.expected_stores
+            ],
+            "final_write_ranges": len(block.expected_memory),
+            "errors": block_errors,
+        })
+        self.active = None
 
-    audit = subprocess.run(
-        [oracle, "--audit-classes"],
-        input="".join(f"{pc} {code.hex()}\n" for pc, code in sequence), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=True,
-        env={key: value for key, value in os.environ.items() if not key.startswith(("TIR_", "TIRAMISU_"))},
-    )
-    classes = [line.split(maxsplit=2)[2] for line in audit.stdout.splitlines()]
-    audit_document = {
-        "instruction_count": len(sequence),
-        "transform_count": len(transforms),
-        "classes": {name: classes.count(name) for name in sorted(set(classes))},
-        "unique_opcode_count": len({code for _, code in sequence}),
-        "svc_policy": {"96": "context-bound set_tid_address",
-                       "94": f"terminal exit_group({expected_exit})"},
-        "path_provenance": {
-            "source": discovery["control_flow_source"],
-            "instruction_sequence_sha256": hashlib.sha256(payload.encode()).hexdigest(),
-            "binary_sha256": file_sha256(binary),
-            "semantics": "TIR transitions decoded from immutable ELF instruction bytes",
-        },
-    }
-    (directory / "instruction-audit.json").write_text(json.dumps(audit_document, indent=2) + "\n")
-    return trace_path, trace, audit_document
+    def _svc_entry(self, event) -> None:
+        if self.active is None or self.active.svc_pc != event.pc:
+            raise RuntimeError("SVC evidence is not the final instruction of the active TB")
+        self._compare_active(event.pc, event.sequence)
+        evidence = {
+            "sequence": event.sequence, "entry_epoch": event.epoch,
+            "pc": event.pc, "number": event.auxiliary, "argument0": event.address,
+        }
+        self.syscall_evidence.append(evidence)
+        if event.auxiliary == 94:
+            self.terminal = {
+                "pc": event.pc, "exit_status": event.address & 0xFF,
+                "action": "exit_group", "sequence": event.sequence,
+            }
+            self.transport.finish()
+            return
+        if event.auxiliary != 96 or self.pending_svc is not None:
+            raise RuntimeError(f"unsupported interior syscall {event.auxiliary}")
+        self.pending_svc = evidence
+        self.transport.advance()
+
+    def _svc_successor(self, event) -> None:
+        pending = self.pending_svc
+        if pending is None or event.address != pending["pc"]:
+            raise RuntimeError("SVC successor is not bound to its entry")
+        if event.pc != 0 or event.auxiliary != self.pid:
+            raise RuntimeError("set_tid_address result is not bound to the launch PID")
+        pending.update({
+            "successor_pc": event.pc, "successor_epoch": event.epoch,
+            "result": event.auxiliary,
+        })
+        self.pending_svc = None
+        self.transport.advance()
+
+    def run(self) -> dict:
+        while self.terminal is None:
+            event = self.transport.receive_event()
+            if event.kind == EVENT_TRANSLATION_BLOCK:
+                self._begin_block(event)
+            elif event.kind == EVENT_STORE:
+                raise RuntimeError("online mode received an optimizer-barrier store event")
+            elif event.kind == EVENT_AARCH64_SVC_ENTRY:
+                self._svc_entry(event)
+            elif event.kind == EVENT_AARCH64_SVC_SUCCESSOR:
+                self._svc_successor(event)
+            else:
+                raise RuntimeError(f"unexpected online event kind {event.kind}")
+        if self.active is not None or self.pending_svc is not None:
+            raise RuntimeError("terminal action left an unvalidated block or syscall")
+        return {
+            "blocks": self.blocks,
+            "errors": self.errors,
+            "store_evidence": self.store_evidence,
+            "syscall_evidence": self.syscall_evidence,
+            "terminal": self.terminal,
+            "cache": {
+                "observed_block_shapes": len(self.block_cache),
+                "specialized_instructions": self.specializations,
+                "instruction_cache_entries": len(self.instruction_cache),
+                "oracle_batches": self.oracle_batches,
+            },
+        }
 
 
-def wait_for_file(path: Path, process: subprocess.Popen, timeout: float = 180.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not path.exists():
-        if process.poll() is not None:
-            raise RuntimeError(f"validator exited before terminal readiness: {process.returncode}")
-        if time.monotonic() >= deadline:
-            raise TimeoutError("terminal readiness timed out")
-        time.sleep(0.01)
-
-
-def validate_report(document: dict, *, mismatch: bool, terminal_pc: int) -> None:
+def validate_report(document: dict, *, mismatch: bool, terminal_pc: int | None = None) -> None:
     expected_status = "mismatch" if mismatch else "accepted"
     if document.get("status") != expected_status:
         raise ValueError(f"expected {expected_status}, got {document.get('status')}")
-    if not document["completion"]["complete"] or not document["completion"]["execution_complete"]:
+    completion = document.get("completion", {})
+    if not completion.get("complete") or not completion.get("execution_complete"):
         raise ValueError("whole-program terminal evidence is incomplete")
-    if document["completion"]["scope"] != TraceScope.WHOLE_PROGRAM.value:
+    if completion.get("scope") != "whole-program":
         raise ValueError("whole-program scope was not retained")
-    if document["trace"]["terminal_pc"] != terminal_pc:
-        raise ValueError("terminal cutpoint was not bound")
-    errors = [error for entry in document["validation"]["entries"] for error in entry["errors"]]
+    if terminal_pc is not None and document.get("terminal", {}).get("pc") != terminal_pc:
+        raise ValueError("terminal PC was not bound")
+    errors = document.get("errors", [])
     if mismatch:
         if len(errors) != 1 or errors[0].get("severity") != "confirmed" or errors[0].get("subject") != "X0":
             raise ValueError(f"expected one confirmed localized X0 mismatch, got {errors}")
@@ -364,79 +378,80 @@ def validate_report(document: dict, *, mismatch: bool, terminal_pc: int) -> None
         raise ValueError(f"fixed execution produced errors: {errors}")
 
 
-def run_case(args, binary: Path, trace_path: Path, trace, directory: Path, *, mismatch: bool):
+def run_case(
+    args, binary: Path, loads, entry: int, callme: int, directory: Path, *, mismatch: bool
+) -> dict:
     directory.mkdir()
     identity = launch_identity(binary)
-    terminal_pc = trace.completion.final_pc
-    fixture = json.loads((args.fixture / "manifest.json").read_text())
-    witness = fixture["witness_return"]
+    executable_loads = [(base, raw) for base, flags, raw in loads if flags & 1]
+    text_start = min(base for base, _ in executable_loads)
+    text_stop = max(base + len(raw) - 4 for base, raw in executable_loads)
     socket_path = directory / "plugin.sock"
-    ready_path, evidence_path = directory / "terminal-ready.json", directory / "terminal-evidence.json"
-    report_path = directory / "report.json"
+    listener = PluginListener(str(socket_path), ArchAArch64("little"), expected_identity=identity)
+    listener.start()
     qemu_path = args.qemu_injected if mismatch else args.qemu_fixed
     plugin_path = args.plugin_injected if mismatch else args.plugin_fixed
-    addresses = trace.require_addresses()
-    text_start = min(addresses)
-    # Bound symbolic DAG depth without inserting a callback inside callme's
-    # optimizer-sensitive instruction chain. Address cutpoints naturally recur
-    # on loops and therefore also bound repeated dynamic paths.
-    periodic = {
-        address for address in addresses
-        if not fixture["callme"] < address < fixture["callme_stop"]
-    }
-    cutpoints = tuple(sorted(periodic | {trace.env.start_address, witness, terminal_pc}))
-    text_stop = max((*addresses, terminal_pc))
-    plugin = plugin_option(plugin_path, socket_path, identity, text_start,
-                           text_stop, coarse=True, cutpoints=cutpoints)
-    qemu_command = [qemu_path, "-cpu", "max,sve=off", "-plugin", plugin, str(binary)]
-    cutpoint_set = set(cutpoints) | {text_start, text_stop}
-    dynamic_cutpoints = [
-        address for address in (*addresses, terminal_pc) if address in cutpoint_set
+    command = [
+        qemu_path, "-cpu", "max,sve=off", "-plugin",
+        plugin_option(plugin_path, socket_path, identity, text_start, text_stop),
+        str(binary),
     ]
-    if not dynamic_cutpoints or dynamic_cutpoints[0] != trace.env.start_address \
-            or dynamic_cutpoints[-1] != terminal_pc:
-        raise RuntimeError("dynamic cutpoints do not bind entry and terminal boundaries")
-    validator_command = [
-        args.validator, "--use-socket", str(socket_path), "--guest-arch", "aarch64l",
-        "--symb-trace", str(trace_path), "--report", str(report_path),
-        "--output", str(directory / "states.json"),
-        "--plugin-terminal-ready", str(ready_path),
-        "--plugin-terminal-evidence", str(evidence_path),
-    ]
-    for address in dynamic_cutpoints:
-        validator_command.extend(("--cutpoint-address", hex(address)))
-    (directory / "commands.json").write_text(json.dumps(
-        {"qemu": qemu_command, "validator": validator_command, "environment": [],
-         "cpu_profile": CPU_PROFILE, "cutpoint_count": len(cutpoints)}, indent=2) + "\n")
-    with (directory / "validator.log").open("wb") as validator_log, (
-        directory / "qemu.stdout"
-    ).open("wb") as qemu_stdout, (directory / "qemu.stderr").open("wb") as qemu_stderr:
-        validator = subprocess.Popen(validator_command, env={}, stdout=validator_log,
-                                     stderr=subprocess.STDOUT)
-        wait_for_file(socket_path, validator)
-        qemu = subprocess.Popen(qemu_command, env={}, stdout=qemu_stdout, stderr=qemu_stderr)
-        wait_for_file(ready_path, validator)
-        binding = json.loads(ready_path.read_text())
-        qemu_status = qemu.wait(timeout=30)
-        evidence_path.write_text(json.dumps({
-            "schema": "focaccia-plugin-terminal-evidence-v1",
-            "nonce": binding["nonce"], "pid": binding["pid"],
-            "binarySha256": binding["binarySha256"], "returncode": qemu_status,
-        }, sort_keys=True) + "\n")
-        validator_status = validator.wait(timeout=30)
-    expected_guest_status = 1 if mismatch else 0
-    if qemu_status != expected_guest_status:
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with (directory / "qemu.stdout").open("wb") as stdout, (
+        directory / "qemu.stderr"
+    ).open("wb") as stderr:
+        process = subprocess.Popen(command, env={}, stdout=stdout, stderr=stderr)
+        transport: PluginTransport | None = None
+        try:
+            transport, handshake = listener.accept()
+            validator = OnlineTirValidator(binary, loads, args.oracle, transport, handshake.pid)
+            online = validator.run()
+        except BaseException:
+            if transport is not None and not transport.closed:
+                try:
+                    transport.abort()
+                except BaseException:
+                    pass
+            process.wait(timeout=30)
+            raise
+        finally:
+            listener.close()
+        guest_status = process.wait(timeout=30)
+    expected_status = 1 if mismatch else 0
+    if guest_status != expected_status or (directory / "qemu.stdout").read_bytes():
         raise RuntimeError(
-            f"guest did not naturally exit {expected_guest_status}: {qemu_status}"
+            f"guest did not naturally exit {expected_status} without output: {guest_status}"
         )
-    expected_validator_status = 1 if mismatch else 0
-    if validator_status != expected_validator_status:
-        raise RuntimeError(f"validator exit {validator_status}, expected {expected_validator_status}")
-    document = json.loads(report_path.read_text())
-    validate_report(document, mismatch=mismatch, terminal_pc=terminal_pc)
+    terminal = online["terminal"]
+    if terminal["exit_status"] != expected_status:
+        raise RuntimeError("terminal action disagrees with parent-observed guest exit")
+    if not online["blocks"] or online["blocks"][0]["first_pc"] != entry:
+        raise RuntimeError("online TB coverage does not begin at the ELF entry")
+    witness_blocks = [block for block in online["blocks"] if block["first_pc"] == callme]
+    if (
+        len(witness_blocks) != 1
+        # The seven optimizer-sensitive dataflow instructions and trailing RET
+        # must remain one uninterrupted translated unit.
+        or witness_blocks[0]["instruction_count"] != 8
+        or witness_blocks[0]["last_pc"] != callme + 28
+        or witness_blocks[0]["event_span"] != 1
+    ):
+        raise RuntimeError("canonical #2248 witness was not one uninterrupted seven-instruction TB")
+    report = {
+        "schema": 3,
+        "status": "mismatch" if online["errors"] else "accepted",
+        "completion": {
+            "scope": "whole-program", "complete": True,
+            "execution_complete": True, "guest_exit_status": guest_status,
+        },
+        **online,
+    }
+    validate_report(report, mismatch=mismatch, terminal_pc=terminal["pc"])
+    (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return {
-        "status": document["status"], "validator_exit_status": validator_status,
-        "guest_exit_status": qemu_status, "terminal_evidence": "complete",
+        "status": report["status"], "guest_exit_status": guest_status,
+        "qemu_executions": 1, "terminal_evidence": "complete",
+        "block_count": len(report["blocks"]), "cache": report["cache"],
     }
 
 
@@ -448,8 +463,6 @@ def main() -> None:
     parser.add_argument("--qemu-injected", required=True)
     parser.add_argument("--plugin-fixed", required=True)
     parser.add_argument("--plugin-injected", required=True)
-    parser.add_argument("--gdb")  # Retained CLI compatibility; never used.
-    parser.add_argument("--validator", required=True)
     parser.add_argument("--tir-revision", required=True)
     parser.add_argument("--qemu-revision", required=True)
     parser.add_argument("--run-directory", required=True, type=Path)
@@ -464,56 +477,32 @@ def main() -> None:
             raise ValueError("fixture manifest mismatch")
         if read_image(loads, fixture["callme"], len(EXPECTED_CALLME)) != EXPECTED_CALLME:
             raise ValueError("fixture does not contain canonical callme.S bytes")
-        discovery_dir = root / "discovery-fixed"
-        discovery_dir.mkdir()
-        discovery = discover_execution(binary, args.qemu_fixed, args.plugin_fixed, discovery_dir)
-        trace_path, trace, audit = generate_reference(
-            binary, discovery, args.oracle, root, expected_exit=0
-        )
-        injected_discovery_dir = root / "discovery-injected"
-        injected_discovery_dir.mkdir()
-        injected_discovery = discover_logged_execution(
-            binary, args.qemu_injected, injected_discovery_dir, discovery
-        )
-        injected_oracle_dir = root / "oracle-injected"
-        injected_oracle_dir.mkdir()
-        injected_trace_path, injected_trace, injected_audit = generate_reference(
-            binary, injected_discovery, args.oracle, injected_oracle_dir, expected_exit=1
-        )
-        if set(audit["classes"]) != set(injected_audit["classes"]):
-            raise ValueError("fixed and injected paths execute different instruction classes")
-        assert trace.completion is not None
-        manifest = {
-            "schema": 2, "scope": "whole-program", "binary": str(binary),
-            "binary_sha256": file_sha256(binary), "main_sha256": fixture["main_sha256"],
-            "callme_sha256": fixture["callme_sha256"], "entry": entry,
-            "terminal_pc": trace.completion.final_pc, "transform_count": len(trace),
-            "oracle_sha256": file_sha256(trace_path),
-            "injected_oracle_sha256": file_sha256(injected_trace_path),
-            "path_oracles": {
-                "fixed": audit["path_provenance"],
-                "injected": injected_audit["path_provenance"],
-            },
-            "tir_revision": args.tir_revision,
-            "qemu_revision": args.qemu_revision, "argv": [], "environment": [],
-            "cpu_profile": CPU_PROFILE, "instruction_audit": audit,
-            "record_replay": False, "miasm_semantics": False,
-            "synthetic_state_mutation": False,
-        }
-        (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         cases = {
-            "fixed": run_case(args, binary, trace_path, trace, root / "fixed", mismatch=False),
+            "fixed": run_case(
+                args, binary, loads, entry, fixture["callme"], root / "fixed", mismatch=False
+            ),
             "injected": run_case(
-                args, binary, injected_trace_path, injected_trace,
-                root / "injected", mismatch=True
+                args, binary, loads, entry, fixture["callme"], root / "injected", mismatch=True
             ),
         }
-        result = {"schema": 2, "status": "passed", "scope": "whole-program", "cases": cases}
+        manifest = {
+            "schema": 3, "architecture": "online-tb-tir", "scope": "whole-program",
+            "binary": str(binary), "binary_sha256": file_sha256(binary),
+            "main_sha256": fixture["main_sha256"], "callme_sha256": fixture["callme_sha256"],
+            "entry": entry, "tir_revision": args.tir_revision,
+            "qemu_revision": args.qemu_revision, "argv": [], "environment": [],
+            "cpu_profile": CPU_PROFILE, "qemu_executions_per_case": 1,
+            "dynamic_path_oracle": False, "record_replay": False,
+            "miasm_semantics": False, "synthetic_state_mutation": False,
+            "semantics": "TIR specialized lazily from immutable ELF bytes for observed TBs",
+        }
+        (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        result = {"schema": 3, "status": "passed", "scope": "whole-program", "cases": cases}
         (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result, indent=2))
     except BaseException as error:
         (root / "result.json").write_text(json.dumps(
-            {"schema": 2, "status": "failed", "error": str(error)}, indent=2
+            {"schema": 3, "status": "failed", "error": str(error)}, indent=2
         ) + "\n")
         raise
 

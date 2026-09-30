@@ -66,24 +66,22 @@ def test_plugin_manifest_binds_empty_argv_environment_and_explicit_cpu(tmp_path)
     binary = tmp_path / "fixture"
     binary.write_bytes(b"fixture")
     identity = probe.launch_identity(binary)
-    option = probe.plugin_option("plugin.so", tmp_path / "socket", identity, PC, PC + 8,
-                                 coarse=True, cutpoints=(PC + 4,))
-    assert "coarse=on" in option and f"cutpoint={PC + 4}" in option
+    option = probe.plugin_option("plugin.so", tmp_path / "socket", identity, PC, PC + 8)
+    assert "online-blocks=on" in option
+    assert "cutpoint=" not in option and "coarse=" not in option
     assert identity.argv_sha256 == probe.manifest_sha256([])
     assert identity.env_sha256 == probe.manifest_sha256([])
     assert identity.cpu_sha256 == probe.manifest_sha256(probe.CPU_PROFILE)
 
 
 def report(*, mismatch=False):
-    entries = [{"errors": []}, {"errors": []}]
-    if mismatch:
-        entries[0]["errors"] = [{"severity": "confirmed", "subject": "X0"}]
+    errors = [{"severity": "confirmed", "subject": "X0"}] if mismatch else []
     return {
         "status": "mismatch" if mismatch else "accepted",
-        "trace": {"terminal_pc": PC + 8},
+        "terminal": {"pc": PC + 8},
         "completion": {"scope": "whole-program", "complete": True,
                        "execution_complete": True},
-        "validation": {"entries": entries},
+        "errors": errors,
     }
 
 
@@ -97,7 +95,7 @@ def test_report_requires_complete_terminal_evidence_and_localized_x0(mismatch):
     lambda value: value["completion"].update(complete=False),
     lambda value: value["completion"].update(execution_complete=False),
     lambda value: value["completion"].update(scope="witness"),
-    lambda value: value["trace"].update(terminal_pc=PC),
+    lambda value: value["terminal"].update(pc=PC),
 ])
 def test_report_rejects_weakened_whole_program_evidence(mutation):
     document = report()
@@ -106,9 +104,14 @@ def test_report_rejects_weakened_whole_program_evidence(mutation):
         probe.validate_report(document, mismatch=False, terminal_pc=PC + 8)
 
 
-def test_harness_declares_no_rr_miasm_or_state_mutation():
+def test_harness_is_single_execution_online_without_path_oracle():
     source = Path(PROBE["__file__"]).read_text()
+    assert '"qemu_executions_per_case": 1' in source
+    assert '"dynamic_path_oracle": False' in source
     assert '"record_replay": False' in source
     assert '"miasm_semantics": False' in source
     assert '"synthetic_state_mutation": False' in source
+    assert "discover_execution" not in source
+    assert "discover_logged_execution" not in source
+    assert "-d\", \"in_asm" not in source
     assert "-g" not in json.dumps(PROBE.get("CPU_PROFILE"))

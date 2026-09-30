@@ -264,7 +264,7 @@ def test_svc_is_deliberately_external_action_not_synthetic_tir_state(backend):
     with pytest.raises(UnsupportedInstructionError, match="residual helper"):
         transform(backend, "010000d4", 0x402F44)
     harness = (Path(__file__).parent / "probes/tir_no_replay_smoke.py").read_text()
-    for number in (96, 29, 66, 94):
+    for number in (96, 94):
         assert str(number) in harness
     assert '"synthetic_state_mutation": False' in harness
 

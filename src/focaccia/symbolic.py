@@ -1018,6 +1018,13 @@ class SymbolicTransform:
         """Evaluate an output address with this transform's ordered-store context."""
         return _TransformEvaluator(conc_state, self.memory_writes).evaluate(expression)
 
+    def eval_ordered_memory_transforms(
+        self, conc_state: ReadableProgramState
+    ) -> tuple[tuple[int, bytes], ...]:
+        """Evaluate writes in architectural program order, including store forwarding."""
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes)
+        return tuple(evaluator.concrete_writes())
+
     def eval_memory_transforms(self, conc_state: ReadableProgramState) -> dict[int, bytes]:
         """Calculate memory transformations when applied to a concrete state.
 
@@ -1029,9 +1036,8 @@ class SymbolicTransform:
         :raise MemoryError:
         :raise ValueError:
         """
-        evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         final_bytes: dict[int, int] = {}
-        for address, data in evaluator.concrete_writes():
+        for address, data in self.eval_ordered_memory_transforms(conc_state):
             for offset, byte in enumerate(data):
                 final_bytes[address + offset] = byte
 
