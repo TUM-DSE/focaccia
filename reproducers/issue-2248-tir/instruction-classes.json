@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "classes": [
+    {
+      "class": "decode_aarch64_integer_ins_ext_insert_movewide",
+      "pc": 4194748,
+      "bytes": "1d0080d2"
+    },
+    {
+      "class": "decode_aarch64_integer_arithmetic_add_sub_immediate",
+      "pc": 4194756,
+      "bytes": "e0030091"
+    },
+    {
+      "class": "decode_aarch64_integer_arithmetic_address_pc_rel",
+      "pc": 4194760,
+      "bytes": "01000090"
+    },
+    {
+      "class": "decode_aarch64_integer_logical_immediate",
+      "pc": 4194768,
+      "bytes": "1fec7c92"
+    },
+    {
+      "class": "decode_aarch64_branch_unconditional_immediate",
+      "pc": 4194772,
+      "bytes": "01000014"
+    },
+    {
+      "class": "decode_aarch64_integer_logical_shiftedreg",
+      "pc": 4194776,
+      "bytes": "e20300aa"
+    },
+    {
+      "class": "decode_aarch64_memory_single_general_immediate_unsigned",
+      "pc": 4194788,
+      "bytes": "84f047f9"
+    },
+    {
+      "class": "decode_aarch64_memory_single_general_immediate_signed_post_idx",
+      "pc": 4194792,
+      "bytes": "418440f8"
+    },
+    {
+      "class": "decode_aarch64_memory_pair_general_pre_idx",
+      "pc": 4195752,
+      "bytes": "fd7bbda9"
+    },
+    {
+      "class": "decode_aarch64_memory_pair_general_offset",
+      "pc": 4195760,
+      "bytes": "f35301a9"
+    },
+    {
+      "class": "decode_aarch64_integer_arithmetic_add_sub_extendedreg",
+      "pc": 4195776,
+      "bytes": "42cc218b"
+    },
+    {
+      "class": "decode_aarch64_vector_transfer_integer_dup",
+      "pc": 4206000,
+      "bytes": "200c014e"
+    },
+    {
+      "class": "decode_aarch64_integer_arithmetic_add_sub_shiftedreg",
+      "pc": 4206004,
+      "bytes": "0400028b"
+    },
+    {
+      "class": "decode_aarch64_branch_conditional_cond",
+      "pc": 4206012,
+      "bytes": "a8030054"
+    },
+    {
+      "class": "decode_aarch64_memory_single_simdfp_immediate_unsigned",
+      "pc": 4206136,
+      "bytes": "0000803d"
+    },
+    {
+      "class": "decode_aarch64_integer_conditional_compare_immediate",
+      "pc": 4206144,
+      "bytes": "2028407a"
+    },
+    {
+      "class": "decode_aarch64_system_register_system",
+      "pc": 4206152,
+      "bytes": "e5003bd5"
+    },
+    {
+      "class": "decode_aarch64_memory_pair_simdfp_offset",
+      "pc": 4206232,
+      "bytes": "600001ad"
+    },
+    {
+      "class": "decode_aarch64_memory_pair_simdfp_pre_idx",
+      "pc": 4206236,
+      "bytes": "600082ad"
+    },
+    {
+      "class": "decode_aarch64_branch_unconditional_register",
+      "pc": 4206256,
+      "bytes": "c0035fd6"
+    },
+    {
+      "class": "decode_aarch64_memory_single_general_register",
+      "pc": 4195164,
+      "bytes": "637a62f8"
+    },
+    {
+      "class": "decode_aarch64_branch_conditional_compare",
+      "pc": 4195172,
+      "bytes": "c3ffffb5"
+    },
+    {
+      "class": "decode_aarch64_memory_single_general_immediate_signed_offset_normal",
+      "pc": 4195336,
+      "bytes": "01f05f38"
+    },
+    {
+      "class": "decode_aarch64_memory_pair_general_post_idx",
+      "pc": 4206664,
+      "bytes": "fd7bc5a8"
+    },
+    {
+      "class": "decode_aarch64_system_exceptions_runtime_svc",
+      "pc": 4206404,
+      "bytes": "010000d4"
+    },
+    {
+      "class": "decode_aarch64_branch_conditional_test",
+      "pc": 4209012,
+      "bytes": "e2001836"
+    },
+    {
+      "class": "decode_aarch64_integer_bitfield",
+      "pc": 4194884,
+      "bytes": "22fc7fd3"
+    },
+    {
+      "class": "decode_aarch64_integer_conditional_select",
+      "pc": 4195064,
+      "bytes": "eca79f9a"
+    },
+    {
+      "class": "decode_aarch64_integer_shift_variable",
+      "pc": 4195080,
+      "bytes": "cd25c49a"
+    },
+    {
+      "class": "decode_aarch64_memory_single_simdfp_immediate_signed_offset_normal",
+      "pc": 4196012,
+      "bytes": "fe83c23c"
+    },
+    {
+      "class": "decode_aarch64_integer_arithmetic_mul_widening_64_128hi",
+      "pc": 4204076,
+      "bytes": "417cce9b"
+    },
+    {
+      "class": "decode_aarch64_memory_single_general_immediate_signed_pre_idx",
+      "pc": 4204100,
+      "bytes": "60ff1f38"
+    }
+  ]
+}

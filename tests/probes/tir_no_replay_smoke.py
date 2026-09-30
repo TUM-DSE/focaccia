@@ -1,38 +1,50 @@
-"""Live bounded #2248 TIR/QEMU validation without native capture or RR."""
+"""Whole-program static-musl #2248 validation with TIR and plugin events."""
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
-import select
+import re
 import struct
 import subprocess
-import sys
-import tempfile
 import time
 
+from miasm.expression.expression import Expr, ExprId, ExprInt
+
 from focaccia.arch.aarch64 import ArchAArch64
-from focaccia.completion import TraceScope
-from focaccia.parser import parse_snapshots, serialize_transformations
-from focaccia.qemu.transport import manifest_sha256
+from focaccia.completion import TraceCompletion, TraceScope
+from focaccia.execution import ExecutionOutcome, ExecutionState
+from focaccia.no_replay import (
+    ExitAction,
+    ExitScope,
+    NoReplayActionDescriptor,
+    NoReplayActionKind,
+    NoReplaySetTidBoundary,
+)
+from focaccia.parser import serialize_transformations
+from focaccia.qemu.transport import (
+    EVENT_AARCH64_SVC_ENTRY,
+    EVENT_CUTPOINT,
+    EVENT_STORE,
+    PluginLaunchIdentity,
+    PluginListener,
+    manifest_sha256,
+)
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import DisassemblyContext, SymbolicTransform
-from focaccia.tir_backend import TirBackend
+from focaccia.tir_backend import decode_response
 from focaccia.trace import MaterializedTrace, TraceEnvironment
 
-EXPECTED_CODE = bytes.fromhex(
-    "5f0003eb"  # cmp x2, x3
-    "eca79f9a"  # cset x12, lt
-    "8b1d0012"  # and w11, w12, #0xff
-    "7f010071"  # cmp w11, #0
-    "ee039fda"  # csetm x14, ne
-    "cd25c49a"  # lsr x13, x14, x4
-    "a01d4093"  # sxtb x0, w13
+EXPECTED_CALLME = bytes.fromhex(
+    "5f0003ebeca79f9a8b1d00127f010071ee039fdacd25c49aa01d4093c0035fd6"
 )
+CPU_PROFILE = {
+    "architecture": {"isa": "aarch64", "endianness": "little"},
+    "profile": "qemu-user-max-sve-off-v1",
+}
 MASK64 = (1 << 64) - 1
 
 
@@ -44,298 +56,371 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_region(data: bytes, start: int, stop: int) -> bytes:
-    """Read one bounded file-backed executable region of a static AArch64 ELF."""
-    if (
-        type(start) is not int
-        or type(stop) is not int
-        or start < 0
-        or stop <= start
-        or stop >= 1 << 64
-        or start % 4
-        or stop % 4
-        or stop - start > 4096
-    ):
-        raise ValueError("invalid issue-2248 witness bounds")
+def elf_loads(binary: Path) -> tuple[int, list[tuple[int, int, bytes]]]:
+    data = binary.read_bytes()
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("expected little-endian ELF64")
     if struct.unpack_from("<HHI", data, 16) != (2, 183, 1):
         raise ValueError("expected static ET_EXEC AArch64 ELF")
-    offset = struct.unpack_from("<Q", data, 32)[0]
-    header_size, entry_size, count = struct.unpack_from("<HHH", data, 52)
-    if (
-        header_size != 64
-        or entry_size != 56
-        or not 1 <= count <= 256
-        or offset < 64
-        or offset + entry_size * count > len(data)
-    ):
+    entry, phoff = struct.unpack_from("<QQ", data, 24)
+    phentsize, phnum = struct.unpack_from("<HH", data, 54)
+    if phentsize != 56 or not 1 <= phnum <= 256 or phoff + phentsize * phnum > len(data):
         raise ValueError("invalid ELF program headers")
-    matching = []
-    for index in range(count):
-        kind, flags, file_offset, address, _, file_size, memory_size, _ = struct.unpack_from(
-            "<IIQQQQQQ", data, offset + entry_size * index
+    loads = []
+    for index in range(phnum):
+        kind, flags, offset, address, _, file_size, memory_size, _ = struct.unpack_from(
+            "<IIQQQQQQ", data, phoff + index * phentsize
         )
         if kind == 3:
-            raise ValueError("dynamic interpreter is outside the fixture scope")
+            raise ValueError("static-musl fixture must not have an interpreter")
         if kind != 1:
             continue
-        if (
-            file_size > memory_size
-            or file_offset + file_size > len(data)
-            or address + memory_size > 1 << 64
-        ):
+        if file_size > memory_size or offset + file_size > len(data):
             raise ValueError("invalid ELF load segment")
-        if start < address + memory_size and address < stop:
-            if flags & 7 != 5 or start < address or stop > address + file_size:
-                raise ValueError("witness must be in read-only executable file-backed bytes")
-            matching.append(data[file_offset + start - address : file_offset + stop - address])
-    if len(matching) != 1:
-        raise ValueError("witness must have one unambiguous ELF load mapping")
-    return matching[0]
+        loads.append((address, flags, data[offset : offset + file_size]))
+    if not loads or not any(address <= entry < address + len(raw) for address, _, raw in loads):
+        raise ValueError("ELF entry is not file-backed")
+    return entry, loads
 
 
-def generate_reference(binary: Path, start: int, stop: int, oracle: str):
-    code = read_region(binary.read_bytes(), start, stop)
-    if code != EXPECTED_CODE or stop - start != 7 * 4:
-        raise ValueError("fixture is not the exact seven-instruction issue-2248 witness")
-    arch = ArchAArch64("little")
-    state = ProgramState(arch)
-    state.write_memory(start, code)
-    context = DisassemblyContext(state)
-    backend = TirBackend(oracle)
-    transforms = []
-    for pc in range(start, stop, 4):
-        state.write_register("PC", pc)
-        instruction = context.disassemble(pc)
-        next_pc, outputs = backend.generate(instruction, state, context)
-        if next_pc is None or int(next_pc) != pc + 4:
-            raise ValueError("issue-2248 requires straight-line TIR transitions")
-        transforms.append(SymbolicTransform(1, outputs, [instruction], arch, pc, pc + 4))
-    env = TraceEnvironment(
-        str(binary), (), (), start_address=start, stop_address=stop, architecture=arch.key
+def read_image(loads: list[tuple[int, int, bytes]], address: int, size: int) -> bytes:
+    matches = [raw[address - base : address - base + size]
+               for base, _, raw in loads if base <= address and address + size <= base + len(raw)]
+    if len(matches) != 1:
+        raise ValueError(f"address {address:#x} is not in one file-backed segment")
+    return matches[0]
+
+
+def launch_identity(binary: Path) -> PluginLaunchIdentity:
+    return PluginLaunchIdentity(
+        file_sha256(binary), manifest_sha256([]), manifest_sha256([]),
+        manifest_sha256(CPU_PROFILE),
     )
-    return MaterializedTrace(transforms, env, range(start, stop, 4), scope=TraceScope.WITNESS)
 
 
-class PrivateGdbSocket:
-    """Private local IPC, with event-driven readiness and no probe connection."""
-
-    def __enter__(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="tir-2248-gdb-", dir="/tmp")
-        self.path = Path(self.directory.name) / "gdb.sock"
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.inotify_init1.argtypes = [ctypes.c_int]
-        libc.inotify_init1.restype = ctypes.c_int
-        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-        libc.inotify_add_watch.restype = ctypes.c_int
-        self.fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
-        if self.fd < 0:
-            self.directory.cleanup()
-            raise OSError(ctypes.get_errno(), "cannot watch debugger socket directory")
-        if libc.inotify_add_watch(self.fd, os.fsencode(self.directory.name), 0x100) < 0:
-            error = ctypes.get_errno()
-            os.close(self.fd)
-            self.directory.cleanup()
-            raise OSError(error, "cannot watch debugger socket creation")
-        return self
-
-    def wait_ready(self, timeout: float = 20.0) -> None:
-        deadline = time.monotonic() + timeout
-        while not self.path.is_socket():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
-                raise TimeoutError("QEMU did not create its debugger socket")
-            os.read(self.fd, 65536)
-
-    def __exit__(self, *_args):
-        os.close(self.fd)
-        self.directory.cleanup()
+def plugin_option(plugin: str, socket_path: Path, identity: PluginLaunchIdentity,
+                  start: int, stop: int, *, coarse: bool,
+                  cutpoints: tuple[int, ...] = ()) -> str:
+    fields = [
+        plugin, f"socket={socket_path}", f"start={start}", f"stop={stop}",
+        f"binary-sha256={identity.binary_sha256}",
+        f"argv-sha256={identity.argv_sha256}",
+        f"env-sha256={identity.env_sha256}",
+        f"cpu-sha256={identity.cpu_sha256}",
+    ]
+    if coarse:
+        fields.append("coarse=on")
+    fields.extend(f"cutpoint={address}" for address in cutpoints)
+    return ",".join(fields)
 
 
-def validate_report(document: dict, *, stop: int, mismatch: bool, coarse: bool) -> None:
-    if document.get("schema") != "focaccia-qemu-validation-v1":
-        raise ValueError("unexpected validation report schema")
+def discover_execution(binary: Path, qemu: str, plugin: str, directory: Path) -> dict:
+    """Observe only control/action boundaries; all instruction semantics come from TIR."""
+    entry, loads = elf_loads(binary)
+    identity = launch_identity(binary)
+    socket_path = directory / "discovery.sock"
+    listener = PluginListener(str(socket_path), ArchAArch64("little"), expected_identity=identity)
+    listener.start()
+    text_start = min(base for base, flags, _ in loads if flags & 1)
+    command = [qemu, "-cpu", "max,sve=off", "-plugin",
+               plugin_option(plugin, socket_path, identity, text_start, MASK64,
+                             coarse=False), str(binary)]
+    (directory / "discovery-command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with (directory / "discovery.stdout").open("wb") as stdout, (
+        directory / "discovery.stderr"
+    ).open("wb") as stderr:
+        process = subprocess.Popen(command, env={}, stdout=stdout, stderr=stderr)
+        transport, handshake = listener.accept()
+        sequence: list[tuple[int, str]] = []
+        events: list[dict] = []
+        terminal_pending = False
+        try:
+            while True:
+                event = transport.receive_event()
+                events.append({
+                    "kind": event.kind, "sequence": event.sequence, "epoch": event.epoch,
+                    "pc": event.pc, "address": event.address, "size": event.size,
+                    "auxiliary": event.auxiliary, "value": event.value.hex(),
+                })
+                if event.kind == EVENT_STORE:
+                    if transport.read_memory(event.address, event.size) != event.value:
+                        raise RuntimeError("store event is not coherent at its declared epoch")
+                elif event.kind == EVENT_AARCH64_SVC_ENTRY:
+                    terminal_pending = event.auxiliary == 94
+                elif event.kind == EVENT_CUTPOINT:
+                    if transport.read_register("pc").value != event.pc:
+                        raise RuntimeError("cutpoint PC disagrees with register state")
+                    sequence.append((event.pc, transport.read_memory(event.pc, 4).hex()))
+                    if terminal_pending:
+                        transport.finish()
+                        break
+                transport.advance()
+        finally:
+            listener.close()
+        returncode = process.wait(timeout=30)
+    if returncode != 0 or (directory / "discovery.stdout").read_bytes() != b"-1\n":
+        raise RuntimeError("fixed discovery execution did not naturally exit 0 with '-1'")
+    document = {
+        "pid": handshake.pid, "returncode": returncode, "instructions": sequence,
+        "events": events, "writev_result": 3,
+    }
+    (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
+    return document
+
+
+def discover_logged_execution(binary: Path, qemu: str, directory: Path, fixed: dict) -> dict:
+    """Recover uninstrumented TB control flow; instruction semantics remain TIR-only."""
+    log_path = directory / "qemu-exec.log"
+    command = [qemu, "-cpu", "max,sve=off", "-d", "in_asm,exec,nochain",
+               "-D", str(log_path), str(binary)]
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+    completed = subprocess.run(command, env={}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=60, check=False)
+    (directory / "stdout").write_bytes(completed.stdout)
+    (directory / "stderr").write_bytes(completed.stderr)
+    if completed.returncode != 0 or completed.stdout != b"4611686018427387903\n":
+        raise RuntimeError("regression-injected uninstrumented execution did not reproduce #2248")
+    blocks: dict[int, bytes] = {}
+    traces: list[int] = []
+    pending_pc = None
+    pending_bytes = bytearray()
+    for line in log_path.read_text().splitlines():
+        address = re.match(r"0x([0-9a-f]+):", line)
+        if address is not None and pending_pc is None:
+            pending_pc = int(address.group(1), 16)
+        encoded = re.match(r"OBJD-T: ([0-9a-f]+)$", line)
+        if encoded is not None:
+            pending_bytes.extend(bytes.fromhex(encoded.group(1)))
+        executed = re.match(r"Trace \d+: .*\[[^/]*/([0-9a-f]{16})/", line)
+        if executed is not None:
+            pc = int(executed.group(1), 16)
+            if pending_pc is not None:
+                if pending_pc != pc or not pending_bytes or len(pending_bytes) % 4:
+                    raise ValueError("malformed QEMU translation-block log")
+                old = blocks.setdefault(pc, bytes(pending_bytes))
+                if old != pending_bytes:
+                    raise ValueError("one guest PC produced conflicting translation blocks")
+                pending_pc, pending_bytes = None, bytearray()
+            traces.append(pc)
+    sequence = []
+    for pc in traces:
+        block = blocks.get(pc)
+        if block is None:
+            raise ValueError(f"execution log references unknown block {pc:#x}")
+        sequence.extend((pc + offset, block[offset:offset + 4].hex())
+                        for offset in range(0, len(block), 4))
+    if not sequence:
+        raise ValueError("empty injected dynamic instruction sequence")
+    document = {
+        "pid": fixed["pid"], "returncode": completed.returncode,
+        "instructions": sequence, "events": fixed["events"],
+        "control_flow_source": "uninstrumented QEMU TB execution log",
+        "writev_result": len(completed.stdout),
+    }
+    (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
+    return document
+
+
+def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Path):
+    entry, loads = elf_loads(binary)
+    sequence = [(int(pc), bytes.fromhex(code)) for pc, code in discovery["instructions"]]
+    if not sequence or sequence[0][0] != entry:
+        raise ValueError("dynamic instruction sequence does not start at ELF entry")
+    svc_entries = {
+        event["pc"]: event for event in discovery["events"]
+        if event["kind"] == EVENT_AARCH64_SVC_ENTRY
+    }
+    if [event["auxiliary"] for event in svc_entries.values()] != [96, 29, 66, 94]:
+        raise ValueError("unexpected static-musl syscall profile")
+    terminal_pc, terminal_code = sequence[-1]
+    if svc_entries.get(terminal_pc, {}).get("auxiliary") != 94 or terminal_code != b"\x01\0\0\xd4":
+        raise ValueError("dynamic sequence does not end at exit_group SVC")
+
+    unique = list(dict.fromkeys((pc, code) for pc, code in sequence[:-1] if pc not in svc_entries))
+    payload = "".join(f"{pc} {code.hex()}\n" for pc, code in unique)
+    completed = subprocess.run(
+        [oracle, "--export-transitions"], input=payload, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=True,
+        env={key: value for key, value in os.environ.items() if not key.startswith(("TIR_", "TIRAMISU_"))},
+    )
+    lines = completed.stdout.splitlines()
+    if len(lines) != len(unique):
+        raise RuntimeError("TIR batch response cardinality mismatch")
+    decoded = {
+        key: decode_response(line, key[0], key[1])
+        for key, line in zip(unique, lines, strict=True)
+    }
+
+    arch = ArchAArch64("little")
+    image = ProgramState(arch)
+    for base, flags, raw in loads:
+        if flags & 1:
+            image.write_memory(base, raw)
+    context = DisassemblyContext(image)
+    transforms = []
+    set_tid_boundary = None
+    for index, ((pc, code), (next_pc, _)) in enumerate(zip(sequence[:-1], sequence[1:], strict=True)):
+        instruction = context.disassemble(pc)
+        svc = svc_entries.get(pc)
+        outputs: dict[Expr, Expr]
+        if svc is None:
+            _, outputs = decoded[(pc, code)]
+        else:
+            number = svc["auxiliary"]
+            expected = {96: ExprId("__focaccia_execution_tid", 64),
+                        29: ExprInt(MASK64 - 24, 64),
+                        66: ExprInt(discovery["writev_result"], 64)}.get(number)
+            if expected is None:
+                raise ValueError(f"unsupported interior syscall {number}")
+            outputs = {ExprId("PC", 64): ExprInt(pc + 4, 64), ExprId("X0", 64): expected}
+            if next_pc != pc + 4:
+                raise ValueError("interior SVC did not resume at its architectural successor")
+            if number == 96:
+                descriptor = NoReplayActionDescriptor(arch.key, pc, NoReplayActionKind.SET_TID_ADDRESS)
+                set_tid_boundary = NoReplaySetTidBoundary(
+                    index, descriptor, svc["address"], discovery["pid"]
+                )
+        transforms.append(SymbolicTransform(1, outputs, [instruction], arch, pc, next_pc))
+
+    if set_tid_boundary is None:
+        raise ValueError("set_tid_address was not retained as an interior action")
+    terminal_descriptor = NoReplayActionDescriptor(
+        arch.key, terminal_pc, NoReplayActionKind.EXIT_GROUP
+    )
+    completion = TraceCompletion(
+        terminal_pc, len(transforms), len(transforms) + 1,
+        ExecutionOutcome(ExecutionState.EXITED, exit_status=0),
+        terminal_descriptor, ExitAction(0, ExitScope.GROUP),
+        no_replay_set_tid=(set_tid_boundary,),
+    )
+    environment = TraceEnvironment(
+        str(binary), (), (), start_address=entry, stop_address=terminal_pc,
+        architecture=arch.key,
+    )
+    trace = MaterializedTrace(
+        transforms, environment, (pc for pc, _ in sequence[:-1]),
+        scope=TraceScope.WHOLE_PROGRAM, completion=completion,
+    )
+    trace_path = directory / "oracle.json"
+    serialize_transformations(trace, trace_path)
+
+    audit = subprocess.run(
+        [oracle, "--audit-classes"],
+        input="".join(f"{pc} {code.hex()}\n" for pc, code in sequence), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=True,
+        env={key: value for key, value in os.environ.items() if not key.startswith(("TIR_", "TIRAMISU_"))},
+    )
+    classes = [line.split(maxsplit=2)[2] for line in audit.stdout.splitlines()]
+    audit_document = {
+        "instruction_count": len(sequence),
+        "transform_count": len(transforms),
+        "classes": {name: classes.count(name) for name in sorted(set(classes))},
+        "unique_opcode_count": len({code for _, code in sequence}),
+        "svc_policy": {"96": "context-bound set_tid_address", "29": "controlled ENOTTY",
+                       "66": "exact 3-byte writev", "94": "terminal exit_group"},
+    }
+    (directory / "instruction-audit.json").write_text(json.dumps(audit_document, indent=2) + "\n")
+    return trace_path, trace, audit_document
+
+
+def wait_for_file(path: Path, process: subprocess.Popen, timeout: float = 180.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if process.poll() is not None:
+            raise RuntimeError(f"validator exited before terminal readiness: {process.returncode}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("terminal readiness timed out")
+        time.sleep(0.01)
+
+
+def validate_report(document: dict, *, mismatch: bool, terminal_pc: int) -> None:
     expected_status = "mismatch" if mismatch else "accepted"
     if document.get("status") != expected_status:
         raise ValueError(f"expected {expected_status}, got {document.get('status')}")
-    count = 1 if coarse else 7
-    trace = document["trace"]
-    if (
-        not trace["complete"]
-        or not trace["terminal_reached"]
-        or trace["terminal_pc"] != stop
-        or trace["transform_count"] != count
-        or trace["state_count"] != count + 1
-    ):
-        raise ValueError(f"incomplete witness observations: {trace}")
-    if document["replay"]["active"] or document["replay"]["record_count"]:
-        raise ValueError("record/replay unexpectedly participated")
-    if document["completion"]["scope"] != TraceScope.WITNESS.value:
-        raise ValueError("bounded witness was misclassified")
-    validation = document["validation"]
-    diagnostics = validation["diagnostics"]
-    if validation["entry_count"] != count:
-        raise ValueError("missing validation transitions")
-    if coarse:
-        expected_diagnostic = {
-            "level": "info",
-            "code": "symbolic-transforms-composed",
-            "concrete_index": 1,
-            "transform_index": 0,
-        }
-        if len(diagnostics) != 1 or any(
-            diagnostics[0].get(key) != value for key, value in expected_diagnostic.items()
-        ):
-            raise ValueError("missing coarse-composition evidence")
-    elif diagnostics:
-        raise ValueError("unexpected granular diagnostics")
-    errors = [error for entry in validation["entries"] for error in entry["errors"]]
+    if not document["completion"]["complete"] or not document["completion"]["execution_complete"]:
+        raise ValueError("whole-program terminal evidence is incomplete")
+    if document["completion"]["scope"] != TraceScope.WHOLE_PROGRAM.value:
+        raise ValueError("whole-program scope was not retained")
+    if document["trace"]["terminal_pc"] != terminal_pc:
+        raise ValueError("terminal cutpoint was not bound")
+    errors = [error for entry in document["validation"]["entries"] for error in entry["errors"]]
     if mismatch:
-        if len(errors) != 1 or errors[0].get("severity") != "confirmed" or errors[0].get(
-            "subject"
-        ) != "X0":
-            raise ValueError(f"expected one confirmed X0 mismatch, got {errors}")
+        if len(errors) != 1 or errors[0].get("severity") != "confirmed" or errors[0].get("subject") != "X0":
+            raise ValueError(f"expected one confirmed localized X0 mismatch, got {errors}")
     elif errors:
-        raise ValueError(f"accepted execution produced errors: {errors}")
-    if any(error.get("severity") in ("possible", "incomplete") for error in errors):
-        raise ValueError("validation retained uncertain errors")
+        raise ValueError(f"fixed execution produced errors: {errors}")
 
 
-def _run_case(
-    args, binary, trace_path, directory, start, stop, *, qemu_path, plugin_path, coarse, mismatch
-):
-    report_path = directory / "report.json"
-    with PrivateGdbSocket() as channel:
-        common = [
-            "--symb-trace", str(trace_path),
-            "--report", str(report_path),
-            "--output", str(directory / "states.json"),
-        ]
-        if coarse:
-            # Only source and destination callbacks are installed. There is no
-            # debugger, breakpoint, or per-instruction transaction in the TB.
-            binary_hash = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
-            identity = (
-                f",binary-sha256={binary_hash}"
-                f",argv-sha256={manifest_sha256([])}"
-                f",env-sha256={manifest_sha256([])}"
-                f",cpu-sha256={manifest_sha256({'architecture': {'isa': 'aarch64', 'endianness': 'little'}, 'profile': 'qemu-user-default-v1'})}"
-            )
-            plugin = (
-                f"{plugin_path},socket={channel.path},start={start},stop={stop},coarse=on"
-                f"{identity}"
-            )
-            qemu_command = [qemu_path, "-plugin", plugin, str(binary)]
-            validate_command = [
-                args.validator, "--use-socket", str(channel.path),
-                "--guest-arch", "aarch64l", "--cutpoint-address", hex(stop), *common,
-            ]
-        else:
-            # Intentional negative control: GDB single-steps all seven
-            # instructions, which suppresses the optimizer chain in bad QEMU.
-            qemu_command = [qemu_path, "-g", str(channel.path), str(binary)]
-            validate_command = [
-                args.validator, "--gdb", args.gdb, "--remote", str(channel.path),
-                "--executable", str(binary), *common,
-            ]
-        (directory / "commands.json").write_text(
-            json.dumps({"qemu": qemu_command, "validator": validate_command}, indent=2) + "\n"
-        )
-        print(f"Running {directory.name}", flush=True)
-        qemu = None
-        validator = None
-        try:
-            with (directory / "qemu.log").open("w") as qemu_log, (
-                directory / "validator.log"
-            ).open("w") as validator_log:
-                if coarse:
-                    validator = subprocess.Popen(
-                        validate_command, stdout=validator_log, stderr=subprocess.STDOUT
-                    )
-                    channel.wait_ready()
-                    qemu = subprocess.Popen(
-                        qemu_command, stdout=qemu_log, stderr=subprocess.STDOUT
-                    )
-                    validator_status = validator.wait(timeout=90)
-                else:
-                    qemu = subprocess.Popen(
-                        qemu_command, stdout=qemu_log, stderr=subprocess.STDOUT
-                    )
-                    channel.wait_ready()
-                    validator_status = subprocess.run(
-                        validate_command,
-                        stdout=validator_log,
-                        stderr=subprocess.STDOUT,
-                        timeout=90,
-                        check=False,
-                    ).returncode
-            if validator_status != 0:
-                raise RuntimeError(f"validator failed with exit {validator_status}")
-            document = json.loads(report_path.read_text())
-            validate_report(document, stop=stop, mismatch=mismatch, coarse=coarse)
-            with (directory / "states.json").open() as stream:
-                snapshots = parse_snapshots(stream)
-            if len(snapshots) != (2 if coarse else 8):
-                raise ValueError("unexpected concrete state cardinality")
-            after = snapshots[-1]
-            for name, value in {"X2": 0, "X3": 1, "X4": 2}.items():
-                observed = next(
-                    (state.read_register(name) for state in snapshots if state.test_register(name)),
-                    None,
-                )
-                if observed != value:
-                    raise ValueError(f"unexpected or unavailable fixture input {name}")
-            actual_x0 = after.read_register("X0")
-            if mismatch:
-                if actual_x0 == MASK64:
-                    raise ValueError("injected coarse execution did not reproduce #2248")
-            elif actual_x0 != MASK64:
-                raise ValueError(f"accepted execution produced X0={actual_x0:#x}")
-            exit_status = qemu.wait(timeout=10)
-            if exit_status != 0:
-                raise RuntimeError(f"guest lifecycle failed after detach: {exit_status}")
-            return {
-                "status": document["status"],
-                "backend": "plugin" if coarse else "gdb",
-                "mode": "coarse" if coarse else "granular",
-                "transitions": 1 if coarse else 7,
-                "states": 2 if coarse else 8,
-                "x0": hex(actual_x0),
-                "guest_exit_status": exit_status,
-            }
-        except BaseException:
-            for name in ("qemu.log", "validator.log", "report.json"):
-                path = directory / name
-                if path.exists():
-                    print(f"--- {path} ---\n{path.read_text(errors='replace')[-20000:]}", file=sys.stderr)
-            raise
-        finally:
-            for process in (validator, qemu):
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-
-
-def run_case(args, binary, trace_path, directory, start, stop, **options):
+def run_case(args, binary: Path, trace_path: Path, trace, directory: Path, *, mismatch: bool):
     directory.mkdir()
-    return _run_case(args, binary, trace_path, directory, start, stop, **options)
-
-
-def qemu_identity(path: str, plugin_path: str, *, injected: bool) -> dict:
-    executable = Path(path).resolve()
-    plugin = Path(plugin_path).resolve()
+    identity = launch_identity(binary)
+    terminal_pc = trace.completion.final_pc
+    fixture = json.loads((args.fixture / "manifest.json").read_text())
+    witness = fixture["witness_return"]
+    socket_path = directory / "plugin.sock"
+    ready_path, evidence_path = directory / "terminal-ready.json", directory / "terminal-evidence.json"
+    report_path = directory / "report.json"
+    qemu_path = args.qemu_injected if mismatch else args.qemu_fixed
+    plugin_path = args.plugin_injected if mismatch else args.plugin_fixed
+    addresses = trace.require_addresses()
+    text_start = min(addresses)
+    # Bound symbolic DAG depth without inserting a callback inside callme's
+    # optimizer-sensitive instruction chain. Address cutpoints naturally recur
+    # on loops and therefore also bound repeated dynamic paths.
+    periodic = {
+        address for address in addresses
+        if not fixture["callme"] < address < fixture["callme_stop"]
+    }
+    cutpoints = tuple(sorted(periodic | {trace.env.start_address, witness, terminal_pc}))
+    text_stop = max((*addresses, terminal_pc))
+    plugin = plugin_option(plugin_path, socket_path, identity, text_start,
+                           text_stop, coarse=True, cutpoints=cutpoints)
+    qemu_command = [qemu_path, "-cpu", "max,sve=off", "-plugin", plugin, str(binary)]
+    cutpoint_set = set(cutpoints) | {text_start, text_stop}
+    dynamic_cutpoints = [
+        address for address in (*addresses, terminal_pc) if address in cutpoint_set
+    ]
+    if not dynamic_cutpoints or dynamic_cutpoints[0] != trace.env.start_address \
+            or dynamic_cutpoints[-1] != terminal_pc:
+        raise RuntimeError("dynamic cutpoints do not bind entry and terminal boundaries")
+    validator_command = [
+        args.validator, "--use-socket", str(socket_path), "--guest-arch", "aarch64l",
+        "--symb-trace", str(trace_path), "--report", str(report_path),
+        "--output", str(directory / "states.json"),
+        "--plugin-terminal-ready", str(ready_path),
+        "--plugin-terminal-evidence", str(evidence_path),
+    ]
+    for address in dynamic_cutpoints:
+        validator_command.extend(("--cutpoint-address", hex(address)))
+    (directory / "commands.json").write_text(json.dumps(
+        {"qemu": qemu_command, "validator": validator_command, "environment": [],
+         "cpu_profile": CPU_PROFILE, "cutpoint_count": len(cutpoints)}, indent=2) + "\n")
+    with (directory / "validator.log").open("wb") as validator_log, (
+        directory / "qemu.stdout"
+    ).open("wb") as qemu_stdout, (directory / "qemu.stderr").open("wb") as qemu_stderr:
+        validator = subprocess.Popen(validator_command, env={}, stdout=validator_log,
+                                     stderr=subprocess.STDOUT)
+        wait_for_file(socket_path, validator)
+        qemu = subprocess.Popen(qemu_command, env={}, stdout=qemu_stdout, stderr=qemu_stderr)
+        wait_for_file(ready_path, validator)
+        binding = json.loads(ready_path.read_text())
+        qemu_status = qemu.wait(timeout=30)
+        evidence_path.write_text(json.dumps({
+            "schema": "focaccia-plugin-terminal-evidence-v1",
+            "nonce": binding["nonce"], "pid": binding["pid"],
+            "binarySha256": binding["binarySha256"], "returncode": qemu_status,
+        }, sort_keys=True) + "\n")
+        validator_status = validator.wait(timeout=30)
+    if qemu_status != 0:
+        raise RuntimeError(f"guest did not naturally exit 0: {qemu_status}")
+    expected_validator_status = 1 if mismatch else 0
+    if validator_status != expected_validator_status:
+        raise RuntimeError(f"validator exit {validator_status}, expected {expected_validator_status}")
+    document = json.loads(report_path.read_text())
+    validate_report(document, mismatch=mismatch, terminal_pc=terminal_pc)
     return {
-        "path": str(executable),
-        "sha256": file_sha256(executable),
-        "plugin_path": str(plugin),
-        "plugin_sha256": file_sha256(plugin),
-        "version": subprocess.check_output([path, "--version"], text=True).splitlines()[0],
-        "regression_injected": injected,
+        "status": document["status"], "validator_exit_status": validator_status,
+        "guest_exit_status": qemu_status, "terminal_evidence": "complete",
     }
 
 
@@ -347,7 +432,7 @@ def main() -> None:
     parser.add_argument("--qemu-injected", required=True)
     parser.add_argument("--plugin-fixed", required=True)
     parser.add_argument("--plugin-injected", required=True)
-    parser.add_argument("--gdb", required=True)
+    parser.add_argument("--gdb")  # Retained CLI compatibility; never used.
     parser.add_argument("--validator", required=True)
     parser.add_argument("--tir-revision", required=True)
     parser.add_argument("--qemu-revision", required=True)
@@ -357,70 +442,57 @@ def main() -> None:
     root.mkdir(parents=True, exist_ok=False)
     try:
         binary = (args.fixture / "program.elf").resolve()
-        fixture_manifest = json.loads((args.fixture / "manifest.json").read_text())
-        digest = file_sha256(binary)
-        if fixture_manifest.get("schema") != 1 or digest != fixture_manifest.get("sha256"):
+        fixture = json.loads((args.fixture / "manifest.json").read_text())
+        entry, loads = elf_loads(binary)
+        if fixture.get("schema") != 2 or fixture["entry"] != entry or fixture["sha256"] != file_sha256(binary):
             raise ValueError("fixture manifest mismatch")
-        start, stop = fixture_manifest["start"], fixture_manifest["stop"]
-        reference = generate_reference(binary, start, stop, args.oracle)
-        trace_path = root / "oracle.json"
-        serialize_transformations(reference, trace_path)
-        identities = {
-            "fixed": qemu_identity(args.qemu_fixed, args.plugin_fixed, injected=False),
-            "injected": qemu_identity(
-                args.qemu_injected, args.plugin_injected, injected=True
-            ),
-        }
-        plan = {
-            "schema": 1,
-            "binary": str(binary),
-            "binary_sha256": digest,
-            "source_sha256": fixture_manifest["source_sha256"],
-            "wrapper_sha256": fixture_manifest["wrapper_sha256"],
+        if read_image(loads, fixture["callme"], len(EXPECTED_CALLME)) != EXPECTED_CALLME:
+            raise ValueError("fixture does not contain canonical callme.S bytes")
+        discovery_dir = root / "discovery-fixed"
+        discovery_dir.mkdir()
+        discovery = discover_execution(binary, args.qemu_fixed, args.plugin_fixed, discovery_dir)
+        trace_path, trace, audit = generate_reference(binary, discovery, args.oracle, root)
+        injected_discovery_dir = root / "discovery-injected"
+        injected_discovery_dir.mkdir()
+        injected_discovery = discover_logged_execution(
+            binary, args.qemu_injected, injected_discovery_dir, discovery
+        )
+        injected_oracle_dir = root / "oracle-injected"
+        injected_oracle_dir.mkdir()
+        injected_trace_path, injected_trace, injected_audit = generate_reference(
+            binary, injected_discovery, args.oracle, injected_oracle_dir
+        )
+        if set(audit["classes"]) != set(injected_audit["classes"]):
+            raise ValueError("fixed and injected paths execute different instruction classes")
+        assert trace.completion is not None
+        manifest = {
+            "schema": 2, "scope": "whole-program", "binary": str(binary),
+            "binary_sha256": file_sha256(binary), "main_sha256": fixture["main_sha256"],
+            "callme_sha256": fixture["callme_sha256"], "entry": entry,
+            "terminal_pc": trace.completion.final_pc, "transform_count": len(trace),
             "oracle_sha256": file_sha256(trace_path),
-            "start": start,
-            "stop": stop,
-            "instruction_count": len(reference),
-            "instruction_bytes": EXPECTED_CODE.hex(),
-            "scope": "witness",
-            "semantics": "ASL/TIR derived directly from exact ELF bytes",
+            "injected_oracle_sha256": file_sha256(injected_trace_path),
             "tir_revision": args.tir_revision,
-            "qemu_revision": args.qemu_revision,
-            "qemu": identities,
-            "native_capture": False,
-            "record_replay": False,
-            "gdb_state_injection": False,
+            "qemu_revision": args.qemu_revision, "argv": [], "environment": [],
+            "cpu_profile": CPU_PROFILE, "instruction_audit": audit,
+            "record_replay": False, "miasm_semantics": False,
+            "synthetic_state_mutation": False,
         }
-        (root / "manifest.json").write_text(json.dumps(plan, indent=2) + "\n")
+        (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         cases = {
-            "fixed-granular": run_case(
-                args, binary, trace_path, root / "fixed-granular", start, stop,
-                qemu_path=args.qemu_fixed, plugin_path=args.plugin_fixed,
-                coarse=False, mismatch=False
-            ),
-            "fixed-coarse": run_case(
-                args, binary, trace_path, root / "fixed-coarse", start, stop,
-                qemu_path=args.qemu_fixed, plugin_path=args.plugin_fixed,
-                coarse=True, mismatch=False
-            ),
-            "injected-granular": run_case(
-                args, binary, trace_path, root / "injected-granular", start, stop,
-                qemu_path=args.qemu_injected, plugin_path=args.plugin_injected,
-                coarse=False, mismatch=False
-            ),
-            "injected-coarse": run_case(
-                args, binary, trace_path, root / "injected-coarse", start, stop,
-                qemu_path=args.qemu_injected, plugin_path=args.plugin_injected,
-                coarse=True, mismatch=True
+            "fixed": run_case(args, binary, trace_path, trace, root / "fixed", mismatch=False),
+            "injected": run_case(
+                args, binary, injected_trace_path, injected_trace,
+                root / "injected", mismatch=True
             ),
         }
-        result = {"schema": 1, "status": "passed", "scope": "witness", "cases": cases}
+        result = {"schema": 2, "status": "passed", "scope": "whole-program", "cases": cases}
         (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result, indent=2))
     except BaseException as error:
-        (root / "result.json").write_text(
-            json.dumps({"schema": 1, "status": "failed", "error": str(error)}, indent=2) + "\n"
-        )
+        (root / "result.json").write_text(json.dumps(
+            {"schema": 2, "status": "failed", "error": str(error)}, indent=2
+        ) + "\n")
         raise
 
 

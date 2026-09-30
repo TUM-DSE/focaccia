@@ -2,7 +2,10 @@
 
 import json
 import os
+from pathlib import Path
+import subprocess
 
+from miasm.expression.expression import ExprId
 import pytest
 
 from focaccia.arch.aarch64 import ArchAArch64
@@ -198,10 +201,72 @@ def test_composition_preserves_dependencies_and_flags(backend):
     assert "X3" not in combined.get_used_registers()
 
 
-@pytest.mark.parametrize("code", ["1f2003d5", "010000d4", "000040f9"])
-def test_other_instruction_classes_remain_explicitly_unsupported(backend, code):
-    with pytest.raises(UnsupportedInstructionError):
-        transform(backend, code)
+def audited_classes():
+    path = Path(__file__).parents[1] / "reproducers/issue-2248-tir/instruction-classes.json"
+    document = json.loads(path.read_text())
+    assert document["schema"] == 1
+    return document["classes"]
+
+
+def test_every_dynamic_static_musl_instruction_class_is_audited_and_exported(backend):
+    fixtures = audited_classes()
+    payload = "".join(f"{item['pc']} {item['bytes']}\n" for item in fixtures)
+    completed = subprocess.run(
+        [backend.executable, "--audit-classes"], input=payload, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120,
+    )
+    observed = [line.split(maxsplit=2)[2] for line in completed.stdout.splitlines()]
+    assert observed == [item["class"] for item in fixtures]
+    assert len(observed) == len(set(observed)) == 32
+    for item in fixtures:
+        if item["class"] == "decode_aarch64_system_exceptions_runtime_svc":
+            with pytest.raises(UnsupportedInstructionError, match="residual helper"):
+                transform(backend, item["bytes"], item["pc"])
+        else:
+            source = state(item["pc"])
+            for index in range(31):
+                source.write_register(f"X{index}", item["pc"] + 4 if index == 30 else 0)
+            source.write_register("SP", 0)
+            source.write_memory(item["pc"], bytes.fromhex(item["bytes"]))
+            instruction = DisassemblyContext(source).disassemble(item["pc"])
+            next_pc, outputs = backend.generate(instruction, source, DisassemblyContext(source))
+            assert next_pc is not None and ExprId("PC", 64) in outputs
+
+
+def test_branch_memory_address_system_vector_and_mul_semantics(backend):
+    branch = transform(backend, "01000014", 0x4001D4)  # B 0x4001d8
+    assert branch.eval_register_transforms(state(0x4001D4))["PC"] == 0x4001D8
+
+    address = transform(backend, "01000090", 0x4001C8)  # ADRP X1, 0x400000
+    assert address.eval_register_transforms(state(0x4001C8))["X1"] == 0x400000
+
+    load = transform(backend, "418440f8", 0x4001E8)  # LDR X1, [X2], #8
+    before = state(0x4001E8, X2=0x8000)
+    before.write_memory(0x8000, bytes.fromhex("8877665544332211"))
+    loaded = load.eval_register_transforms(before)
+    assert loaded["X1"] == 0x1122334455667788 and loaded["X2"] == 0x8008
+
+    system = transform(backend, "e5003bd5", 0x402E48)  # MRS X5, DCZID_EL0
+    assert system.eval_register_transforms(state(0x402E48))["X5"] == 7
+
+    vector = transform(backend, "200c014e", 0x402DB0)  # DUP V0.16B, W1
+    assert vector.eval_register_transforms(state(0x402DB0, X1=0xAB))["V0"] == int.from_bytes(
+        bytes([0xAB]) * 16, "little"
+    )
+
+    multiply = transform(backend, "417cce9b", 0x40262C)  # UMULH X1, X2, X14
+    operands = state(0x40262C, X2=0xFEDCBA9876543210, X14=0x123456789ABCDEF0)
+    expected = (operands.read_register("X2") * operands.read_register("X14")) >> 64
+    assert multiply.eval_register_transforms(operands)["X1"] == expected
+
+
+def test_svc_is_deliberately_external_action_not_synthetic_tir_state(backend):
+    with pytest.raises(UnsupportedInstructionError, match="residual helper"):
+        transform(backend, "010000d4", 0x402F44)
+    harness = (Path(__file__).parent / "probes/tir_no_replay_smoke.py").read_text()
+    for number in (96, 29, 66, 94):
+        assert str(number) in harness
+    assert '"synthetic_state_mutation": False' in harness
 
 
 def test_configuration_memory_cannot_replace_instruction_bytes(backend):

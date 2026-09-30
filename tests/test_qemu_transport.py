@@ -16,10 +16,8 @@ from focaccia.qemu.transport import (
     HANDSHAKE_ACK,
     PLUGIN_API_VERSION,
     PLUGIN_MAGIC,
-    PLUGIN_PROTOCOL_VERSION,
     PluginEOFError,
     PluginProtocolError,
-    PluginProtocolVersionError,
     PluginLaunchIdentity,
     PluginTransport,
     read_exact,
@@ -79,16 +77,16 @@ def handshake(
     *,
     target: bytes = b"x86_64",
     endianness: int = 1,
-    protocol_version: int = PLUGIN_PROTOCOL_VERSION,
+    protocol_reserved: bytes = bytes(4),
     api_min: int = PLUGIN_API_VERSION,
     api_current: int = PLUGIN_API_VERSION,
     capabilities: int = CAPABILITIES,
     identity: PluginLaunchIdentity = IDENTITY,
 ) -> bytes:
     return struct.pack(
-        "<8sII16sBBBB4sQ128s",
+        "<8s4sI16sBBBB4sQ128s",
         PLUGIN_MAGIC,
-        protocol_version,
+        protocol_reserved,
         1234,
         target,
         endianness,
@@ -268,7 +266,6 @@ def test_protocol_handshake_negotiates_and_validates_guest_identity():
 
     received = transport.receive_handshake()
 
-    assert received.version == PLUGIN_PROTOCOL_VERSION
     assert received.pid == 1234
     assert received.target == "x86_64"
     assert received.endianness == "little"
@@ -282,11 +279,15 @@ def test_protocol_handshake_negotiates_and_validates_guest_identity():
     transport.close()
     peer.close()
 
-    left, right = socket.socketpair()
-    with pytest.raises(PluginProtocolVersionError):
-        PluginTransport(left, x86.ArchX86(), version=99)
-    left.close()
-    right.close()
+
+def test_protocol_handshake_rejects_nonzero_reserved_format_bytes():
+    client, peer = socket.socketpair()
+    peer.sendall(handshake(protocol_reserved=b"\0\0\0\1"))
+    transport = PluginTransport(client, x86.ArchX86(), expected_identity=IDENTITY)
+    with pytest.raises(PluginProtocolError, match="protocol-reserved"):
+        transport.receive_handshake()
+    transport.close()
+    peer.close()
 
 
 @pytest.mark.parametrize(

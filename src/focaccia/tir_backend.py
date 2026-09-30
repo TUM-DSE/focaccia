@@ -55,7 +55,11 @@ def _fields(value: object, expected: set[str]) -> dict:
 
 class _ExpressionDecoder:
     def __init__(self) -> None:
-        self.remaining = 4096
+        # The response is already capped at 1 MiB. Extended-register flag
+        # semantics legitimately repeat a ~1,100-node carry/overflow cone for
+        # N/Z/C/V, so the old 4,096 aggregate budget rejected an audited musl
+        # CMP despite shallow depth and bounded wire size.
+        self.remaining = 65_536
 
     def decode(self, node: object, depth: int = 0) -> Expr:
         self.remaining -= 1
@@ -96,6 +100,7 @@ class _ExpressionDecoder:
             if op not in (
                 "add",
                 "sub",
+                "mul",
                 "eq",
                 "ne",
                 "and",
@@ -119,7 +124,7 @@ class _ExpressionDecoder:
                 unequal = ExprInt(int(op == "ne"), 1)
                 equal = ExprInt(int(op == "eq"), 1)
                 return ExprCond(left ^ right, unequal, equal)
-            names = {"add": "+", "and": "&", "or": "|", "xor": "^"}
+            names = {"add": "+", "mul": "*", "and": "&", "or": "|", "xor": "^"}
             return ExprOp(names[op], left, right)
         if kind == "unary":
             _fields(node, common | {"op", "value"})

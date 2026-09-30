@@ -8,4 +8,3 @@ callme:
   lsr   x13, x14, x4
   sxtb  x0, w13
   ret
-

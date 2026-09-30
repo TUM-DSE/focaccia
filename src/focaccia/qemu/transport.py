@@ -18,12 +18,11 @@ from focaccia.snapshot import MemoryAccessError, RegisterAccessError
 from .state import RegisterObservation
 
 
-PLUGIN_PROTOCOL_VERSION = 3
 PLUGIN_API_VERSION = 4
 PLUGIN_MAGIC = b"FOCPLUG\0"
-HANDSHAKE_ACK = b"FOCACPT3"
-FINISH_ACK = b"FOCFIN03" + bytes(8)
-ABORT_ACK = b"FOCABR03" + bytes(8)
+HANDSHAKE_ACK = b"FOCACPT\0"
+FINISH_ACK = b"FOCFIN\0\0" + bytes(8)
+ABORT_ACK = b"FOCABR\0\0" + bytes(8)
 
 COMMAND_SIZE = 32
 REGISTER_RESPONSE_SIZE = 104
@@ -121,7 +120,6 @@ class PluginEvent:
 
 @dataclass(frozen=True, slots=True)
 class PluginHandshake:
-    version: int
     pid: int
     target: str
     endianness: str
@@ -195,28 +193,21 @@ def _decode_fixed_string(raw: bytes, context: str) -> str:
 
 
 class PluginTransport:
-    """One owned connection to a single version-2 plugin instance."""
+    """One owned connection using the lockstep internal plugin wire format."""
 
     def __init__(
         self,
         connection: SocketLike,
         arch: Arch,
         *,
-        version: int = PLUGIN_PROTOCOL_VERSION,
         max_memory_payload: int = DEFAULT_MAX_MEMORY_PAYLOAD,
         expected_identity: PluginLaunchIdentity | None = None,
         required_capabilities: int | None = None,
     ):
-        if version != PLUGIN_PROTOCOL_VERSION:
-            raise PluginProtocolVersionError(
-                f"Unsupported plugin protocol version {version}; "
-                f"expected {PLUGIN_PROTOCOL_VERSION}."
-            )
         if max_memory_payload <= 0:
             raise ValueError("Plugin payload limit must be positive.")
         self._connection = connection
         self.arch = arch
-        self.version = version
         self.max_memory_payload = max_memory_payload
         self.expected_identity = expected_identity
         self.required_capabilities = required_capabilities
@@ -236,15 +227,13 @@ class PluginTransport:
     def receive_handshake(self) -> PluginHandshake:
         raw = read_exact(self._connection, HANDSHAKE_SIZE)
         (
-            magic, version, pid, raw_target, endianness_code, address_bits,
+            magic, reserved_protocol, pid, raw_target, endianness_code, address_bits,
             api_min, api_current, reserved, capabilities, identity_raw,
-        ) = struct.unpack("<8sII16sBBBB4sQ128s", raw)
+        ) = struct.unpack("<8s4sI16sBBBB4sQ128s", raw)
         if magic != PLUGIN_MAGIC:
             raise PluginProtocolError("Plugin supplied invalid handshake magic.")
-        if version != self.version:
-            raise PluginProtocolVersionError(
-                f"Plugin protocol version {version} does not match {self.version}."
-            )
+        if any(reserved_protocol):
+            raise PluginProtocolError("Plugin handshake protocol-reserved bytes are nonzero.")
         if pid <= 0:
             raise PluginProtocolError(f"Plugin supplied invalid process ID {pid}.")
         if any(reserved):
@@ -289,7 +278,7 @@ class PluginTransport:
             )
         self._connection.sendall(HANDSHAKE_ACK + struct.pack("<Q", required))
         return PluginHandshake(
-            version, pid, target, self.arch.endianness, address_bits,
+            pid, target, self.arch.endianness, address_bits,
             api_min, api_current, capabilities, identity,
         )
 

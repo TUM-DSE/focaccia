@@ -43,6 +43,7 @@ from focaccia.qemu.transport import (
     EVENT_AARCH64_SVC_ENTRY,
     EVENT_AARCH64_SVC_SUCCESSOR,
     EVENT_CUTPOINT,
+    EVENT_STORE,
     PluginEvent,
     PluginLaunchIdentity,
     PluginListener,
@@ -119,7 +120,7 @@ class PluginProgramState(CachedBackendProgramState):
         selected_name = requested_reg if use_narrow_alias else base_reg
         assert selected_name is not None
         if self.arch.archname == self.aarch64.archname and base_reg.startswith("V"):
-            wire_name = f"q{base_reg[1:]}"
+            wire_name = f"v{base_reg[1:]}"
         elif self.arch.archname == self.aarch64.archname and base_reg == "TPIDR":
             wire_name = "TPIDR_EL0"
         elif self.arch.archname == self.aarch64.archname and base_reg == "DCZID_EL0":
@@ -164,12 +165,15 @@ class PluginStateIterator:
         self._first_next = True
         self._closed = False
         self.cutpoint_addresses = cutpoint_addresses
+        self._cutpoint_index = 0
         self.events: list[PluginEvent] = []
         self.svc_evidence: list[AArch64SvcEvidence] = []
+        self.store_evidence: list[PluginEvent] = []
         self._pending_svc: PluginEvent | None = None
         self._event_protocol = True
-        if tuple(sorted(set(cutpoint_addresses))) != cutpoint_addresses:
-            raise ValueError("Plugin cutpoints must be unique and strictly increasing.")
+        if any(type(address) is not int or not 0 <= address < 1 << 64
+               for address in cutpoint_addresses):
+            raise ValueError("Plugin cutpoints must be ordered 64-bit addresses.")
         if listener is None and launch_identity is None:
             raise ValueError("Plugin launch identity is required for a listening iterator.")
         self._listener = listener or PluginListener(
@@ -182,10 +186,7 @@ class PluginStateIterator:
         except BaseException:
             self._listener.close()
             raise
-        info(
-            f"Connected to QEMU plugin process {handshake.pid} using protocol "
-            f"version {handshake.version}."
-        )
+        info(f"Connected to QEMU plugin process {handshake.pid}.")
         self.pid = handshake.pid
         self.state = PluginProgramState(arch, self.transport)
         self.state.execution_tid = handshake.pid
@@ -205,8 +206,10 @@ class PluginStateIterator:
         result._first_next = True
         result._closed = False
         result.cutpoint_addresses = cutpoint_addresses
+        result._cutpoint_index = 0
         result.events = []
         result.svc_evidence = []
+        result.store_evidence = []
         result._pending_svc = None
         result._event_protocol = hasattr(transport, "receive_event")
         result._listener = None
@@ -219,18 +222,23 @@ class PluginStateIterator:
         return self
 
     def next_cutpoint_pc(self, matcher: TransitionMatcher) -> int | None:
-        """Declare the next configured or immediate destination before advancing."""
-        current = self.state.read_pc()
-        return next(
-            (address for address in self.cutpoint_addresses if address > current),
-            matcher.current_destination_pc,
-        )
+        """Declare the next dynamic cutpoint before advancing."""
+        if self._cutpoint_index < len(self.cutpoint_addresses):
+            return self.cutpoint_addresses[self._cutpoint_index]
+        return matcher.current_destination_pc
 
     def _receive_cutpoint(self) -> None:
         while True:
             event = self.transport.receive_event()
             self.events.append(event)
-            if event.kind == EVENT_AARCH64_SVC_ENTRY:
+            if event.kind == EVENT_STORE:
+                # A store event is emitted at the next instruction callback,
+                # after QEMU committed the write and before that instruction
+                # executes. Bind its epoch to an immediate coherent read.
+                if self.transport.read_memory(event.address, event.size) != event.value:
+                    raise RuntimeError("Plugin store event is not coherent with guest memory.")
+                self.store_evidence.append(event)
+            elif event.kind == EVENT_AARCH64_SVC_ENTRY:
                 if self._pending_svc is not None:
                     raise RuntimeError("Nested AArch64 SVC entry events are invalid.")
                 self._pending_svc = event
@@ -244,6 +252,16 @@ class PluginStateIterator:
                 ))
                 self._pending_svc = None
             if event.kind == EVENT_CUTPOINT:
+                if self.cutpoint_addresses:
+                    if self._cutpoint_index >= len(self.cutpoint_addresses):
+                        raise RuntimeError("Plugin produced an undeclared extra cutpoint.")
+                    expected = self.cutpoint_addresses[self._cutpoint_index]
+                    if event.pc != expected:
+                        raise RuntimeError(
+                            f"Plugin cutpoint {event.pc:#x} does not match declared "
+                            f"dynamic cutpoint {expected:#x}."
+                        )
+                    self._cutpoint_index += 1
                 return
             self.transport.advance()
 
@@ -479,6 +497,8 @@ def _plugin_terminal_completion(
         )
         for boundary, event in zip(expected.no_replay_set_tid, set_tid_events, strict=True)
     )
+    if qemu.pid is None or any(event.result != qemu.pid for event in set_tid_events):
+        raise RuntimeError("SET_TID_ADDRESS result is not bound to the plugin process identity.")
     observed = replace(
         expected,
         transform_count=matched.consumed_transform_count,
@@ -557,7 +577,7 @@ def start_validation_server(
                     "isa": architecture.key.isa,
                     "endianness": architecture.key.endianness,
                 },
-                "profile": "qemu-user-default-v1",
+                "profile": "qemu-user-max-sve-off-v1",
             }),
         )
         launch_identity.digests()

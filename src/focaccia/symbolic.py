@@ -517,6 +517,17 @@ class _TransformEvaluator(MiasmSymbolResolver):
             return self._state.allocation_bases[occurrence]
         return super().resolve_register(regname)
 
+    def resolve_register_slice(
+        self, regname: str, register_size: int, start: int, stop: int
+    ) -> int | None:
+        if regname == EXECUTION_TID.name:
+            if register_size != 64 or start < 0 or start >= stop or stop > 64:
+                raise ValueError("Invalid independent execution TID slice.")
+            tid = self.resolve_register(regname)
+            assert tid is not None
+            return (tid >> start) & ((1 << (stop - start)) - 1)
+        return super().resolve_register_slice(regname, register_size, start, stop)
+
     def _ensure_write_index(self) -> None:
         if self._indexed_write_count == len(self._writes) or self._building_index:
             return

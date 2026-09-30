@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=55c77368248e4bd1218c3d74fc57d93c4b0d72a0&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=d92ddb83b8fc47914979b90abd81178acf226185&submodules=1";
       flake = true;
     };
 
@@ -239,42 +239,71 @@
       exec ${pythonEnv}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
     '';
 
-    # Build only: these native fixtures are never executed by flake checks.
+    # Exact upstream #2248 source, linked as a static-musl AArch64 process.
     tirSmokeFixture = pkgs.stdenvNoCC.mkDerivation {
-      pname = "tir-issue-2248-fixture";
+      pname = "tir-issue-2248-static-musl-fixture";
       version = "1";
       dontUnpack = true;
-      nativeBuildInputs = [ pkgs.llvmPackages_18.llvm pkgs.llvmPackages_18.lld pkgs.python3 ];
+      nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc pkgs.binutils pkgs.python3 ];
       buildPhase = ''
-        llvm-mc -triple=aarch64-linux-gnu -filetype=obj ${./reproducers/issue-2248.S} -o witness.o
-        llvm-mc -triple=aarch64-linux-gnu -filetype=obj ${./reproducers/issue-2248-tir/start.S} -o start.o
-        ld.lld -m aarch64elf -static -e _start -Ttext=0x400000 start.o witness.o -o program.elf
-        llvm-nm --defined-only program.elf > symbols.txt
+        ${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc \
+          -static -no-pie -O2 -Wl,--build-id=none \
+          ${./reproducers/issue-2248-tir/main.c} \
+          ${./reproducers/issue-2248-tir/callme.S} \
+          -o program.elf
+        nm --defined-only program.elf > symbols.txt
         python - <<'PY'
-        import hashlib, json
+        import hashlib, json, struct
         from pathlib import Path
         symbols = {parts[2]: int(parts[0], 16) for line in Path("symbols.txt").read_text().splitlines()
                    if len(parts := line.split()) == 3}
-        start = symbols["callme"]
         image = Path("program.elf").read_bytes()
-        # callme contains seven witness instructions followed by RET. Stop at RET.
-        stop = start + 7 * 4
-        expected = bytes.fromhex("5f0003ebeca79f9a8b1d00127f010071ee039fdacd25c49aa01d4093")
-        # The live harness independently extracts and checks these ELF bytes.
-        assert stop - start == len(expected)
+        entry = struct.unpack_from("<Q", image, 24)[0]
+        callme = symbols["callme"]
+        main = symbols["main"]
+        expected = bytes.fromhex("5f0003ebeca79f9a8b1d00127f010071ee039fdacd25c49aa01d4093c0035fd6")
+        phoff = struct.unpack_from("<Q", image, 32)[0]
+        phentsize, phnum = struct.unpack_from("<HH", image, 54)
+        def virtual_bytes(address, size):
+            matches = []
+            for index in range(phnum):
+                kind, flags, offset, vaddr, _, filesz, memsz, _ = struct.unpack_from(
+                    "<IIQQQQQQ", image, phoff + index * phentsize
+                )
+                if kind == 1 and vaddr <= address and address + size <= vaddr + filesz:
+                    matches.append(image[offset + address - vaddr:offset + address - vaddr + size])
+            assert len(matches) == 1
+            return matches[0]
+        assert virtual_bytes(callme, len(expected)) == expected
+        witness_return = None
+        for pc in range(main, callme, 4):
+            opcode = int.from_bytes(virtual_bytes(pc, 4), "little")
+            immediate = opcode & 0x03ffffff
+            if immediate & 0x02000000:
+                immediate -= 0x04000000
+            if opcode & 0xfc000000 == 0x94000000 and pc + (immediate << 2) == callme:
+                assert witness_return is None
+                witness_return = pc + 4
+        assert witness_return is not None
         Path("manifest.json").write_text(json.dumps({
-            "schema": 1, "start": start, "stop": stop,
+            "schema": 2,
+            "entry": entry,
+            "callme": callme,
+            "callme_stop": callme + len(expected),
+            "witness_return": witness_return,
             "sha256": hashlib.sha256(image).hexdigest(),
-            "source_sha256": hashlib.sha256(Path("${./reproducers/issue-2248.S}").read_bytes()).hexdigest(),
-            "wrapper_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/start.S}").read_bytes()).hexdigest(),
+            "main_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/main.c}").read_bytes()).hexdigest(),
+            "callme_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/callme.S}").read_bytes()).hexdigest(),
+            "instruction_audit_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/instruction-classes.json}").read_bytes()).hexdigest(),
         }, indent=2) + "\n")
         PY
       '';
       installPhase = ''
         mkdir -p "$out"
         cp program.elf manifest.json "$out/"
-        cp ${./reproducers/issue-2248.S} "$out/issue-2248.S"
-        cp ${./reproducers/issue-2248-tir/start.S} "$out/start.S"
+        cp ${./reproducers/issue-2248-tir/main.c} "$out/main.c"
+        cp ${./reproducers/issue-2248-tir/callme.S} "$out/callme.S"
+        cp ${./reproducers/issue-2248-tir/instruction-classes.json} "$out/instruction-classes.json"
       '';
     };
 
@@ -298,7 +327,7 @@
           --gdb ${tirSmokeGdb}/bin/tir-smoke-gdb \
           --validator ${pythonEnv}/bin/validate-qemu \
           --tir-revision ${tir.rev} \
-          --qemu-revision 55c77368248e4bd1218c3d74fc57d93c4b0d72a0 \
+          --qemu-revision d92ddb83b8fc47914979b90abd81178acf226185 \
           "$@"
       '';
     };
@@ -452,6 +481,7 @@
         ./pyproject.toml
         ./src/focaccia
         ./tests
+        ./reproducers/issue-2248-tir/instruction-classes.json
       ];
     };
 

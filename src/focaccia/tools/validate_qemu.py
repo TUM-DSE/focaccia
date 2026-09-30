@@ -357,6 +357,12 @@ def main() -> None:
                 args.plugin_terminal_evidence,
                 cutpoint_addresses=tuple(args.cutpoint_address),
             )
+            if args.report is not None:
+                report_status = json.loads(Path(args.report).read_text()).get("status")
+                if report_status == "mismatch":
+                    raise SystemExit(1)
+                if report_status != "accepted":
+                    raise RuntimeError(f"Plugin validation report has status {report_status!r}.")
         except Exception as error:
             if args.report is not None and not Path(args.report).is_file():
                 write_validation_failure_report(

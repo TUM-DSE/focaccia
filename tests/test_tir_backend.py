@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from miasm.expression.expression import ExprId, ExprInt, ExprMem
+from miasm.expression.expression import ExprId, ExprInt
 
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.arch.x86 import ArchX86

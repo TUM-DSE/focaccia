@@ -63,6 +63,17 @@ def test_unresolved_cpuid_makes_validation_incomplete_instead_of_crashing():
     assert "unresolved environment symbol" in report[0]["errors"][0].error_msg
 
 
+def test_execution_tid_survives_composed_slice_evaluation():
+    arch = aarch64.ArchAArch64("little")
+    source = ProgramState(arch, execution_tid=12345)
+    transform = SymbolicTransform(
+        1,
+        {ExprId("X0", 64): ExprId("__focaccia_execution_tid", 64)[0:32].zeroExtend(64)},
+        [], arch, 0x1000, 0x1004,
+    )
+    assert transform.eval_validation_register_transforms(source)["X0"] == 12345
+
+
 def test_aarch64_dczid_has_no_analyzer_host_reader():
     arch = aarch64.ArchAArch64("little")
 

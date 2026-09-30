@@ -8,18 +8,48 @@ use serde::{Deserialize, Serialize};
 use specializer::specializer::KnownState;
 use std::{
     collections::{BTreeMap, HashMap},
+    io::BufRead,
     path::Path,
 };
 use tir::{module::Module, primitives::Primitive, syntax::*};
 
 type Result<T> = std::result::Result<T, String>;
+// Closed-world audit of every class reached by the controlled static-musl
+// #2248 execution. Adding a class requires an opcode fixture and successful
+// residual export; this is not a general AArch64 support claim.
 const CLASSES: &[&str] = &[
+    "decode_aarch64_branch_conditional_compare",
+    "decode_aarch64_branch_conditional_cond",
+    "decode_aarch64_branch_conditional_test",
+    "decode_aarch64_branch_unconditional_immediate",
+    "decode_aarch64_branch_unconditional_register",
+    "decode_aarch64_integer_arithmetic_add_sub_extendedreg",
     "decode_aarch64_integer_arithmetic_add_sub_immediate",
     "decode_aarch64_integer_arithmetic_add_sub_shiftedreg",
-    "decode_aarch64_integer_conditional_select",
-    "decode_aarch64_integer_logical_immediate",
-    "decode_aarch64_integer_shift_variable",
+    "decode_aarch64_integer_arithmetic_address_pc_rel",
+    "decode_aarch64_integer_arithmetic_mul_widening_64_128hi",
     "decode_aarch64_integer_bitfield",
+    "decode_aarch64_integer_conditional_compare_immediate",
+    "decode_aarch64_integer_conditional_select",
+    "decode_aarch64_integer_ins_ext_insert_movewide",
+    "decode_aarch64_integer_logical_immediate",
+    "decode_aarch64_integer_logical_shiftedreg",
+    "decode_aarch64_integer_shift_variable",
+    "decode_aarch64_memory_pair_general_offset",
+    "decode_aarch64_memory_pair_general_post_idx",
+    "decode_aarch64_memory_pair_general_pre_idx",
+    "decode_aarch64_memory_pair_simdfp_offset",
+    "decode_aarch64_memory_pair_simdfp_pre_idx",
+    "decode_aarch64_memory_single_general_immediate_signed_offset_normal",
+    "decode_aarch64_memory_single_general_immediate_signed_post_idx",
+    "decode_aarch64_memory_single_general_immediate_signed_pre_idx",
+    "decode_aarch64_memory_single_general_immediate_unsigned",
+    "decode_aarch64_memory_single_general_register",
+    "decode_aarch64_memory_single_simdfp_immediate_signed_offset_normal",
+    "decode_aarch64_memory_single_simdfp_immediate_unsigned",
+    "decode_aarch64_system_exceptions_runtime_svc",
+    "decode_aarch64_system_register_system",
+    "decode_aarch64_vector_transfer_integer_dup",
 ];
 const MAX_BITS: u32 = 2048;
 
@@ -305,13 +335,22 @@ impl Exporter {
                     return Err("unsupported wildcard unit binding".into());
                 };
                 let App { fun, args } = &cond.kind else {
-                    return Err("unsupported residual assertion".into());
+                    let tested = scalar(self.eval(cond, env)?)?;
+                    if tested.bits == 1
+                        && constant_value(&tested) == Some(BigUint::from(1u8))
+                    {
+                        return self.eval(body, env);
+                    }
+                    return Err(format!("unproven residual assertion: {tested:?}"));
                 };
                 let Id(id) = fun.kind else {
                     return Err("indirect residual assertion".into());
                 };
                 if self.primitives.get(&id) != Some(&Primitive::GtBits) || args.len() != 2 {
-                    return Err("unproven residual assertion".into());
+                    return Err(format!(
+                        "unproven residual assertion {:?} with {} arguments",
+                        self.primitives.get(&id), args.len()
+                    ));
                 }
                 let left = scalar(self.eval(&args[0], env)?)?;
                 let right = scalar(self.eval(&args[1], env)?)?;
@@ -473,8 +512,8 @@ impl Exporter {
                     },
                 }
             }
-            AddBits | SubBits | EqBits | NeBits | AndBits | OrBits | EorBits | AndBool | OrBool
-            | ShlBits | LshrBits | AshrBits
+            AddBits | SubBits | MulBits | EqBits | NeBits | AndBits | OrBits | EorBits | AndBool
+            | OrBool | ShlBits | LshrBits | AshrBits
                 if args.len() == 2 =>
             {
                 let left = scalar(args.remove(0))?;
@@ -486,6 +525,7 @@ impl Exporter {
                 let op = match primitive {
                     AddBits => "add",
                     SubBits => "sub",
+                    MulBits => "mul",
                     EqBits => "eq",
                     NeBits => "ne",
                     AndBits | AndBool => "and",
@@ -741,10 +781,22 @@ fn transform(
             .collect(),
     })
 }
+fn decode_request(pc: &str, raw: &str) -> Result<(u64, Vec<u8>)> {
+    let pc = pc.parse().map_err(|_| "invalid PC")?;
+    if raw.len() != 8 || !raw.is_ascii() {
+        return Err("expected four instruction bytes".into());
+    }
+    let bytes = (0..8)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&raw[i..i + 2], 16).map_err(|_| "invalid hex".to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((pc, bytes))
+}
+
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && args[1] == "--help" {
-        println!("usage: focaccia-tir-oracle <pc-decimal> <four-instruction-bytes-hex>");
+        println!("usage: focaccia-tir-oracle <pc-decimal> <four-instruction-bytes-hex>\n       focaccia-tir-oracle --audit-classes < newline-delimited 'pc-decimal bytes-hex'");
         return Ok(());
     }
     if args.len() == 3 && args[1] == "--prepare" {
@@ -756,18 +808,50 @@ fn run() -> Result<()> {
         .map_err(|e| e.to_string())?;
         return Ok(());
     }
+    if args.len() == 2 && matches!(args[1].as_str(), "--audit-classes" | "--export-transitions") {
+        let typed = configured_spec()?;
+        for (index, line) in std::io::stdin().lock().lines().enumerate() {
+            let line = line.map_err(|error| error.to_string())?;
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() != 2 {
+                return Err(format!("invalid batch input at line {}", index + 1));
+            }
+            let (pc, bytes) = decode_request(fields[0], fields[1])?;
+            if bytes.len() != 4 || pc % 4 != 0 {
+                return Err(format!("invalid batch instruction at line {}", index + 1));
+            }
+            if args[1] == "--audit-classes" {
+                let opcode = u32::from_le_bytes(bytes.try_into().unwrap());
+                let (class, _) = specializer::specializer::prune_to_iclass(&typed, opcode);
+                println!("{pc} {} {class}", fields[1].to_ascii_lowercase());
+            } else {
+                let mut response = serde_json::json!({
+                    "schema": 1, "architecture": "aarch64", "endianness": "little",
+                    "pc": pc.to_string(), "instruction": fields[1].to_ascii_lowercase(),
+                    "tir_revision": env!("FOCACCIA_TIR_REVISION"),
+                    "profile": "aarch64-fullspec-el0",
+                });
+                match transform(&typed, pc, &bytes) {
+                    Ok(transition) => {
+                        response["status"] = "ok".into();
+                        response["outputs"] = serde_json::to_value(transition.outputs).map_err(|e| e.to_string())?;
+                        response["memory_writes"] = serde_json::to_value(transition.memory_writes).map_err(|e| e.to_string())?;
+                    }
+                    Err(reason) => {
+                        response["status"] = "unsupported".into();
+                        response["reason"] = reason.into();
+                    }
+                }
+                println!("{}", serde_json::to_string(&response).map_err(|e| e.to_string())?);
+            }
+        }
+        return Ok(());
+    }
     if args.len() != 3 {
         return Err("usage: focaccia-tir-oracle <pc-decimal> <instruction-hex>".into());
     }
-    let pc: u64 = args[1].parse().map_err(|_| "invalid PC")?;
+    let (pc, bytes) = decode_request(&args[1], &args[2])?;
     let raw = &args[2];
-    if raw.len() != 8 || !raw.is_ascii() {
-        return Err("expected four instruction bytes".into());
-    }
-    let bytes = (0..8)
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&raw[i..i + 2], 16).map_err(|_| "invalid hex".to_string()))
-        .collect::<Result<Vec<_>>>()?;
     let mut response = serde_json::json!({
         "schema": 1, "architecture": "aarch64", "endianness": "little",
         "pc": pc.to_string(), "instruction": raw.to_lowercase(),

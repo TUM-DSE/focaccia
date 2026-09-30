@@ -52,16 +52,16 @@ packaged AST, x86-64 runtime archive, and linker. Capture selects semantics with
 `nix develop .#tir -c capture-transforms --help` to inspect the capture options.
 Native capture still requires its usual debugger/RR permissions.
 
-The opt-in TIR backend supports the AArch64 integer classes needed by the
-bounded issue #2248 witness: add/subtract immediate and shifted-register,
-conditional select, logical immediate, variable shift, and bitfield. This also
-covers 32-bit writes, stack-pointer operands, NZCV flags, and the original
-ADD/ADDS/SUB/SUBS-immediate validation set. A Focaccia-owned Rust helper uses
-the pinned ASL frontend and specializer, then exports the residual computation
-into Focaccia's existing symbolic-expression representation. It does not invoke
-LLVM or Miasm's instruction semantics. Miasm is still used for disassembly and
-as the expression library; composition, comparison, and trace persistence retain
-their existing formats.
+The opt-in TIR backend has a closed-world allowlist for the 32 AArch64
+instruction classes dynamically reached by the static-musl issue #2248 fixture.
+It covers branches, integer/address construction, scalar and vector memory
+forms, vector DUP, system-register access, and the arithmetic witness. The
+audited representative opcode for every class is committed in
+`reproducers/issue-2248-tir/instruction-classes.json`. A Focaccia-owned Rust
+helper uses the pinned ASL frontend and specializer, then exports each residual
+computation into Focaccia's existing symbolic-expression representation. It
+does not invoke LLVM or Miasm instruction semantics. Miasm remains only the
+disassembler and shared expression representation.
 
 Build Rust-helper changes with `nix build .#tir-oracle`. Nix places the helper
 in the fetched TIR workspace and resolves its lockfile offline using only the
@@ -69,16 +69,12 @@ crate versions vendored from TIR's pinned `Cargo.lock`; the helper's relative
 Cargo paths are for that assembled workspace, not a sibling checkout.
 
 The typed specification is prepared once by Nix. The helper derives each
-instruction's transformation with runtime registers left symbolic, and the
-Python adapter caches it by address and exact instruction bytes. Its class
-allowlist is deliberately limited to those classes; unsupported residual
-operations, state updates, malformed known-memory ranges, and code overlapping
-the specification profile's known memory are rejected. It also checks that the
-residual's instruction metadata matches the requested bytes. Memory,
-vector, floating-point, branch, and syscall instruction semantics are outside
-this first backend's scope. Unsupported instructions never fall back to Miasm;
-normal capture fails, while `--force` retains the existing explicit trace-gap
-behavior. `FOCACCIA_TIR_ORACLE` can select the helper executable.
+instruction transformation with runtime registers left symbolic. Its allowlist
+is deliberately exact; unsupported classes or residual operations fail closed.
+SVC is classified but remains an explicit external-action boundary: the live
+harness models only the fixture's controlled set_tid_address, ENOTTY ioctl,
+writev result, and terminal exit_group actions. There is no Miasm fallback.
+`FOCACCIA_TIR_ORACLE` can select the helper executable.
 
 The dedicated `checks.<system>.tir-oracle-validation` exercises real
 specification-derived arithmetic through evaluation, composition, serialization,
@@ -107,36 +103,29 @@ nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-smoke"
 nix build .#checks.aarch64-linux.tir-no-replay-e2e
 ```
 
-This links the canonical
-[`reproducers/issue-2248.S`](reproducers/issue-2248.S) witness with a freestanding
-lifecycle wrapper. Symbol-derived bounds cover its seven instructions and stop
-before `ret`; setup, return, and the exit syscall remain outside the semantics
-claim. TIR derives all seven transformations directly from the exact ELF bytes,
-without emulator output, native capture, Miasm instruction semantics, or RR.
+The fixture is the exact upstream `main.c` and canonical `callme.S`, linked as
+a static-musl ET_EXEC. It runs with empty argv additions, an empty environment,
+and the explicit `max,sve=off` QEMU CPU profile. The oracle covers every dynamic
+instruction from the ELF entry to the live exit_group SVC boundary: 2,238
+ordinary transforms and 2,239 audited instructions on the fixed path.
 
-The harness uses only the QEMU submodule's pinned fixed and regression-injected
-packages. Its four required cases distinguish observation effects from the bug:
+The lockstep plugin wire format binds executable, argv, environment, and CPU
+manifests; emits strictly ordered, monotonic cutpoint/store/SVC events; and
+checks each delayed store against guest memory at its declared epoch. Interior
+set_tid_address is bound to the plugin process identity. Terminal completion is
+independently supplied by the parent after the plugin detaches and QEMU exits.
 
-- fixed QEMU, granular GDB stepping: accepted with 7 transitions/8 states;
-- fixed QEMU, coarse plugin cutpoints: accepted with 1 transition/2 states;
-- injected QEMU, granular stepping: accepted, proving stepping suppresses the
-  optimizer chain;
-- injected QEMU, coarse plugin cutpoints: one **confirmed X0 mismatch**, with no
-  possible/incomplete errors.
+Fixed QEMU is accepted with complete whole-program and terminal evidence. The
+regression-injected package follows its naturally different printf path, but a
+separate TIR oracle for that observed control path still reports exactly one
+confirmed `X0` mismatch at the witness. Its validator exits 1; the exact upstream
+guest itself returns 0 in both cases. No debugger, ptrace, RR, Miasm semantics,
+or synthetic guest-state mutation participates.
 
-The coarse plugin installs callbacks only at the witness boundaries, so no
-per-instruction transaction splits the translated block. The granular GDB stub
-uses a private Unix socket and never changes guest state. There is no synthetic
-register injection, native debugger attachment, ptrace, or TCP listener. Every
-case detaches at the bounded final state and the freestanding guest then exits
-with status zero.
-
-The run directory must not already exist. It retains fixture, source, wrapper,
-TIR, QEMU executable, plugin, and oracle hashes/revisions, plus `oracle.json` and
-per-case commands, logs, states, and reports. `result.json` summarizes the matrix.
-Reports intentionally use `scope: witness`: `trace.complete` confirms the bounded
-region, while whole-program completion remains unclaimed. The default Focaccia build remains TIR-free; this app and its check are explicit
-opt-ins.
+The run directory retains both control-flow discoveries, TIR oracles, source and
+binary hashes, complete instruction-class census, event evidence, commands,
+states, and reports. `result.json` summarizes the two cases. The default
+Focaccia build remains TIR-free; this app and its check are explicit opt-ins.
 
 ## How To Use
 
