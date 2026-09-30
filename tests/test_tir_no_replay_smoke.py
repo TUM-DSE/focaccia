@@ -13,6 +13,12 @@ probe = SimpleNamespace(**PROBE)
 PC = 0x400000
 
 
+def test_fixture_has_canonical_focaccia_eval_semantics():
+    source = (Path(__file__).parents[1] / "reproducers/issue-2248-tir/main.c").read_text()
+    assert "return callme(0, 0, 0, 1, 2) == -1 ? 0 : 1;" in source
+    assert "printf" not in source
+
+
 def elf(code=probe.EXPECTED_CALLME, *, dynamic=False):
     data = bytearray(0x100 + len(code))
     data[:7] = b"\x7fELF\x02\x01\x01"

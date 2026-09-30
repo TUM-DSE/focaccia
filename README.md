@@ -72,8 +72,8 @@ The typed specification is prepared once by Nix. The helper derives each
 instruction transformation with runtime registers left symbolic. Its allowlist
 is deliberately exact; unsupported classes or residual operations fail closed.
 SVC is classified but remains an explicit external-action boundary: the live
-harness models only the fixture's controlled set_tid_address, ENOTTY ioctl,
-writev result, and terminal exit_group actions. There is no Miasm fallback.
+harness models only the fixture's controlled set_tid_address and terminal
+exit_group actions. There is no Miasm fallback.
 `FOCACCIA_TIR_ORACLE` can select the helper executable.
 
 The dedicated `checks.<system>.tir-oracle-validation` exercises real
@@ -103,11 +103,11 @@ nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-smoke"
 nix build .#checks.aarch64-linux.tir-no-replay-e2e
 ```
 
-The fixture is the exact upstream `main.c` and canonical `callme.S`, linked as
-a static-musl ET_EXEC. It runs with empty argv additions, an empty environment,
-and the explicit `max,sve=off` QEMU CPU profile. The oracle covers every dynamic
-instruction from the ELF entry to the live exit_group SVC boundary: 2,238
-ordinary transforms and 2,239 audited instructions on the fixed path.
+The fixture uses the focaccia-eval canonical trigger (`callme(0,0,0,1,2) == -1
+? 0 : 1`) and canonical `callme.S`, linked as a static-musl ET_EXEC. It runs
+with empty argv additions, an empty environment, and the explicit
+`max,sve=off` QEMU CPU profile. The oracle covers every dynamic instruction
+from the ELF entry to the live exit_group SVC boundary.
 
 The lockstep plugin wire format binds executable, argv, environment, and CPU
 manifests; emits strictly ordered, monotonic cutpoint/store/SVC events; and
@@ -115,12 +115,15 @@ checks each delayed store against guest memory at its declared epoch. Interior
 set_tid_address is bound to the plugin process identity. Terminal completion is
 independently supplied by the parent after the plugin detaches and QEMU exits.
 
-Fixed QEMU is accepted with complete whole-program and terminal evidence. The
-regression-injected package follows its naturally different printf path, but a
-separate TIR oracle for that observed control path still reports exactly one
-confirmed `X0` mismatch at the witness. Its validator exits 1; the exact upstream
-guest itself returns 0 in both cases. No debugger, ptrace, RR, Miasm semantics,
-or synthetic guest-state mutation participates.
+Fixed QEMU naturally exits 0 and is accepted with complete whole-program and
+terminal evidence. The regression-injected package naturally exits 1 and may
+follow a different control path; a path-specific oracle is therefore generated
+from its logged instruction addresses. Every logged opcode is checked against
+the same immutable ELF and every transition is independently derived from TIR,
+so buggy instruction semantics are never used as an oracle. Validation still
+reports exactly one confirmed `X0` mismatch at the witness and exits 1. No
+debugger, ptrace, RR, Miasm semantics, or synthetic guest-state mutation
+participates.
 
 The run directory retains both control-flow discoveries, TIR oracles, source and
 binary hashes, complete instruction-class census, event evidence, commands,

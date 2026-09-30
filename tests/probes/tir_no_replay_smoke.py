@@ -158,11 +158,11 @@ def discover_execution(binary: Path, qemu: str, plugin: str, directory: Path) ->
         finally:
             listener.close()
         returncode = process.wait(timeout=30)
-    if returncode != 0 or (directory / "discovery.stdout").read_bytes() != b"-1\n":
-        raise RuntimeError("fixed discovery execution did not naturally exit 0 with '-1'")
+    if returncode != 0 or (directory / "discovery.stdout").read_bytes():
+        raise RuntimeError("fixed canonical execution did not naturally exit 0 without output")
     document = {
         "pid": handshake.pid, "returncode": returncode, "instructions": sequence,
-        "events": events, "writev_result": 3,
+        "events": events, "control_flow_source": "fixed plugin instruction events",
     }
     (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
     return document
@@ -178,8 +178,10 @@ def discover_logged_execution(binary: Path, qemu: str, directory: Path, fixed: d
                                timeout=60, check=False)
     (directory / "stdout").write_bytes(completed.stdout)
     (directory / "stderr").write_bytes(completed.stderr)
-    if completed.returncode != 0 or completed.stdout != b"4611686018427387903\n":
-        raise RuntimeError("regression-injected uninstrumented execution did not reproduce #2248")
+    if completed.returncode != 1 or completed.stdout:
+        raise RuntimeError(
+            "regression-injected canonical execution did not naturally exit 1 without output"
+        )
     blocks: dict[int, bytes] = {}
     traces: list[int] = []
     pending_pc = None
@@ -214,25 +216,32 @@ def discover_logged_execution(binary: Path, qemu: str, directory: Path, fixed: d
     document = {
         "pid": fixed["pid"], "returncode": completed.returncode,
         "instructions": sequence, "events": fixed["events"],
-        "control_flow_source": "uninstrumented QEMU TB execution log",
-        "writev_result": len(completed.stdout),
+        # Only path addresses come from the buggy implementation. Every instruction
+        # transition is independently decoded by TIR from the immutable ELF below.
+        "control_flow_source": "regression-injected uninstrumented QEMU TB execution log",
     }
     (directory / "discovery.json").write_text(json.dumps(document, indent=2) + "\n")
     return document
 
 
-def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Path):
+def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Path,
+                       *, expected_exit: int):
     entry, loads = elf_loads(binary)
     sequence = [(int(pc), bytes.fromhex(code)) for pc, code in discovery["instructions"]]
     if not sequence or sequence[0][0] != entry:
         raise ValueError("dynamic instruction sequence does not start at ELF entry")
+    for pc, code in sequence:
+        if len(code) != 4 or read_image(loads, pc, 4) != code:
+            raise ValueError(f"path instruction at {pc:#x} is not bound to the fixture ELF")
     svc_entries = {
         event["pc"]: event for event in discovery["events"]
         if event["kind"] == EVENT_AARCH64_SVC_ENTRY
     }
-    if [event["auxiliary"] for event in svc_entries.values()] != [96, 29, 66, 94]:
+    if [event["auxiliary"] for event in svc_entries.values()] != [96, 94]:
         raise ValueError("unexpected static-musl syscall profile")
     terminal_pc, terminal_code = sequence[-1]
+    if any(pc not in {address for address, _ in sequence} for pc in svc_entries):
+        raise ValueError("syscall evidence is not present on the selected control-flow path")
     if svc_entries.get(terminal_pc, {}).get("auxiliary") != 94 or terminal_code != b"\x01\0\0\xd4":
         raise ValueError("dynamic sequence does not end at exit_group SVC")
 
@@ -267,9 +276,7 @@ def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Pa
             _, outputs = decoded[(pc, code)]
         else:
             number = svc["auxiliary"]
-            expected = {96: ExprId("__focaccia_execution_tid", 64),
-                        29: ExprInt(MASK64 - 24, 64),
-                        66: ExprInt(discovery["writev_result"], 64)}.get(number)
+            expected = {96: ExprId("__focaccia_execution_tid", 64)}.get(number)
             if expected is None:
                 raise ValueError(f"unsupported interior syscall {number}")
             outputs = {ExprId("PC", 64): ExprInt(pc + 4, 64), ExprId("X0", 64): expected}
@@ -289,8 +296,8 @@ def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Pa
     )
     completion = TraceCompletion(
         terminal_pc, len(transforms), len(transforms) + 1,
-        ExecutionOutcome(ExecutionState.EXITED, exit_status=0),
-        terminal_descriptor, ExitAction(0, ExitScope.GROUP),
+        ExecutionOutcome(ExecutionState.EXITED, exit_status=expected_exit),
+        terminal_descriptor, ExitAction(expected_exit, ExitScope.GROUP),
         no_replay_set_tid=(set_tid_boundary,),
     )
     environment = TraceEnvironment(
@@ -316,8 +323,14 @@ def generate_reference(binary: Path, discovery: dict, oracle: str, directory: Pa
         "transform_count": len(transforms),
         "classes": {name: classes.count(name) for name in sorted(set(classes))},
         "unique_opcode_count": len({code for _, code in sequence}),
-        "svc_policy": {"96": "context-bound set_tid_address", "29": "controlled ENOTTY",
-                       "66": "exact 3-byte writev", "94": "terminal exit_group"},
+        "svc_policy": {"96": "context-bound set_tid_address",
+                       "94": f"terminal exit_group({expected_exit})"},
+        "path_provenance": {
+            "source": discovery["control_flow_source"],
+            "instruction_sequence_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+            "binary_sha256": file_sha256(binary),
+            "semantics": "TIR transitions decoded from immutable ELF instruction bytes",
+        },
     }
     (directory / "instruction-audit.json").write_text(json.dumps(audit_document, indent=2) + "\n")
     return trace_path, trace, audit_document
@@ -411,8 +424,11 @@ def run_case(args, binary: Path, trace_path: Path, trace, directory: Path, *, mi
             "binarySha256": binding["binarySha256"], "returncode": qemu_status,
         }, sort_keys=True) + "\n")
         validator_status = validator.wait(timeout=30)
-    if qemu_status != 0:
-        raise RuntimeError(f"guest did not naturally exit 0: {qemu_status}")
+    expected_guest_status = 1 if mismatch else 0
+    if qemu_status != expected_guest_status:
+        raise RuntimeError(
+            f"guest did not naturally exit {expected_guest_status}: {qemu_status}"
+        )
     expected_validator_status = 1 if mismatch else 0
     if validator_status != expected_validator_status:
         raise RuntimeError(f"validator exit {validator_status}, expected {expected_validator_status}")
@@ -451,7 +467,9 @@ def main() -> None:
         discovery_dir = root / "discovery-fixed"
         discovery_dir.mkdir()
         discovery = discover_execution(binary, args.qemu_fixed, args.plugin_fixed, discovery_dir)
-        trace_path, trace, audit = generate_reference(binary, discovery, args.oracle, root)
+        trace_path, trace, audit = generate_reference(
+            binary, discovery, args.oracle, root, expected_exit=0
+        )
         injected_discovery_dir = root / "discovery-injected"
         injected_discovery_dir.mkdir()
         injected_discovery = discover_logged_execution(
@@ -460,7 +478,7 @@ def main() -> None:
         injected_oracle_dir = root / "oracle-injected"
         injected_oracle_dir.mkdir()
         injected_trace_path, injected_trace, injected_audit = generate_reference(
-            binary, injected_discovery, args.oracle, injected_oracle_dir
+            binary, injected_discovery, args.oracle, injected_oracle_dir, expected_exit=1
         )
         if set(audit["classes"]) != set(injected_audit["classes"]):
             raise ValueError("fixed and injected paths execute different instruction classes")
@@ -472,6 +490,10 @@ def main() -> None:
             "terminal_pc": trace.completion.final_pc, "transform_count": len(trace),
             "oracle_sha256": file_sha256(trace_path),
             "injected_oracle_sha256": file_sha256(injected_trace_path),
+            "path_oracles": {
+                "fixed": audit["path_provenance"],
+                "injected": injected_audit["path_provenance"],
+            },
             "tir_revision": args.tir_revision,
             "qemu_revision": args.qemu_revision, "argv": [], "environment": [],
             "cpu_profile": CPU_PROFILE, "instruction_audit": audit,
