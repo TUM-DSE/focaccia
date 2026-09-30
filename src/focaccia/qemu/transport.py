@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import socket
 import stat
@@ -16,17 +18,18 @@ from focaccia.snapshot import MemoryAccessError, RegisterAccessError
 from .state import RegisterObservation
 
 
-PLUGIN_PROTOCOL_VERSION = 2
+PLUGIN_PROTOCOL_VERSION = 3
 PLUGIN_API_VERSION = 4
 PLUGIN_MAGIC = b"FOCPLUG\0"
-HANDSHAKE_ACK = b"FOCACPT2"
-FINISH_ACK = b"FOCFIN02"
-ABORT_ACK = b"FOCABR02"
+HANDSHAKE_ACK = b"FOCACPT3"
+FINISH_ACK = b"FOCFIN03" + bytes(8)
+ABORT_ACK = b"FOCABR03" + bytes(8)
 
 COMMAND_SIZE = 32
 REGISTER_RESPONSE_SIZE = 104
 MEMORY_HEADER_SIZE = 24
-HANDSHAKE_SIZE = 40
+HANDSHAKE_SIZE = 176
+EVENT_SIZE = 96
 MAX_REGISTER_BYTES = 64
 DEFAULT_MAX_MEMORY_PAYLOAD = 16 * 1024 * 1024
 
@@ -38,6 +41,18 @@ _COMMAND_ABORT = 5
 _RESPONSE_OK = 0
 _RESPONSE_UNAVAILABLE = 1
 _ENDIANNESS_CODES = {"little": 1, "big": 2}
+CAP_PC = 1 << 0
+CAP_INTEGER = 1 << 1
+CAP_STATUS = 1 << 2
+CAP_VECTOR = 1 << 3
+CAP_TLS = 1 << 4
+CAP_AARCH64_SVC = 1 << 5
+
+EVENT_CUTPOINT = 1
+EVENT_STORE = 2
+EVENT_AARCH64_SVC_ENTRY = 3
+EVENT_AARCH64_SVC_SUCCESSOR = 4
+
 _TARGET_NAMES = {
     ("x86_64", "little"): "x86_64",
     ("aarch64", "little"): "aarch64",
@@ -70,6 +85,41 @@ class PluginEOFError(PluginProtocolError):
 
 
 @dataclass(frozen=True, slots=True)
+class PluginLaunchIdentity:
+    binary_sha256: str
+    argv_sha256: str
+    env_sha256: str
+    cpu_sha256: str
+
+    def digests(self) -> tuple[bytes, ...]:
+        values = (self.binary_sha256, self.argv_sha256, self.env_sha256, self.cpu_sha256)
+        try:
+            decoded = tuple(bytes.fromhex(value) for value in values)
+        except ValueError as error:
+            raise ValueError("Plugin launch identity must use hexadecimal SHA-256 digests.") from error
+        if any(len(value) != 32 for value in decoded):
+            raise ValueError("Plugin launch identity fields must be SHA-256 digests.")
+        return decoded
+
+
+def manifest_sha256(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class PluginEvent:
+    kind: int
+    sequence: int
+    epoch: int
+    pc: int
+    address: int
+    size: int
+    auxiliary: int
+    value: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class PluginHandshake:
     version: int
     pid: int
@@ -78,6 +128,8 @@ class PluginHandshake:
     address_bits: int
     plugin_api_min: int
     plugin_api_current: int
+    capabilities: int
+    identity: PluginLaunchIdentity
 
 
 def read_exact(connection: SocketLike, size: int) -> bytes:
@@ -152,6 +204,8 @@ class PluginTransport:
         *,
         version: int = PLUGIN_PROTOCOL_VERSION,
         max_memory_payload: int = DEFAULT_MAX_MEMORY_PAYLOAD,
+        expected_identity: PluginLaunchIdentity | None = None,
+        required_capabilities: int | None = None,
     ):
         if version != PLUGIN_PROTOCOL_VERSION:
             raise PluginProtocolVersionError(
@@ -164,7 +218,11 @@ class PluginTransport:
         self.arch = arch
         self.version = version
         self.max_memory_payload = max_memory_payload
+        self.expected_identity = expected_identity
+        self.required_capabilities = required_capabilities
         self._closed = False
+        self._last_sequence = 0
+        self._last_epoch = 0
         self._completed = False
 
     @property
@@ -178,16 +236,9 @@ class PluginTransport:
     def receive_handshake(self) -> PluginHandshake:
         raw = read_exact(self._connection, HANDSHAKE_SIZE)
         (
-            magic,
-            version,
-            pid,
-            raw_target,
-            endianness_code,
-            address_bits,
-            api_min,
-            api_current,
-            reserved,
-        ) = struct.unpack("<8sII16sBBBB4s", raw)
+            magic, version, pid, raw_target, endianness_code, address_bits,
+            api_min, api_current, reserved, capabilities, identity_raw,
+        ) = struct.unpack("<8sII16sBBBB4sQ128s", raw)
         if magic != PLUGIN_MAGIC:
             raise PluginProtocolError("Plugin supplied invalid handshake magic.")
         if version != self.version:
@@ -219,16 +270,52 @@ class PluginTransport:
                 f"Plugin API range {api_min}..{api_current} does not include "
                 f"required version {PLUGIN_API_VERSION}."
             )
-        self._connection.sendall(HANDSHAKE_ACK)
-        return PluginHandshake(
-            version,
-            pid,
-            target,
-            self.arch.endianness,
-            address_bits,
-            api_min,
-            api_current,
+        identity_values = tuple(
+            identity_raw[offset:offset + 32].hex() for offset in range(0, 128, 32)
         )
+        identity = PluginLaunchIdentity(*identity_values)
+        if self.expected_identity is None:
+            raise PluginProtocolError("Plugin launch identity was not configured by the validator.")
+        if identity != self.expected_identity:
+            raise PluginProtocolError("Plugin launch identity does not match the controlled launch manifest.")
+        required = self.required_capabilities
+        if required is None:
+            required = CAP_PC | CAP_INTEGER | CAP_STATUS
+            if self.arch.archname == "aarch64":
+                required |= CAP_AARCH64_SVC
+        if required == 0 or capabilities & required != required:
+            raise PluginProtocolError(
+                f"Plugin capabilities {capabilities:#x} do not satisfy required {required:#x}."
+            )
+        self._connection.sendall(HANDSHAKE_ACK + struct.pack("<Q", required))
+        return PluginHandshake(
+            version, pid, target, self.arch.endianness, address_bits,
+            api_min, api_current, capabilities, identity,
+        )
+
+    def receive_event(self) -> PluginEvent:
+        raw = read_exact(self._connection, EVENT_SIZE)
+        kind, flags, sequence, epoch, pc, address, size, auxiliary, value, padding = struct.unpack(
+            "<BB6xQQQQQQ16s24s", raw
+        )
+        if flags or any(padding) or kind not in {
+            EVENT_CUTPOINT, EVENT_STORE, EVENT_AARCH64_SVC_ENTRY,
+            EVENT_AARCH64_SVC_SUCCESSOR,
+        }:
+            raise PluginProtocolError("Plugin returned a malformed event frame.")
+        if sequence != self._last_sequence + 1 or epoch <= self._last_epoch:
+            raise PluginProtocolError("Plugin events are not strictly ordered and monotonic.")
+        if kind == EVENT_STORE:
+            if size not in (1, 2, 4, 8, 16) or any(value[size:]):
+                raise PluginProtocolError("Plugin returned a malformed store event.")
+        elif size != 0 or any(value):
+            raise PluginProtocolError("Plugin returned payload bytes for a non-store event.")
+        self._last_sequence = sequence
+        self._last_epoch = epoch
+        return PluginEvent(kind, sequence, epoch, pc, address, size, auxiliary, value[:size])
+
+    def advance(self) -> None:
+        self._send_command(_pack_command("step"))
 
     def _send_command(self, frame: bytes) -> None:
         if self._closed:
@@ -359,10 +446,14 @@ class PluginListener:
         arch: Arch,
         *,
         max_memory_payload: int = DEFAULT_MAX_MEMORY_PAYLOAD,
+        expected_identity: PluginLaunchIdentity,
+        required_capabilities: int | None = None,
     ):
         self.path = path
         self.arch = arch
         self.max_memory_payload = max_memory_payload
+        self.expected_identity = expected_identity
+        self.required_capabilities = required_capabilities
         self._server: socket.socket | None = None
         self._transport: PluginTransport | None = None
         self._bound = False
@@ -404,6 +495,8 @@ class PluginListener:
             connection,
             self.arch,
             max_memory_payload=self.max_memory_payload,
+            expected_identity=self.expected_identity,
+            required_capabilities=self.required_capabilities,
         )
         try:
             handshake = transport.receive_handshake()

@@ -65,7 +65,9 @@ def test_plugin_validation_writes_component_profile(
     oracle = tmp_path / "oracle.json"
     oracle.write_text("{}")
     environment = make_plugin_trace_environment("aarch64l")
-    symbolic = SimpleNamespace(env=environment)
+    symbolic = SimpleNamespace(env=TraceEnvironment(
+        None, (), (), binary_hash="a" * 64, architecture=environment.architecture
+    ))
     matched = SimpleNamespace(
         trace=None,
         diagnostics=(),
@@ -130,7 +132,9 @@ def test_quiet_plugin_validation_still_writes_structured_report(
     oracle = tmp_path / "oracle.json"
     oracle.write_text("{}")
     environment = make_plugin_trace_environment("aarch64l")
-    symbolic = SimpleNamespace(env=environment)
+    symbolic = SimpleNamespace(env=TraceEnvironment(
+        None, (), (), binary_hash="a" * 64, architecture=environment.architecture
+    ))
     matched = SimpleNamespace(
         trace=None,
         diagnostics=(),
@@ -203,7 +207,9 @@ def test_plugin_validation_rejects_incomplete_trace_before_finish(
     oracle = tmp_path / "oracle.json"
     oracle.write_text("{}")
     environment = make_plugin_trace_environment("aarch64l")
-    symbolic = SimpleNamespace(env=environment)
+    symbolic = SimpleNamespace(env=TraceEnvironment(
+        None, (), (), binary_hash="a" * 64, architecture=environment.architecture
+    ))
     matched = SimpleNamespace(
         trace=None,
         diagnostics=(),
@@ -254,7 +260,9 @@ def test_plugin_validation_aborts_peer_on_collection_failure(
     oracle = tmp_path / "oracle.json"
     oracle.write_text("{}")
     environment = make_plugin_trace_environment("aarch64l")
-    symbolic = SimpleNamespace(env=environment)
+    symbolic = SimpleNamespace(env=TraceEnvironment(
+        None, (), (), binary_hash="a" * 64, architecture=environment.architecture
+    ))
     iterator = FakePluginIterator()
 
     monkeypatch.setattr(

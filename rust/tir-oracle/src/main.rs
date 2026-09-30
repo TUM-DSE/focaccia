@@ -21,7 +21,7 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_shift_variable",
     "decode_aarch64_integer_bitfield",
 ];
-const MAX_BITS: u32 = 128;
+const MAX_BITS: u32 = 2048;
 
 // Module's name tables are HashMaps. Store them in a stable order so preparing
 // the same pinned specification twice produces the same cache bytes.
@@ -81,13 +81,13 @@ impl From<PreparedModule> for Module<TypedMeta> {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct Expression {
     bits: u32,
     #[serde(flatten)]
     node: Node,
 }
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Node {
     Constant {
@@ -118,6 +118,9 @@ enum Node {
         then_value: Box<Expression>,
         else_value: Box<Expression>,
     },
+    Memory {
+        address: Box<Expression>,
+    },
 }
 fn constant(bits: u32, value: BigUint) -> Result<Expression> {
     if !(1..=MAX_BITS).contains(&bits) || value.bits() > u64::from(bits) {
@@ -140,21 +143,23 @@ fn width(typ: &TypedTyp) -> Result<u32> {
     let n = match typ {
         TypBase::Bool => 1,
         TypBase::Bits(n) => literal_u64(n)?,
-        _ => return Err("expected a fixed-width scalar type".into()),
+        _ => return Err(format!("expected a fixed-width scalar type, got {typ:?}")),
     };
     if n == 0 || n > u64::from(MAX_BITS) {
-        return Err("unsupported scalar width".into());
+        return Err(format!("unsupported scalar width {n}"));
     }
     Ok(n as u32)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Value {
     Input(Vec<String>),
     Record(Box<Value>, BTreeMap<String, Value>),
     Array(Box<Value>, BTreeMap<u64, Value>),
+    Writes(Box<Value>, Vec<(Expression, Expression)>),
     Scalar(Expression),
     Integer(u64),
+    Enum(String, String),
 }
 
 fn replicate(value: Expression, count: u64) -> Result<Expression> {
@@ -211,8 +216,16 @@ fn register(path: &[String], bits: u32) -> Result<Expression> {
         {
             flag.clone()
         }
+        [field, index] if field == "_V" || field == "_Z" => {
+            let n: u32 = index.parse().map_err(|_| "invalid vector register index")?;
+            if n > 31 || (field == "_V" && bits != 128) || (field == "_Z" && bits < 128) {
+                return Err("unsupported vector register".into());
+            }
+            format!("V{n}")
+        }
         [field] if field == "_PC" && bits == 64 => "PC".into(),
         [field] if field == "SP_EL0" && bits == 64 => "SP".into(),
+        [field] if field == "TPIDR_EL0" && bits == 64 => "TPIDR".into(),
         _ => return Err(format!("unsupported architectural input {path:?}")),
     };
     Ok(Expression {
@@ -224,6 +237,12 @@ fn project(value: Value, key: &str, typ: &TypedTyp) -> Result<Value> {
     match value {
         Value::Input(mut path) => {
             path.push(key.to_owned());
+            if path == ["BTypeNext"] {
+                // regs.csv pins this fetch-local branch hint to its all-zero
+                // userspace default; preserve that profile contract even when
+                // the generic specializer leaves the scalar projection behind.
+                return Ok(Value::Scalar(constant(width(typ)?, BigUint::from(0u8))?));
+            }
             match typ {
                 TypBase::Record(_) | TypBase::Array(..) => Ok(Value::Input(path)),
                 _ => Ok(Value::Scalar(register(&path, width(typ)?)?)),
@@ -239,6 +258,9 @@ fn project(value: Value, key: &str, typ: &TypedTyp) -> Result<Value> {
                 Some(value) => Ok(value),
                 None => project(*base, key, typ),
             }
+        }
+        Value::Writes(base, writes) => {
+            project(*base, key, typ).map(|value| Value::Writes(Box::new(value), writes))
         }
         _ => Err("projection from non-aggregate residual".into()),
     }
@@ -266,6 +288,7 @@ impl Exporter {
             }
             Lit(tir::syntax::Lit::Bool(b)) => Ok(Value::Scalar(constant(1, BigUint::from(u8::from(*b)))?)),
             Lit(tir::syntax::Lit::Int(n)) => Ok(Value::Integer(n.to_u64().ok_or("unsupported signed/dynamic integer")?)),
+            Lit(tir::syntax::Lit::Enum { name, variant }) => Ok(Value::Enum(name.clone(), variant.clone())),
             Let { var: LExpr::Id(id), rhs, body, .. } => {
                 let value = self.eval(rhs, env)?;
                 let old = env.insert(*id, value);
@@ -317,7 +340,7 @@ impl Exporter {
                 let value = self.eval(value, env)?;
                 match base {
                     Value::Record(base, mut fields) => { fields.insert(name.clone(), value); Ok(Value::Record(base, fields)) }
-                    Value::Input(_) => Ok(Value::Record(Box::new(base), BTreeMap::from([(name.clone(), value)]))),
+                    Value::Input(_) | Value::Writes(..) => Ok(Value::Record(Box::new(base), BTreeMap::from([(name.clone(), value)]))),
                     _ => Err("record update on non-record".into()),
                 }
             }
@@ -358,8 +381,58 @@ impl Exporter {
             App { fun, args } => {
                 let Id(id) = fun.kind else { return Err("indirect residual call".into()); };
                 let primitive = self.primitives.get(&id).copied().ok_or("residual helper call is unsupported")?;
-                let args = args.iter().map(|a| self.eval(a, env)).collect::<Result<Vec<_>>>()?;
-                self.primitive(primitive, args, width(&expression.meta.typ)?)
+                let mut args = args.iter().map(|a| self.eval(a, env)).collect::<Result<Vec<_>>>()?;
+                if primitive == Primitive::CvtBitsUint && args.len() == 1 {
+                    let value = scalar(args.remove(0))?;
+                    return Ok(Value::Integer(
+                        constant_value(&value)
+                            .and_then(|value| value.to_u64())
+                            .ok_or("dynamic bits-to-integer conversion is unsupported")?,
+                    ));
+                }
+                if matches!(primitive, Primitive::AddInt | Primitive::SubInt | Primitive::MulInt
+                    | Primitive::ShlInt | Primitive::ShrInt | Primitive::FdivInt | Primitive::ZdivInt)
+                    && args.len() == 2
+                {
+                    let right = integer(args.remove(1))?;
+                    let left = integer(args.remove(0))?;
+                    let value = match primitive {
+                        Primitive::AddInt => left.checked_add(right),
+                        Primitive::SubInt => left.checked_sub(right),
+                        Primitive::MulInt => left.checked_mul(right),
+                        Primitive::ShlInt => left.checked_shl(u32::try_from(right).map_err(|_| "integer shift out of range")?),
+                        Primitive::ShrInt => left.checked_shr(u32::try_from(right).map_err(|_| "integer shift out of range")?),
+                        Primitive::FdivInt | Primitive::ZdivInt if right != 0 => Some(left / right),
+                        _ => None,
+                    }
+                    .ok_or("integer primitive overflow or invalid operation")?;
+                    return Ok(Value::Integer(value));
+                }
+                if primitive == Primitive::RamWrite {
+                    if args.len() != 5 {
+                        return Err("invalid ram_write arity".into());
+                    }
+                    let address_bits = integer(args.remove(0))?;
+                    let byte_count = integer(args.remove(0))?;
+                    let state = args.remove(0);
+                    let address = scalar(args.remove(0))?;
+                    let value = scalar(args.remove(0))?;
+                    if address_bits != u64::from(address.bits)
+                        || byte_count.checked_mul(8) != Some(u64::from(value.bits))
+                    {
+                        return Err("ram_write width mismatch".into());
+                    }
+                    return match state {
+                        Value::Writes(base, mut writes) => {
+                            writes.push((address, value));
+                            Ok(Value::Writes(base, writes))
+                        }
+                        state => Ok(Value::Writes(Box::new(state), vec![(address, value)])),
+                    };
+                }
+                let bits = width(&expression.meta.typ)
+                    .map_err(|error| format!("{primitive:?}: {error}"))?;
+                self.primitive(primitive, args, bits)
             }
             _ => Err("unsupported residual operation (memory, exception, assertion, loop, or aggregate conditional)".into()),
         }
@@ -432,6 +505,42 @@ impl Exporter {
                     },
                 }
             }
+            EqEnum | NeEnum if args.len() == 2 => {
+                let right = args.remove(1);
+                let left = args.remove(0);
+                match (left, right) {
+                    (Value::Enum(left_name, left_variant), Value::Enum(right_name, right_variant)) => {
+                        let equal = left_name == right_name && left_variant == right_variant;
+                        constant(1, BigUint::from(u8::from(if primitive == EqEnum { equal } else { !equal })))?
+                    }
+                    (Value::Scalar(left), Value::Scalar(right)) if left.bits == right.bits => {
+                        Expression {
+                            bits: 1,
+                            node: Node::Binary {
+                                op: if primitive == EqEnum { "eq" } else { "ne" },
+                                left: Box::new(left),
+                                right: Box::new(right),
+                            },
+                        }
+                    }
+                    (left, right) => return Err(format!("dynamic enum comparison is unsupported: {left:?} {right:?}")),
+                }
+            }
+            RamRead if args.len() == 4 => {
+                let address_bits = integer(args.remove(0))?;
+                let byte_count = integer(args.remove(0))?;
+                let _state = args.remove(0);
+                let address = scalar(args.remove(0))?;
+                if address_bits != u64::from(address.bits)
+                    || byte_count.checked_mul(8) != Some(u64::from(bits))
+                {
+                    return Err("ram_read width mismatch".into());
+                }
+                Expression {
+                    bits,
+                    node: Node::Memory { address: Box::new(address) },
+                }
+            }
             ReplicateBits if args.len() == 2 => {
                 let value = scalar(args.remove(0))?;
                 let count = integer(args.remove(0))?;
@@ -463,31 +572,31 @@ fn collect(
     value: Value,
     path: &[String],
     outputs: &mut BTreeMap<String, Expression>,
+    memory_writes: &mut Vec<(Expression, Expression)>,
     opcode: u32,
     metadata: &mut [bool; 2],
 ) -> Result<()> {
     match value {
+        Value::Input(input) if input == path => (),
         Value::Record(base, fields) => {
-            match *base {
-                Value::Input(ref p) if p == path => (),
-                _ => return Err("record does not preserve its input state".into()),
-            }
+            collect(*base, path, outputs, memory_writes, opcode, metadata)?;
             for (name, value) in fields {
                 let mut p = path.to_vec();
                 p.push(name);
-                collect(value, &p, outputs, opcode, metadata)?;
+                collect(value, &p, outputs, memory_writes, opcode, metadata)?;
             }
         }
         Value::Array(base, elements) => {
-            match *base {
-                Value::Input(ref p) if p == path => (),
-                _ => return Err("array does not preserve its input state".into()),
-            }
+            collect(*base, path, outputs, memory_writes, opcode, metadata)?;
             for (index, value) in elements {
                 let mut p = path.to_vec();
                 p.push(index.to_string());
-                collect(value, &p, outputs, opcode, metadata)?;
+                collect(value, &p, outputs, memory_writes, opcode, metadata)?;
             }
+        }
+        Value::Writes(base, writes) => {
+            collect(*base, path, outputs, memory_writes, opcode, metadata)?;
+            memory_writes.extend(writes);
         }
         Value::Scalar(e) if path == ["__ThisInstr"] => {
             if e.bits != 32 || constant_value(&e) != Some(BigUint::from(opcode)) {
@@ -496,15 +605,31 @@ fn collect(
             metadata[0] = true;
         }
         Value::Scalar(e) if path == ["__BranchTaken"] => {
-            if e.bits != 1 || constant_value(&e) != Some(BigUint::from(0u8)) {
-                return Err("unexpected branch effect".into());
+            if e.bits != 1 {
+                return Err("invalid branch effect".into());
             }
             metadata[1] = true;
+        }
+        Value::Enum(_, _) if path == ["BTypeNext"] => {
+            // Every instruction is specialized under the profile-pinned default
+            // BTypeNext. Linux-user exposes no independent BTYPE register, and
+            // this fetch-local branch hint cannot affect another oracle call.
+        }
+        Value::Scalar(_) if path == ["BTypeNext"] => {
+            // See the pinned-input handling in project().
         }
         Value::Scalar(e) => {
             let mapped = register(path, e.bits)?;
             let Node::Register { name } = mapped.node else {
                 unreachable!()
+            };
+            let e = if path.first().is_some_and(|field| field == "_Z") {
+                Expression {
+                    bits: 128,
+                    node: Node::Slice { value: Box::new(e), start: 0 },
+                }
+            } else {
+                e
             };
             if outputs.insert(name, e).is_some() {
                 return Err("duplicate architectural output".into());
@@ -513,6 +638,18 @@ fn collect(
         _ => return Err(format!("unsupported architectural update {path:?}")),
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct Transition {
+    outputs: BTreeMap<String, Expression>,
+    memory_writes: Vec<MemoryWrite>,
+}
+
+#[derive(Serialize)]
+struct MemoryWrite {
+    address: Expression,
+    value: Expression,
 }
 
 fn typed_spec() -> Result<Module<TypedMeta>> {
@@ -533,7 +670,7 @@ fn transform(
     typed: &Module<TypedMeta>,
     pc: u64,
     bytes: &[u8],
-) -> Result<BTreeMap<String, Expression>> {
+) -> Result<Transition> {
     if bytes.len() != 4 || pc % 4 != 0 {
         return Err("requires one aligned AArch64 instruction".into());
     }
@@ -590,12 +727,19 @@ fn transform(
         &mut HashMap::from([(parameter, Value::Input(vec![]))]),
     )?;
     let mut outputs = BTreeMap::new();
+    let mut writes = Vec::new();
     let mut metadata = [false; 2];
-    collect(value, &[], &mut outputs, opcode, &mut metadata)?;
+    collect(value, &[], &mut outputs, &mut writes, opcode, &mut metadata)?;
     if metadata != [true; 2] || !outputs.contains_key("PC") {
         return Err("incomplete architectural transition".into());
     }
-    Ok(outputs)
+    Ok(Transition {
+        outputs,
+        memory_writes: writes
+            .into_iter()
+            .map(|(address, value)| MemoryWrite { address, value })
+            .collect(),
+    })
 }
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -632,9 +776,10 @@ fn run() -> Result<()> {
     // Missing/corrupt package data is an infrastructure failure, not unsupported ISA semantics.
     let typed = configured_spec()?;
     match transform(&typed, pc, &bytes) {
-        Ok(outputs) => {
+        Ok(transition) => {
             response["status"] = "ok".into();
-            response["outputs"] = serde_json::to_value(outputs).map_err(|e| e.to_string())?;
+            response["outputs"] = serde_json::to_value(transition.outputs).map_err(|e| e.to_string())?;
+            response["memory_writes"] = serde_json::to_value(transition.memory_writes).map_err(|e| e.to_string())?;
         }
         Err(reason) => {
             response["status"] = "unsupported".into();

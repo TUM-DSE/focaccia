@@ -11,7 +11,7 @@ import secrets
 import time
 from collections.abc import Iterable
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import focaccia.parser as parser
@@ -39,7 +39,16 @@ from focaccia.qemu.profiling import (
     write_qemu_validation_profile,
 )
 from focaccia.qemu.report import TerminalActionValidation, write_validation_report
-from focaccia.qemu.transport import PluginListener, PluginTransport
+from focaccia.qemu.transport import (
+    EVENT_AARCH64_SVC_ENTRY,
+    EVENT_AARCH64_SVC_SUCCESSOR,
+    EVENT_CUTPOINT,
+    PluginEvent,
+    PluginLaunchIdentity,
+    PluginListener,
+    PluginTransport,
+    manifest_sha256,
+)
 from focaccia.snapshot import ProgramState, ReadableProgramState, RegisterAccessError
 from focaccia.symbolic import SymbolicTraceItem
 from focaccia.trace import (
@@ -48,6 +57,17 @@ from focaccia.trace import (
     TransformStream,
 )
 from focaccia.utils import ErrorSeverity, print_result
+
+
+@dataclass(frozen=True, slots=True)
+class AArch64SvcEvidence:
+    entry_pc: int
+    successor_pc: int
+    number: int
+    argument0: int
+    result: int
+    entry_epoch: int
+    successor_epoch: int
 
 
 logger = logging.getLogger("focaccia-qemu-validation-server")
@@ -98,19 +118,33 @@ class PluginProgramState(CachedBackendProgramState):
 
         selected_name = requested_reg if use_narrow_alias else base_reg
         assert selected_name is not None
-        wire_name = (
-            self.flag_backend_names[self.arch.archname]
-            if self._flags_base is not None and base_reg == self._flags_base
-            else selected_name.lower()
-        )
+        if self.arch.archname == self.aarch64.archname and base_reg.startswith("V"):
+            wire_name = f"q{base_reg[1:]}"
+        elif self.arch.archname == self.aarch64.archname and base_reg == "TPIDR":
+            wire_name = "TPIDR_EL0"
+        elif self.arch.archname == self.aarch64.archname and base_reg == "DCZID_EL0":
+            wire_name = "DCZID_EL0"
+        else:
+            wire_name = (
+                self.flag_backend_names[self.arch.archname]
+                if self._flags_base is not None and base_reg == self._flags_base
+                else selected_name.lower()
+            )
         return self.transport.read_register(wire_name)
 
     def _read_backend_memory(self, addr: int, size: int) -> bytes:
         return self.transport.read_memory(addr, size)
 
-    def step(self) -> None:
-        self.transport.step()
+    def advance(self) -> None:
+        """Release one event boundary; QEMU executes normally until the next event."""
+        advance = getattr(self.transport, "advance", self.transport.step)
+        advance()
         self.flush_observations()
+
+    def step(self) -> None:
+        # Compatibility for callers; this is event-to-event continuation, not
+        # debugger or instruction stepping.
+        self.advance()
 
 
 class PluginStateIterator:
@@ -123,15 +157,24 @@ class PluginStateIterator:
         *,
         listener: PluginListener | None = None,
         cutpoint_addresses: tuple[int, ...] = (),
+        launch_identity: PluginLaunchIdentity | None = None,
     ):
         self.socket_path = socket_path
         self.arch = arch
         self._first_next = True
         self._closed = False
         self.cutpoint_addresses = cutpoint_addresses
+        self.events: list[PluginEvent] = []
+        self.svc_evidence: list[AArch64SvcEvidence] = []
+        self._pending_svc: PluginEvent | None = None
+        self._event_protocol = True
         if tuple(sorted(set(cutpoint_addresses))) != cutpoint_addresses:
             raise ValueError("Plugin cutpoints must be unique and strictly increasing.")
-        self._listener = listener or PluginListener(socket_path, arch)
+        if listener is None and launch_identity is None:
+            raise ValueError("Plugin launch identity is required for a listening iterator.")
+        self._listener = listener or PluginListener(
+            socket_path, arch, expected_identity=launch_identity
+        )
         try:
             self._listener.start()
             info(f"Listening for QEMU plugin connection at {socket_path}.")
@@ -145,6 +188,7 @@ class PluginStateIterator:
         )
         self.pid = handshake.pid
         self.state = PluginProgramState(arch, self.transport)
+        self.state.execution_tid = handshake.pid
 
     @classmethod
     def from_transport(
@@ -161,6 +205,10 @@ class PluginStateIterator:
         result._first_next = True
         result._closed = False
         result.cutpoint_addresses = cutpoint_addresses
+        result.events = []
+        result.svc_evidence = []
+        result._pending_svc = None
+        result._event_protocol = hasattr(transport, "receive_event")
         result._listener = None
         result.pid = None
         result.transport = transport
@@ -178,18 +226,46 @@ class PluginStateIterator:
             matcher.current_destination_pc,
         )
 
+    def _receive_cutpoint(self) -> None:
+        while True:
+            event = self.transport.receive_event()
+            self.events.append(event)
+            if event.kind == EVENT_AARCH64_SVC_ENTRY:
+                if self._pending_svc is not None:
+                    raise RuntimeError("Nested AArch64 SVC entry events are invalid.")
+                self._pending_svc = event
+            elif event.kind == EVENT_AARCH64_SVC_SUCCESSOR:
+                if self._pending_svc is None or event.address != self._pending_svc.pc:
+                    raise RuntimeError("AArch64 SVC successor is not bound to its entry.")
+                entry = self._pending_svc
+                self.svc_evidence.append(AArch64SvcEvidence(
+                    entry.pc, event.pc, entry.auxiliary, entry.address,
+                    event.auxiliary, entry.epoch, event.epoch,
+                ))
+                self._pending_svc = None
+            if event.kind == EVENT_CUTPOINT:
+                return
+            self.transport.advance()
+
     def __next__(self) -> PluginProgramState:
         if self._closed:
             raise StopIteration
-        if self._first_next:
-            self._first_next = False
+        if not self._event_protocol:
+            if self._first_next:
+                self._first_next = False
+                return self.state
+            pc = self.state.read_pc()
+            new_pc = pc
+            while pc == new_pc:
+                self.state.step()
+                new_pc = self.state.read_pc()
             return self.state
-
-        pc = self.state.read_pc()
-        new_pc = pc
-        while pc == new_pc:
-            self.state.step()
-            new_pc = self.state.read_pc()
+        if not self._first_next:
+            self.transport.advance()
+            self.state.flush_observations()
+        self._first_next = False
+        self._receive_cutpoint()
+        self.state.flush_observations()
         return self.state
 
     def finish(self) -> None:
@@ -389,6 +465,20 @@ def _plugin_terminal_completion(
     # transforms.  Completion accounts for the consumed/composed semantic
     # prefix, while the concrete trace keeps its own N+1 retained-boundary
     # cardinality.
+    from focaccia.no_replay import NoReplaySetTidBoundary
+
+    set_tid_events = [item for item in getattr(qemu, "svc_evidence", ()) if item.number == 96]
+    if len(set_tid_events) != len(expected.no_replay_set_tid):
+        raise RuntimeError("Plugin SVC evidence does not cover ordered SET_TID_ADDRESS actions.")
+    observed_set_tid = tuple(
+        NoReplaySetTidBoundary(
+            boundary.transform_index,
+            boundary.descriptor,
+            event.argument0,
+            event.result,
+        )
+        for boundary, event in zip(expected.no_replay_set_tid, set_tid_events, strict=True)
+    )
     observed = replace(
         expected,
         transform_count=matched.consumed_transform_count,
@@ -397,7 +487,7 @@ def _plugin_terminal_completion(
         terminal_action=descriptor,
         no_replay_exit=observed_action,
         no_replay_set_fs=(),
-        no_replay_set_tid=(),
+        no_replay_set_tid=observed_set_tid,
         no_replay_mmap=(),
     )
     comparison = (
@@ -455,8 +545,25 @@ def start_validation_server(
         whole_program = symb_transforms.scope is TraceScope.WHOLE_PROGRAM
         if whole_program and (terminal_ready_path is None or terminal_evidence_path is None):
             raise ValueError("Plugin whole-program validation requires typed terminal evidence paths.")
+        identity_env = symb_transforms.env
+        if identity_env.binary_hash is None:
+            raise ValueError("Plugin validation requires a bound binary SHA-256 identity.")
+        launch_identity = PluginLaunchIdentity(
+            identity_env.binary_hash,
+            manifest_sha256(list(identity_env.argv)),
+            manifest_sha256(list(identity_env.envp)),
+            manifest_sha256({
+                "architecture": {
+                    "isa": architecture.key.isa,
+                    "endianness": architecture.key.endianness,
+                },
+                "profile": "qemu-user-default-v1",
+            }),
+        )
+        launch_identity.digests()
         with PluginStateIterator(
-            socket_path, architecture, cutpoint_addresses=cutpoint_addresses
+            socket_path, architecture, cutpoint_addresses=cutpoint_addresses,
+            launch_identity=launch_identity,
         ) as qemu:
             try:
                 tracing_measurement = (

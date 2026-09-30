@@ -9,6 +9,9 @@ from focaccia.arch import aarch64, x86
 from focaccia.qemu.transport import (
     ABORT_ACK,
     COMMAND_SIZE,
+    EVENT_AARCH64_SVC_ENTRY,
+    EVENT_AARCH64_SVC_SUCCESSOR,
+    EVENT_STORE,
     FINISH_ACK,
     HANDSHAKE_ACK,
     PLUGIN_API_VERSION,
@@ -17,6 +20,7 @@ from focaccia.qemu.transport import (
     PluginEOFError,
     PluginProtocolError,
     PluginProtocolVersionError,
+    PluginLaunchIdentity,
     PluginTransport,
     read_exact,
 )
@@ -67,6 +71,10 @@ def finish_peer(thread: threading.Thread, errors: list[BaseException]) -> None:
     assert errors == []
 
 
+IDENTITY = PluginLaunchIdentity(*(f"{index:02x}" * 32 for index in range(1, 5)))
+CAPABILITIES = 0x3F
+
+
 def handshake(
     *,
     target: bytes = b"x86_64",
@@ -74,9 +82,11 @@ def handshake(
     protocol_version: int = PLUGIN_PROTOCOL_VERSION,
     api_min: int = PLUGIN_API_VERSION,
     api_current: int = PLUGIN_API_VERSION,
+    capabilities: int = CAPABILITIES,
+    identity: PluginLaunchIdentity = IDENTITY,
 ) -> bytes:
     return struct.pack(
-        "<8sII16sBBBB4s",
+        "<8sII16sBBBB4sQ128s",
         PLUGIN_MAGIC,
         protocol_version,
         1234,
@@ -86,6 +96,8 @@ def handshake(
         api_min,
         api_current,
         bytes(4),
+        capabilities,
+        b"".join(identity.digests()),
     )
 
 
@@ -252,7 +264,7 @@ def test_memory_payload_limit_is_checked_before_sending():
 def test_protocol_handshake_negotiates_and_validates_guest_identity():
     client, peer = socket.socketpair()
     peer.sendall(handshake())
-    transport = PluginTransport(client, x86.ArchX86())
+    transport = PluginTransport(client, x86.ArchX86(), expected_identity=IDENTITY)
 
     received = transport.receive_handshake()
 
@@ -262,7 +274,11 @@ def test_protocol_handshake_negotiates_and_validates_guest_identity():
     assert received.endianness == "little"
     assert received.plugin_api_min == PLUGIN_API_VERSION
     assert received.plugin_api_current == PLUGIN_API_VERSION
-    assert read_exact(peer, len(HANDSHAKE_ACK)) == HANDSHAKE_ACK
+    assert received.capabilities == CAPABILITIES
+    assert received.identity == IDENTITY
+    acknowledgement = read_exact(peer, len(HANDSHAKE_ACK) + 8)
+    assert acknowledgement[:len(HANDSHAKE_ACK)] == HANDSHAKE_ACK
+    assert struct.unpack("<Q", acknowledgement[len(HANDSHAKE_ACK):])[0] == 0x7
     transport.close()
     peer.close()
 
@@ -273,10 +289,65 @@ def test_protocol_handshake_negotiates_and_validates_guest_identity():
     right.close()
 
 
+@pytest.mark.parametrize(
+    ("expected_identity", "capabilities", "message"),
+    [
+        (PluginLaunchIdentity("ff" * 32, *(IDENTITY.__getattribute__(name) for name in ("argv_sha256", "env_sha256", "cpu_sha256"))), CAPABILITIES, "launch identity"),
+        (IDENTITY, 1, "capabilities"),
+    ],
+)
+def test_protocol_handshake_fails_closed_on_identity_or_capabilities(expected_identity, capabilities, message):
+    client, peer = socket.socketpair()
+    peer.sendall(handshake(capabilities=capabilities))
+    transport = PluginTransport(client, x86.ArchX86(), expected_identity=expected_identity)
+    with pytest.raises(PluginProtocolError, match=message):
+        transport.receive_handshake()
+    peer.settimeout(0.05)
+    with pytest.raises(TimeoutError):
+        peer.recv(1)
+    transport.close()
+    peer.close()
+
+
+def event(kind, sequence, epoch, *, pc=0x1000, address=0, size=0, auxiliary=0, value=b""):
+    return struct.pack(
+        "<BB6xQQQQQQ16s24s", kind, 0, sequence, epoch, pc, address, size,
+        auxiliary, value + bytes(16 - len(value)), bytes(24),
+    )
+
+
+def test_event_stream_retains_store_value_and_typed_svc_entry_successor():
+    client, peer = socket.socketpair()
+    peer.sendall(event(EVENT_STORE, 1, 7, address=0x4003, size=4, value=b"ABCD"))
+    peer.sendall(event(EVENT_AARCH64_SVC_ENTRY, 2, 8, address=0x4003, auxiliary=96))
+    peer.sendall(event(EVENT_AARCH64_SVC_SUCCESSOR, 3, 9, pc=0x1004, address=0x1000, auxiliary=123))
+    transport = PluginTransport(client, aarch64.ArchAArch64("little"))
+    store = transport.receive_event()
+    entry = transport.receive_event()
+    successor = transport.receive_event()
+    assert (store.address, store.value, store.epoch) == (0x4003, b"ABCD", 7)
+    assert (entry.kind, entry.auxiliary, entry.address) == (EVENT_AARCH64_SVC_ENTRY, 96, 0x4003)
+    assert (successor.kind, successor.address, successor.auxiliary) == (EVENT_AARCH64_SVC_SUCCESSOR, 0x1000, 123)
+    transport.close()
+    peer.close()
+
+
+def test_event_stream_rejects_reordered_sequence_or_epoch():
+    client, peer = socket.socketpair()
+    peer.sendall(event(EVENT_STORE, 1, 2, address=1, size=1, value=b"x"))
+    peer.sendall(event(EVENT_STORE, 3, 2, address=2, size=1, value=b"y"))
+    transport = PluginTransport(client, x86.ArchX86())
+    transport.receive_event()
+    with pytest.raises(PluginProtocolError, match="strictly ordered"):
+        transport.receive_event()
+    transport.close()
+    peer.close()
+
+
 def test_protocol_handshake_rejects_wrong_guest_before_acknowledgement():
     client, peer = socket.socketpair()
     peer.sendall(handshake(target=b"aarch64"))
-    transport = PluginTransport(client, x86.ArchX86())
+    transport = PluginTransport(client, x86.ArchX86(), expected_identity=IDENTITY)
 
     with pytest.raises(PluginProtocolError, match="does not match"):
         transport.receive_handshake()

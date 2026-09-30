@@ -204,17 +204,17 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1790716038,
-        "narHash": "sha256-91EDD+v3iZo6EYBlcnXZzQdhsPMll04v7kibdgkunoA=",
+        "lastModified": 1790758658,
+        "narHash": "sha256-omfV0QIZM9z3ImrLpg1+NFtJOdQNONytXBTnlZVVjNM=",
         "ref": "refs/heads/master",
-        "rev": "c4a59f86e25b221be6419a181eef79c2836d6fe3",
-        "revCount": 120191,
+        "rev": "55c77368248e4bd1218c3d74fc57d93c4b0d72a0",
+        "revCount": 120192,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
       },
       "original": {
-        "rev": "c4a59f86e25b221be6419a181eef79c2836d6fe3",
+        "rev": "55c77368248e4bd1218c3d74fc57d93c4b0d72a0",
         "submodules": true,
         "type": "git",
         "url": "https://github.com/TUM-DSE/focaccia-qemu.git"
@@ -323,10 +323,10 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1790700054,
-        "narHash": "sha256-WkRzMw32zlV86LweTq3joX6OW+jc2RqtWE1DMLANkFU=",
+        "lastModified": 1790756571,
+        "narHash": "sha256-d3FwUlvYnFdt8aFVawQwQ36mu8yweRxFfsjOjHmy6l8=",
         "ref": "carbonara",
-        "rev": "1d579cbd1a379c90526c3ecbe5d4bfd1f18c5407",
+        "rev": "6db8f704259ddd12d4106303e12d677eb2dae966",
         "shallow": true,
         "type": "git",
         "url": "ssh://git@github.com/TUM-DSE/airlift.git"

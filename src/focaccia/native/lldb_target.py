@@ -750,6 +750,12 @@ class LLDBConcreteTarget:
         except ConcreteRegisterError as err:
             if canonical.startswith('ZMM'):
                 return self._read_gdb_remote_zmm(canonical)
+            if canonical == 'TPIDR' and getattr(self, '_gdb_remote', False):
+                try:
+                    remote = self._get_register('tpidr_el0')
+                    return self._read_scalar_register_value(remote, 'TPIDR_EL0')
+                except ConcreteRegisterError:
+                    pass
             accessor = self.arch.get_reg_accessor(canonical)
             flags_reg = self.arch.to_regname(
                 self.flag_register_names.get(self.archname, '')
@@ -1035,8 +1041,9 @@ class LLDBRemoteTarget(LLDBConcreteTarget):
 
         # Set up objects for process execution
         error = lldb.SBError()
+        endpoint = f'unix-connect://{remote}' if remote.startswith('/') else f'connect://{remote}'
         process = target.ConnectRemote(debugger.GetListener(),
-                                       f'connect://{remote}',
+                                       endpoint,
                                        None,
                                        error)
         if not _error_succeeded(error) or not _is_valid(process):

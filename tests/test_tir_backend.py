@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from miasm.expression.expression import ExprId, ExprInt
+from miasm.expression.expression import ExprId, ExprInt, ExprMem
 
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.arch.x86 import ArchX86
@@ -46,6 +46,7 @@ def response():
                 "right": constant(64, 1),
             },
         },
+        "memory_writes": [],
     }
 
 
@@ -57,7 +58,8 @@ def state_and_instruction(arch=ARCH, code=CODE):
 
 
 def test_valid_response_constructs_parameterized_transform():
-    outputs = decode_response(json.dumps(response()), PC, CODE)
+    next_pc, outputs = decode_response(json.dumps(response()), PC, CODE)
+    assert next_pc == ExprInt(PC + 4, 64)
     assert outputs[ExprId("X0", 64)] == ExprId("X0", 64) + ExprInt(1, 64)
 
 
@@ -86,7 +88,7 @@ def test_mismatching_protocol_metadata_is_rejected(field, value):
     "mutate",
     [
         lambda doc: doc["outputs"].pop("PC"),
-        lambda doc: doc["outputs"].update(PC=constant(64, PC + 8)),
+        lambda doc: doc["outputs"].update(PC=constant(32, PC + 8)),
         lambda doc: doc["outputs"].update(X0=constant(32, 1)),
         lambda doc: doc["outputs"].update(UNKNOWN=constant(64, 0)),
         lambda doc: doc["outputs"]["X0"].update(op="call"),
@@ -94,7 +96,7 @@ def test_mismatching_protocol_metadata_is_rejected(field, value):
         lambda doc: doc["outputs"]["X0"]["right"].update(value="0x10000000000000000"),
         lambda doc: doc["outputs"]["X0"]["right"].update(bits=True),
         lambda doc: doc["outputs"]["X0"].update(extra="unmodeled effect"),
-        lambda doc: doc.update(memory_writes=[]),
+        lambda doc: doc.update(memory_writes={}),
     ],
 )
 def test_malformed_or_unmodeled_output_is_rejected(mutate):
@@ -113,6 +115,7 @@ def test_invalid_envelope_is_rejected(text):
 def test_unsupported_is_not_a_successful_empty_transform():
     document = response()
     document.pop("outputs")
+    document.pop("memory_writes")
     document.update(status="unsupported", reason="memory residual")
     with pytest.raises(UnsupportedInstructionError, match="memory residual"):
         decode_response(json.dumps(document), PC, CODE)

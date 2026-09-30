@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=c4a59f86e25b221be6419a181eef79c2836d6fe3&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=55c77368248e4bd1218c3d74fc57d93c4b0d72a0&submodules=1";
       flake = true;
     };
 
@@ -298,7 +298,7 @@
           --gdb ${tirSmokeGdb}/bin/tir-smoke-gdb \
           --validator ${pythonEnv}/bin/validate-qemu \
           --tir-revision ${tir.rev} \
-          --qemu-revision c4a59f86e25b221be6419a181eef79c2836d6fe3 \
+          --qemu-revision 55c77368248e4bd1218c3d74fc57d93c4b0d72a0 \
           "$@"
       '';
     };
@@ -2311,7 +2311,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "c4a59f86e25b221be6419a181eef79c2836d6fe3";
+      assert qemu-submodule.rev == "55c77368248e4bd1218c3d74fc57d93c4b0d72a0";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];

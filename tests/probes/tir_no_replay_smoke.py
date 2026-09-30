@@ -18,6 +18,7 @@ import time
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.completion import TraceScope
 from focaccia.parser import parse_snapshots, serialize_transformations
+from focaccia.qemu.transport import manifest_sha256
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import DisassemblyContext, SymbolicTransform
 from focaccia.tir_backend import TirBackend
@@ -214,8 +215,16 @@ def _run_case(
         if coarse:
             # Only source and destination callbacks are installed. There is no
             # debugger, breakpoint, or per-instruction transaction in the TB.
+            binary_hash = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+            identity = (
+                f",binary-sha256={binary_hash}"
+                f",argv-sha256={manifest_sha256([])}"
+                f",env-sha256={manifest_sha256([])}"
+                f",cpu-sha256={manifest_sha256({'architecture': {'isa': 'aarch64', 'endianness': 'little'}, 'profile': 'qemu-user-default-v1'})}"
+            )
             plugin = (
                 f"{plugin_path},socket={channel.path},start={start},stop={stop},coarse=on"
+                f"{identity}"
             )
             qemu_command = [qemu_path, "-plugin", plugin, str(binary)]
             validate_command = [

@@ -14,7 +14,7 @@ import os
 import re
 import subprocess
 
-from miasm.expression.expression import Expr, ExprCompose, ExprCond, ExprId, ExprInt, ExprOp
+from miasm.expression.expression import Expr, ExprCompose, ExprCond, ExprId, ExprInt, ExprMem, ExprOp
 
 from focaccia.snapshot import ReadableProgramState
 from focaccia.symbolic import (
@@ -22,16 +22,19 @@ from focaccia.symbolic import (
     Instruction,
     SymbolEvaluationError,
     UnsupportedInstructionError,
+    eval_symbol,
 )
 
 _REGISTERS = {
     **{f"X{i}": 64 for i in range(31)},
+    **{f"V{i}": 128 for i in range(32)},
     "SP": 64,
     "PC": 64,
     "N": 1,
     "Z": 1,
     "C": 1,
     "V": 1,
+    "TPIDR": 64,
 }
 
 
@@ -61,14 +64,14 @@ class _ExpressionDecoder:
         if not isinstance(node, dict):
             raise ValueError("Oracle expression must be an object")
         bits = node.get("bits")
-        if type(bits) is not int or not 1 <= bits <= 128:
+        if type(bits) is not int or not 1 <= bits <= 2048:
             raise ValueError("Unsupported oracle bit width")
         kind = node.get("kind")
         common = {"kind", "bits"}
         if kind == "constant":
             _fields(node, common | {"value"})
             raw = node["value"]
-            if not isinstance(raw, str) or re.fullmatch(r"0x[0-9a-f]{1,32}", raw) is None:
+            if not isinstance(raw, str) or re.fullmatch(r"0x[0-9a-f]{1,512}", raw) is None:
                 raise ValueError("Malformed oracle bitvector constant")
             value = int(raw, 16)
             if value >= 1 << bits:
@@ -77,9 +80,14 @@ class _ExpressionDecoder:
         if kind == "register":
             _fields(node, common | {"name"})
             name = node["name"]
-            if not isinstance(name, str) or _REGISTERS.get(name) != bits:
+            if not isinstance(name, str) or name not in _REGISTERS:
                 raise ValueError("Unsupported architectural input register")
-            return ExprId(name, bits)
+            register_bits = _REGISTERS[name]
+            if bits == register_bits:
+                return ExprId(name, bits)
+            if name.startswith("V") and register_bits == 128 and bits > 128:
+                return ExprId(name, 128).zeroExtend(bits)
+            raise ValueError("Unsupported architectural input register width")
         if kind == "binary":
             _fields(node, common | {"op", "left", "right"})
             left = self.decode(node["left"], depth + 1)
@@ -141,10 +149,16 @@ class _ExpressionDecoder:
             if condition.size != 1 or lhs.size != bits or rhs.size != bits:
                 raise ValueError("Oracle conditional width mismatch")
             return ExprCond(condition, lhs, rhs)
+        if kind == "memory":
+            _fields(node, common | {"address"})
+            address = self.decode(node["address"], depth + 1)
+            if not 1 <= address.size <= 64 or bits % 8:
+                raise ValueError("Oracle memory read width mismatch")
+            return ExprMem(address.zeroExtend(64), bits)
         raise ValueError(f"Unsupported oracle expression kind {kind!r}")
 
 
-def decode_response(text: str, pc: int, code: bytes) -> dict[Expr, Expr]:
+def decode_response(text: str, pc: int, code: bytes) -> tuple[Expr, dict[Expr, Expr]]:
     """Validate the versioned response before constructing shared expressions."""
     if len(text) > 1_048_576:
         raise SymbolEvaluationError("TIR response exceeds the size limit")
@@ -165,7 +179,7 @@ def decode_response(text: str, pc: int, code: bytes) -> dict[Expr, Expr]:
         status = response.get("status")
         if status not in ("ok", "unsupported"):
             raise ValueError("Unknown oracle status")
-        _fields(response, common | ({"outputs"} if status == "ok" else {"reason"}))
+        _fields(response, common | ({"outputs", "memory_writes"} if status == "ok" else {"reason"}))
         if (
             type(response["schema"]) is not int
             or response["schema"] != 1
@@ -198,10 +212,20 @@ def decode_response(text: str, pc: int, code: bytes) -> dict[Expr, Expr]:
             if expr.size != _REGISTERS[name]:
                 raise ValueError(f"Wrong output width for {name}")
             result[ExprId(name, expr.size)] = expr
+        writes = response["memory_writes"]
+        if not isinstance(writes, list) or len(writes) > 16:
+            raise ValueError("Malformed architectural memory writes")
+        for write in writes:
+            _fields(write, {"address", "value"})
+            address = decoder.decode(write["address"])
+            value = decoder.decode(write["value"])
+            if not 1 <= address.size <= 64 or value.size % 8:
+                raise ValueError("Malformed architectural memory write")
+            result[ExprMem(address.zeroExtend(64), value.size)] = value
         next_pc = result.get(ExprId("PC", 64))
-        if not isinstance(next_pc, ExprInt) or int(next_pc) != pc + 4:
-            raise ValueError("Missing or unexpected PC transition for immediate arithmetic")
-        return result
+        if next_pc is None or next_pc.size != 64:
+            raise ValueError("Missing or malformed PC transition")
+        return next_pc, result
     except (ValueError, KeyError, TypeError, RecursionError) as error:
         raise SymbolEvaluationError(f"Invalid TIR oracle response: {error}") from error
 
@@ -221,7 +245,7 @@ class TirBackend:
         self.executable = executable or os.environ.get("FOCACCIA_TIR_ORACLE", "focaccia-tir-oracle")
         self.timeout = timeout
         self.cache_size = cache_size
-        self._cache: OrderedDict[tuple[int, bytes], dict[Expr, Expr]] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, bytes], tuple[Expr, dict[Expr, Expr]]] = OrderedDict()
 
     def generate(
         self, instruction: Instruction, state: ReadableProgramState, context: DisassemblyContext
@@ -248,7 +272,8 @@ class TirBackend:
         key = (pc, bytes(code))
         if key in self._cache:
             self._cache.move_to_end(key)
-            outputs = self._cache[key].copy()
+            next_pc, cached_outputs = self._cache[key]
+            outputs = cached_outputs.copy()
         else:
             # The bridge has a fixed profile. Do not inherit experimental
             # translator settings or an unpinned AST from a development shell.
@@ -273,10 +298,11 @@ class TirBackend:
                 raise SymbolEvaluationError(
                     f"TIR oracle failed ({completed.returncode}): {diagnostic}"
                 )
-            outputs = decode_response(completed.stdout, pc, code)
+            next_pc, outputs = decode_response(completed.stdout, pc, code)
             if self.cache_size:
-                self._cache[key] = outputs.copy()
+                self._cache[key] = (next_pc, outputs.copy())
                 while len(self._cache) > self.cache_size:
                     self._cache.popitem(last=False)
-        outputs[context.lifter.IRDst] = ExprInt(pc + 4, 64)
-        return ExprInt(pc + 4, 64), outputs
+        outputs[context.lifter.IRDst] = next_pc
+        concrete_next_pc = ExprInt(eval_symbol(next_pc, state), 64)
+        return concrete_next_pc, outputs
