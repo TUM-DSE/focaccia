@@ -72,9 +72,9 @@ The typed specification is prepared once by Nix. The helper derives each
 instruction's transformation with runtime registers left symbolic, and the
 Python adapter caches it by address and exact instruction bytes. Its class
 allowlist is deliberately limited to those classes; unsupported residual
-operations or state updates are rejected,
-and code overlapping the specification profile's known memory. It also checks
-that the residual's instruction metadata matches the requested bytes. Memory,
+operations, state updates, malformed known-memory ranges, and code overlapping
+the specification profile's known memory are rejected. It also checks that the
+residual's instruction metadata matches the requested bytes. Memory,
 vector, floating-point, branch, and syscall instruction semantics are outside
 this first backend's scope. Unsupported instructions never fall back to Miasm;
 normal capture fails, while `--force` retains the existing explicit trace-gap

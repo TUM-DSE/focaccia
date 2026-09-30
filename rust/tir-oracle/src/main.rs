@@ -534,14 +534,23 @@ fn transform(
     pc: u64,
     bytes: &[u8],
 ) -> Result<BTreeMap<String, Expression>> {
-    if bytes.len() != 4 || pc % 4 != 0 || pc.checked_add(4).is_none() {
+    if bytes.len() != 4 || pc % 4 != 0 {
         return Err("requires one aligned AArch64 instruction".into());
     }
+    let instruction_end = pc
+        .checked_add(4)
+        .ok_or("instruction address exceeds the AArch64 address space")?;
     let opcode = u32::from_le_bytes(bytes.try_into().unwrap());
-    // KnownMemory adds profile data after program text. Reject overlap rather
-    // than silently specializing a page-table descriptor as the instruction.
+    // KnownMemory adds profile data after program text. Reject malformed ranges
+    // and overlap rather than silently specializing profile data as instruction
+    // bytes. Do not let a saturating end conceal a range crossing 2^64.
     for (base, data) in &typed.arch().config.known_memory {
-        if pc < base.saturating_add(data.len() as u64) && *base < pc + 4 {
+        let memory_length =
+            u64::try_from(data.len()).map_err(|_| "configuration memory is too large")?;
+        let memory_end = base
+            .checked_add(memory_length)
+            .ok_or("configuration memory exceeds the AArch64 address space")?;
+        if pc < memory_end && *base < instruction_end {
             return Err("instruction overlaps specification configuration memory".into());
         }
     }
