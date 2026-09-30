@@ -40,6 +40,8 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_memory_pair_general_pre_idx",
     "decode_aarch64_memory_pair_simdfp_offset",
     "decode_aarch64_memory_pair_simdfp_pre_idx",
+    "decode_aarch64_memory_atomicops_ld",
+    "decode_aarch64_memory_single_general_immediate_signed_offset_lda_stl",
     "decode_aarch64_memory_single_general_immediate_signed_offset_normal",
     "decode_aarch64_memory_single_general_immediate_signed_post_idx",
     "decode_aarch64_memory_single_general_immediate_signed_pre_idx",
@@ -512,13 +514,16 @@ impl Exporter {
                     },
                 }
             }
-            AddBits | SubBits | MulBits | EqBits | NeBits | AndBits | OrBits | EorBits | AndBool
-            | OrBool | ShlBits | LshrBits | AshrBits
+            AddBits | SubBits | MulBits | EqBits | NeBits | GtBits | LtBits | GeBits | LeBits
+            | AndBits | OrBits | EorBits | AndBool | OrBool | ShlBits | LshrBits | AshrBits
                 if args.len() == 2 =>
             {
                 let left = scalar(args.remove(0))?;
                 let right = scalar(args.remove(0))?;
-                let comparison = matches!(primitive, EqBits | NeBits);
+                let comparison = matches!(
+                    primitive,
+                    EqBits | NeBits | GtBits | LtBits | GeBits | LeBits
+                );
                 if left.bits != right.bits || bits != if comparison { 1 } else { left.bits } {
                     return Err("binary width mismatch".into());
                 }
@@ -528,6 +533,10 @@ impl Exporter {
                     MulBits => "mul",
                     EqBits => "eq",
                     NeBits => "ne",
+                    GtBits => "ugt",
+                    LtBits => "ult",
+                    GeBits => "uge",
+                    LeBits => "ule",
                     AndBits | AndBool => "and",
                     OrBits | OrBool => "or",
                     EorBits => "xor",
@@ -734,6 +743,17 @@ fn transform(
     let (iclass, pruned) = specializer::specializer::prune_to_iclass(&typed, opcode);
     if !CLASSES.contains(&iclass.as_str()) {
         return Err(format!("unsupported instruction class {iclass}"));
+    }
+    match iclass.as_str() {
+        "decode_aarch64_memory_atomicops_ld" if opcode != 0x3822_4020 => {
+            return Err("unsupported atomic opcode outside the audited LDSMAXB fixture".into());
+        }
+        "decode_aarch64_memory_single_general_immediate_signed_offset_lda_stl"
+            if opcode != 0xd95f_8020 =>
+        {
+            return Err("unsupported LDAPR/STLR opcode outside the audited LDAPUR fixture".into());
+        }
+        _ => {}
     }
     let pins = KnownState::config_defaults(pruned.arch());
     let mut conf = pruned.clone();

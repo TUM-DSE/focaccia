@@ -260,6 +260,47 @@ def test_branch_memory_address_system_vector_and_mul_semantics(backend):
     assert multiply.eval_register_transforms(operands)["X1"] == expected
 
 
+def test_issue_364_ldsmaxb_is_one_atomic_state_transition(backend, monkeypatch):
+    monkeypatch.setattr(
+        "focaccia.semantics.run_instruction", lambda *a: pytest.fail("Miasm semantics used")
+    )
+    tx = transform(backend, "20402238")  # ldsmaxb w2, w0, [x1]
+    before = state(X1=0x8000, X2=3)
+    before.write_memory(0x8000, b"\xff")
+    assert tx.eval_register_transforms(before) == {"PC": PC + 4, "X0": 0xFF}
+    assert tx.eval_ordered_memory_transforms(before) == ((0x8000, b"\x03"),)
+    assert tx.eval_memory_transforms(before) == {0x8000: b"\x03"}
+    # The register return and conditional write both consume the same incoming
+    # memory state; this is not synthesized as unrelated load/store events.
+    reads = tx.get_used_memory_addresses()
+    assert reads and {tx.eval_memory_address(read.ptr, before) for read in reads} == {0x8000}
+
+
+def test_other_atomic_and_ldapr_stlr_opcodes_remain_fail_closed(backend):
+    with pytest.raises(UnsupportedInstructionError, match="audited LDSMAXB"):
+        transform(backend, "40402138")  # ldsmaxb w1, w0, [x2]
+    with pytest.raises(UnsupportedInstructionError, match="audited LDAPUR"):
+        transform(backend, "20905fd9")  # ldapur x0, [x1, #-7]
+
+
+def test_issue_2419_ldapur_uses_signed_address_and_little_endian_data(backend, monkeypatch):
+    monkeypatch.setattr(
+        "focaccia.semantics.run_instruction", lambda *a: pytest.fail("Miasm semantics used")
+    )
+    tx = transform(backend, "20805fd9")  # ldapur x0, [x1, #-8]
+    before = state(X1=0x8008)
+    before.write_memory(0x8000, bytes.fromhex("efbeadde11111111"))
+    before.write_memory(0x8200, bytes.fromhex("bebafeca22222222"))
+    assert tx.eval_register_transforms(before) == {
+        "PC": PC + 4,
+        "X0": 0x11111111DEADBEEF,
+    }
+    reads = tx.get_used_memory_addresses()
+    assert len(reads) == 1
+    assert tx.eval_memory_address(reads[0].ptr, before) == 0x8000
+    assert tx.memory_writes == []
+
+
 def test_svc_is_deliberately_external_action_not_synthetic_tir_state(backend):
     with pytest.raises(UnsupportedInstructionError, match="residual helper"):
         transform(backend, "010000d4", 0x402F44)

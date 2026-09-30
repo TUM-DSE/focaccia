@@ -103,6 +103,10 @@ class _ExpressionDecoder:
                 "mul",
                 "eq",
                 "ne",
+                "ugt",
+                "ult",
+                "uge",
+                "ule",
                 "and",
                 "or",
                 "xor",
@@ -111,7 +115,7 @@ class _ExpressionDecoder:
                 "ashr",
             ):
                 raise ValueError("Unsupported oracle binary operation")
-            expected_bits = 1 if op in ("eq", "ne") else left.size
+            expected_bits = 1 if op in ("eq", "ne", "ugt", "ult", "uge", "ule") else left.size
             if left.size != right.size or bits != expected_bits:
                 raise ValueError("Oracle binary operation width mismatch")
             if op == "sub":
@@ -124,6 +128,14 @@ class _ExpressionDecoder:
                 unequal = ExprInt(int(op == "ne"), 1)
                 equal = ExprInt(int(op == "eq"), 1)
                 return ExprCond(left ^ right, unequal, equal)
+            if op in ("ugt", "ult", "uge", "ule"):
+                if op == "ugt":
+                    left, right, comparison = right, left, "<u"
+                elif op == "uge":
+                    left, right, comparison = right, left, "<=u"
+                else:
+                    comparison = "<u" if op == "ult" else "<=u"
+                return ExprOp(comparison, left, right)
             names = {"add": "+", "mul": "*", "and": "&", "or": "|", "xor": "^"}
             return ExprOp(names[op], left, right)
         if kind == "unary":

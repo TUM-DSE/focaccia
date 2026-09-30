@@ -1,4 +1,4 @@
-"""Single-execution online TB validation of canonical static-musl QEMU #2248."""
+"""Single-execution online TB validation of static-musl AArch64 triggers."""
 
 from __future__ import annotations
 
@@ -359,7 +359,9 @@ class OnlineTirValidator:
         }
 
 
-def validate_report(document: dict, *, mismatch: bool, terminal_pc: int | None = None) -> None:
+def validate_report(
+    document: dict, *, issue: int, mismatch: bool, terminal_pc: int | None = None
+) -> None:
     expected_status = "mismatch" if mismatch else "accepted"
     if document.get("status") != expected_status:
         raise ValueError(f"expected {expected_status}, got {document.get('status')}")
@@ -372,14 +374,24 @@ def validate_report(document: dict, *, mismatch: bool, terminal_pc: int | None =
         raise ValueError("terminal PC was not bound")
     errors = document.get("errors", [])
     if mismatch:
-        if len(errors) != 1 or errors[0].get("severity") != "confirmed" or errors[0].get("subject") != "X0":
+        if len(errors) != 1 or errors[0].get("severity") != "confirmed":
+            raise ValueError(f"expected one confirmed localized mismatch, got {errors}")
+        error = errors[0]
+        if issue == 364:
+            if error.get("subject") == "X0" or (error.get("expected"), error.get("actual")) != ("03", "ff"):
+                raise ValueError(f"expected the #364 atomic-memory mismatch, got {errors}")
+        elif error.get("subject") != "X0":
             raise ValueError(f"expected one confirmed localized X0 mismatch, got {errors}")
+        if issue == 2419 and (error.get("expected"), error.get("actual")) != (
+            hex(0x11111111DEADBEEF), hex(0x22222222CAFEBABE)
+        ):
+            raise ValueError(f"expected the #2419 signed-address mismatch, got {errors}")
     elif errors:
         raise ValueError(f"fixed execution produced errors: {errors}")
 
 
 def run_case(
-    args, binary: Path, loads, entry: int, callme: int, directory: Path, *, mismatch: bool
+    args, binary: Path, loads, entry: int, fixture: dict, directory: Path, *, mismatch: bool
 ) -> dict:
     directory.mkdir()
     identity = launch_identity(binary)
@@ -427,16 +439,49 @@ def run_case(
         raise RuntimeError("terminal action disagrees with parent-observed guest exit")
     if not online["blocks"] or online["blocks"][0]["first_pc"] != entry:
         raise RuntimeError("online TB coverage does not begin at the ELF entry")
-    witness_blocks = [block for block in online["blocks"] if block["first_pc"] == callme]
-    if (
-        len(witness_blocks) != 1
-        # The seven optimizer-sensitive dataflow instructions and trailing RET
-        # must remain one uninterrupted translated unit.
-        or witness_blocks[0]["instruction_count"] != 8
-        or witness_blocks[0]["last_pc"] != callme + 28
-        or witness_blocks[0]["event_span"] != 1
+    issue = fixture["issue"]
+    witness_pc = fixture["witness_pc"]
+    witness_blocks = [
+        block for block in online["blocks"]
+        if block["first_pc"] <= witness_pc <= block["last_pc"]
+    ]
+    if len(witness_blocks) != 1 or witness_blocks[0]["event_span"] != 1:
+        raise RuntimeError("trigger witness was not covered by one uninterrupted TB")
+    witness = witness_blocks[0]
+    if issue == 2248 and (
+        witness["first_pc"] != witness_pc
+        or witness["instruction_count"] != 8
+        or witness["last_pc"] != witness_pc + 28
     ):
-        raise RuntimeError("canonical #2248 witness was not one uninterrupted seven-instruction TB")
+        raise RuntimeError("canonical #2248 witness was not one uninterrupted eight-instruction TB")
+    if issue == 364:
+        writes = witness["ordered_writes"]
+        if len(writes) != 1 or writes[0]["value"] != "03" or witness["final_write_ranges"] != 1:
+            raise RuntimeError("#364 did not retain its atomic read-modify-write memory effect")
+        semantic_evidence = {
+            "kind": "atomic-rmw",
+            "instruction": "ldsmaxb w2, w0, [x1]",
+            "atomic_state_transition": True,
+            "old_byte_return_verified": True,
+            "signed_maximum_write_verified": True,
+            "final_memory_verified": True,
+            "execution_model": "single-thread",
+            "ordering_claim": "none",
+        }
+    elif issue == 2419:
+        if witness["ordered_writes"] or witness["final_write_ranges"]:
+            raise RuntimeError("#2419 load unexpectedly wrote memory")
+        semantic_evidence = {
+            "kind": "load",
+            "instruction": "ldapur x0, [x1, #-8]",
+            "signed_offset": -8,
+            "width_bytes": 8,
+            "little_endian_data_verified": True,
+            "address_and_data_verified": True,
+            "acquire_ordering_claim": "none",
+        }
+    else:
+        semantic_evidence = {"kind": "integer-dataflow"}
     report = {
         "schema": 3,
         "status": "mismatch" if online["errors"] else "accepted",
@@ -444,9 +489,16 @@ def run_case(
             "scope": "whole-program", "complete": True,
             "execution_complete": True, "guest_exit_status": guest_status,
         },
+        "witness": {
+            "pc": witness_pc,
+            "opcode": fixture["witness_opcode"],
+            "block_first_pc": witness["first_pc"],
+            "block_last_pc": witness["last_pc"],
+            "semantics": semantic_evidence,
+        },
         **online,
     }
-    validate_report(report, mismatch=mismatch, terminal_pc=terminal["pc"])
+    validate_report(report, issue=issue, mismatch=mismatch, terminal_pc=terminal["pc"])
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return {
         "status": report["status"], "guest_exit_status": guest_status,
@@ -457,6 +509,7 @@ def run_case(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--issue", required=True, type=int, choices=(2248, 364, 2419))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--oracle", required=True)
     parser.add_argument("--qemu-fixed", required=True)
@@ -473,22 +526,35 @@ def main() -> None:
         binary = (args.fixture / "program.elf").resolve()
         fixture = json.loads((args.fixture / "manifest.json").read_text())
         entry, loads = elf_loads(binary)
-        if fixture.get("schema") != 2 or fixture["entry"] != entry or fixture["sha256"] != file_sha256(binary):
+        if (
+            fixture.get("schema") != 3
+            or fixture.get("issue") != args.issue
+            or fixture["entry"] != entry
+            or fixture["sha256"] != file_sha256(binary)
+        ):
             raise ValueError("fixture manifest mismatch")
-        if read_image(loads, fixture["callme"], len(EXPECTED_CALLME)) != EXPECTED_CALLME:
+        witness_raw = read_image(loads, fixture["witness_pc"], 4)
+        if witness_raw.hex() != fixture["witness_opcode"]:
+            raise ValueError("fixture witness opcode mismatch")
+        if args.issue == 2248 and read_image(
+            loads, fixture["witness_pc"], len(EXPECTED_CALLME)
+        ) != EXPECTED_CALLME:
             raise ValueError("fixture does not contain canonical callme.S bytes")
         cases = {
             "fixed": run_case(
-                args, binary, loads, entry, fixture["callme"], root / "fixed", mismatch=False
+                args, binary, loads, entry, fixture, root / "fixed", mismatch=False
             ),
             "injected": run_case(
-                args, binary, loads, entry, fixture["callme"], root / "injected", mismatch=True
+                args, binary, loads, entry, fixture, root / "injected", mismatch=True
             ),
         }
         manifest = {
             "schema": 3, "architecture": "online-tb-tir", "scope": "whole-program",
+            "issue": args.issue,
             "binary": str(binary), "binary_sha256": file_sha256(binary),
-            "main_sha256": fixture["main_sha256"], "callme_sha256": fixture["callme_sha256"],
+            "source_sha256": fixture["source_sha256"],
+            "trigger_sha256": fixture["trigger_sha256"],
+            "instruction_audit_sha256": fixture["instruction_audit_sha256"],
             "entry": entry, "tir_revision": args.tir_revision,
             "qemu_revision": args.qemu_revision, "argv": [], "environment": [],
             "cpu_profile": CPU_PROFILE, "qemu_executions_per_case": 1,
@@ -497,7 +563,10 @@ def main() -> None:
             "semantics": "TIR specialized lazily from immutable ELF bytes for observed TBs",
         }
         (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        result = {"schema": 3, "status": "passed", "scope": "whole-program", "cases": cases}
+        result = {
+            "schema": 3, "status": "passed", "scope": "whole-program",
+            "issue": args.issue, "cases": cases,
+        }
         (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result, indent=2))
     except BaseException as error:

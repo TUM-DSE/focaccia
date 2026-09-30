@@ -52,12 +52,14 @@ packaged AST, x86-64 runtime archive, and linker. Capture selects semantics with
 `nix develop .#tir -c capture-transforms --help` to inspect the capture options.
 Native capture still requires its usual debugger/RR permissions.
 
-The opt-in TIR backend has a closed-world allowlist for the 32 AArch64
-instruction classes dynamically reached by the static-musl issue #2248 fixture.
-It covers branches, integer/address construction, scalar and vector memory
-forms, vector DUP, system-register access, and the arithmetic witness. The
-audited representative opcode for every class is committed in
-`reproducers/issue-2248-tir/instruction-classes.json`. A Focaccia-owned Rust
+The opt-in TIR backend has a closed-world allowlist for the AArch64
+instruction classes dynamically reached by the static-musl issue #2248, #364,
+and #2419 fixtures. It covers branches, integer/address construction, scalar
+and vector memory forms, vector DUP, system-register access, the arithmetic
+witness, LDAPUR, and LDSMAXB. Audited representative opcodes are committed in
+the fixtures' `instruction-classes.json` files; the two added classes are
+restricted to exact measured trigger opcodes before they enter the whole-program
+runs. A Focaccia-owned Rust
 helper uses the pinned ASL frontend and specializer, then exports each residual
 computation into Focaccia's existing symbolic-expression representation. It
 does not invoke LLVM or Miasm instruction semantics. Miasm remains only the
@@ -95,19 +97,27 @@ use the installed tools and that the AST matches its manifest.
 using the pinned package, without RR or native debugger attachment. Both checks
 are available on `aarch64-linux` and `x86_64-linux`.
 
-### Live TIR/QEMU smoke without record/replay
+### Live TIR/QEMU validation without record/replay
 
 ```bash
-nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-smoke"
-# Or run the sandboxed check and retain its artifacts in the Nix output:
+nix run .#tir-no-replay-smoke -- --run-directory "$PWD/tir-2248"
+nix run .#tir-issue-364-online -- --run-directory "$PWD/tir-364"
+nix run .#tir-issue-2419-online -- --run-directory "$PWD/tir-2419"
+# Sandboxed checks retain all evidence in their Nix outputs:
 nix build .#checks.aarch64-linux.tir-no-replay-e2e
+nix build .#checks.aarch64-linux.tir-issue-364-e2e
+nix build .#checks.aarch64-linux.tir-issue-2419-e2e
+nix build .#checks.aarch64-linux.tir-aarch64-evaluation-matrix
 ```
 
-The fixture uses the focaccia-eval canonical trigger (`callme(0,0,0,1,2) == -1
-? 0 : 1`) and canonical `callme.S`, linked as a static-musl ET_EXEC. It runs
-with empty argv additions, an empty environment, and the explicit
-`max,sve=off` QEMU CPU profile. The oracle covers every dynamic instruction
-from the ELF entry to the live exit_group SVC boundary.
+Each fixture preserves its canonical trigger values and makes the historical
+result observable as its natural exit status, while avoiding unrelated output
+syscalls. #2248 uses `callme(0,0,0,1,2)`. #364 applies `LDSMAXB` to the canonical
+`{0,-1,3}` values. #2419 loads the canonical `0x11111111deadbeef` through a
+`-8` LDAPUR offset and places a distinct mapped canary at the historically
+misdecoded `+504` address. All are static-musl ET_EXEC files, run with empty
+argv additions, an empty environment, and explicit `max,sve=off`. The oracle
+covers every dynamic instruction from ELF entry to the live exit_group SVC.
 
 The unversioned lockstep plugin wire format binds executable, argv, environment,
 and CPU manifests. In online mode it emits every executed translation block as
@@ -123,13 +133,32 @@ the next boundary. Interior set_tid_address is bound to the plugin process
 identity.
 
 Fixed QEMU naturally exits 0 and is accepted with complete whole-program and
-terminal evidence. The regression-injected package naturally exits 1; its own
-single execution exposes its actual blocks online and reports exactly one
-confirmed `X0` mismatch at the witness. Each case launches QEMU exactly once.
-There is no preliminary discovery execution, precomputed dynamic path oracle,
-debugger stepping, ptrace, RR, Miasm semantics, or synthetic guest-state
-mutation. Unsupported instructions, non-ELF block bytes, event gaps, unmatched
-stores/actions, and incomplete terminal evidence fail closed.
+terminal evidence. Each narrowly regression-injected QEMU naturally exits 1;
+its own single execution exposes its actual blocks online. #2248 and #2419 each
+report exactly one confirmed `X0` mismatch. #364 reports exactly one confirmed
+final-memory mismatch (`03` expected, `ff` actual). Each case launches QEMU
+exactly once. There is no preliminary discovery execution, precomputed dynamic
+path oracle, debugger stepping, ptrace, RR, Miasm semantics, synthetic guest
+mutation, or per-instruction optimizer barrier. Unsupported instructions,
+non-ELF block bytes, event gaps, unmatched stores/actions, and incomplete
+terminal evidence fail closed.
+
+For #364, TIR emits one LDSMAXB architectural state transition: the returned old
+byte and the conditional signed-maximum write both consume the same incoming
+memory state. The single-thread fixture validates the resulting register and
+final byte at the next TB boundary; it does not model the operation as an
+unrelated load and store and makes no multi-thread ordering claim. For #2419,
+the claim is the signed effective address and eight little-endian data bytes,
+not acquire ordering.
+
+| Trigger | Current fixed QEMU | Injected historical regression | Terminal result |
+| --- | --- | --- | --- |
+| #2248 | accepted | one confirmed `X0` mismatch | 0 / 1 |
+| #364 LDSMAXB | accepted | one confirmed memory mismatch (`03` / `ff`) | 0 / 1 |
+| #2419 LDAPUR | accepted | one confirmed `X0` mismatch (target / `+504` canary) | 0 / 1 |
+
+The matrix check writes machine-readable `result-matrix.json`; every row records
+`qemu_executions: 1` and complete terminal evidence.
 
 The run directory retains source and binary identities, exact commands, ordered
 block/store/syscall evidence, cache statistics, terminal evidence, and reports.

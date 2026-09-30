@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=697afb267c64ab979e17d5b275ce9c818532d9bc&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=0d1ca5d180b889c04f69eeeae4e2a7f80550ee83&submodules=1";
       flake = true;
     };
 
@@ -286,14 +286,16 @@
                 witness_return = pc + 4
         assert witness_return is not None
         Path("manifest.json").write_text(json.dumps({
-            "schema": 2,
+            "schema": 3,
+            "issue": 2248,
             "entry": entry,
-            "callme": callme,
-            "callme_stop": callme + len(expected),
+            "witness_pc": callme,
+            "witness_opcode": expected[:4].hex(),
+            "witness_stop": callme + len(expected),
             "witness_return": witness_return,
             "sha256": hashlib.sha256(image).hexdigest(),
-            "main_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/main.c}").read_bytes()).hexdigest(),
-            "callme_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/callme.S}").read_bytes()).hexdigest(),
+            "source_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/main.c}").read_bytes()).hexdigest(),
+            "trigger_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/callme.S}").read_bytes()).hexdigest(),
             "instruction_audit_sha256": hashlib.sha256(Path("${./reproducers/issue-2248-tir/instruction-classes.json}").read_bytes()).hexdigest(),
         }, indent=2) + "\n")
         PY
@@ -312,6 +314,7 @@
       runtimeInputs = [ pythonEnv ];
       text = ''
         exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} \
+          --issue 2248 \
           --fixture ${tirSmokeFixture} \
           --oracle ${tirOracle}/bin/focaccia-tir-oracle \
           --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 \
@@ -319,9 +322,116 @@
           --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
           --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/lib/plugins/libfocaccia.so \
           --tir-revision ${tir.rev} \
-          --qemu-revision 697afb267c64ab979e17d5b275ce9c818532d9bc \
+          --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 \
           "$@"
       '';
+    };
+
+    mkAarch64TirEvalFixture = {
+      issue,
+      source,
+      trigger,
+      witnessOpcode,
+      witnessOffset,
+    }: pkgs.stdenvNoCC.mkDerivation {
+      pname = "tir-issue-${toString issue}-static-musl-fixture";
+      version = "1";
+      dontUnpack = true;
+      nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc pkgs.binutils pkgs.python3 ];
+      buildPhase = ''
+        ${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc \
+          -static -no-pie -O2 -march=armv8.4-a+lse -Wl,--build-id=none \
+          ${source} ${trigger} -o program.elf
+        nm --defined-only program.elf > symbols.txt
+        python - <<'PY'
+        import hashlib, json, struct
+        from pathlib import Path
+        issue = ${toString issue}
+        expected = bytes.fromhex("${witnessOpcode}")
+        symbols = {parts[2]: int(parts[0], 16) for line in Path("symbols.txt").read_text().splitlines()
+                   if len(parts := line.split()) == 3}
+        image = Path("program.elf").read_bytes()
+        entry = struct.unpack_from("<Q", image, 24)[0]
+        witness = symbols["issue${toString issue}"] + ${toString witnessOffset}
+        phoff = struct.unpack_from("<Q", image, 32)[0]
+        phentsize, phnum = struct.unpack_from("<HH", image, 54)
+        def virtual_bytes(address, size):
+            matches = []
+            for index in range(phnum):
+                kind, _, offset, vaddr, _, filesz, _, _ = struct.unpack_from(
+                    "<IIQQQQQQ", image, phoff + index * phentsize
+                )
+                if kind == 1 and vaddr <= address and address + size <= vaddr + filesz:
+                    matches.append(image[offset + address - vaddr:offset + address - vaddr + size])
+            assert len(matches) == 1
+            return matches[0]
+        assert virtual_bytes(witness, 4) == expected
+        Path("manifest.json").write_text(json.dumps({
+            "schema": 3,
+            "issue": issue,
+            "entry": entry,
+            "witness_pc": witness,
+            "witness_opcode": expected.hex(),
+            "sha256": hashlib.sha256(image).hexdigest(),
+            "source_sha256": hashlib.sha256(Path("${source}").read_bytes()).hexdigest(),
+            "trigger_sha256": hashlib.sha256(Path("${trigger}").read_bytes()).hexdigest(),
+            "instruction_audit_sha256": hashlib.sha256(
+                Path("${builtins.dirOf source}/instruction-classes.json").read_bytes()
+            ).hexdigest(),
+        }, indent=2) + "\n")
+        PY
+      '';
+      installPhase = ''
+        mkdir -p "$out"
+        cp program.elf manifest.json "$out/"
+        cp ${source} "$out/main.c"
+        cp ${trigger} "$out/trigger.S"
+        cp ${builtins.dirOf source}/instruction-classes.json "$out/instruction-classes.json"
+      '';
+    };
+
+    tirIssue364Fixture = mkAarch64TirEvalFixture {
+      issue = 364;
+      source = ./reproducers/issue-364-tir/main.c;
+      trigger = ./reproducers/issue-364-tir/trigger.S;
+      witnessOpcode = "20402238";
+      witnessOffset = 8;
+    };
+    tirIssue2419Fixture = mkAarch64TirEvalFixture {
+      issue = 2419;
+      source = ./reproducers/issue-2419-tir/main.c;
+      trigger = ./reproducers/issue-2419-tir/trigger.S;
+      witnessOpcode = "20805fd9";
+      witnessOffset = 4;
+    };
+
+    mkAarch64TirEvalRunner = { issue, fixture, injectedPackage }:
+      pkgs.writeShellApplication {
+        name = "tir-issue-${toString issue}-online";
+        runtimeInputs = [ pythonEnv ];
+        text = ''
+          exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} \
+            --issue ${toString issue} \
+            --fixture ${fixture} \
+            --oracle ${tirOracle}/bin/focaccia-tir-oracle \
+            --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 \
+            --qemu-injected ${injectedPackage}/bin/qemu-aarch64 \
+            --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
+            --plugin-injected ${injectedPackage}/lib/plugins/libfocaccia.so \
+            --tir-revision ${tir.rev} \
+            --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 \
+            "$@"
+        '';
+      };
+    tirIssue364Runner = mkAarch64TirEvalRunner {
+      issue = 364;
+      fixture = tirIssue364Fixture;
+      injectedPackage = qemu-submodule.packages.${system}.with-focaccia-plugin-364;
+    };
+    tirIssue2419Runner = mkAarch64TirEvalRunner {
+      issue = 2419;
+      fixture = tirIssue2419Fixture;
+      injectedPackage = qemu-submodule.packages.${system}.with-focaccia-plugin-2419;
     };
 
     nativeTerminalFixtures = pkgs.stdenv.mkDerivation {
@@ -476,6 +586,8 @@
         ./reproducers/issue-2248-tir/main.c
         ./reproducers/issue-2248-tir/callme.S
         ./reproducers/issue-2248-tir/instruction-classes.json
+        ./reproducers/issue-364-tir
+        ./reproducers/issue-2419-tir
       ];
     };
 
@@ -2335,7 +2447,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "697afb267c64ab979e17d5b275ce9c818532d9bc";
+      assert qemu-submodule.rev == "0d1ca5d180b889c04f69eeeae4e2a7f80550ee83";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -3678,12 +3790,20 @@
       qemu-plugin = qemu-submodule.packages.${system}.default;
       qemu-plugin-2248-injected =
         qemu-submodule.packages.${system}.with-focaccia-plugin-2248;
+      qemu-plugin-364-injected =
+        qemu-submodule.packages.${system}.with-focaccia-plugin-364;
+      qemu-plugin-2419-injected =
+        qemu-submodule.packages.${system}.with-focaccia-plugin-2419;
       qemu-plugin-source = qemu-submodule.packages.${system}.plugin-source;
 
       rr = rrTool;
 
       tir-no-replay-fixture = tirSmokeFixture;
       tir-no-replay-smoke = tirSmokeRunner;
+      tir-issue-364-fixture = tirIssue364Fixture;
+      tir-issue-364-online = tirIssue364Runner;
+      tir-issue-2419-fixture = tirIssue2419Fixture;
+      tir-issue-2419-online = tirIssue2419Runner;
       tir-oracle = tirOracle;
       tir-translator = tirPackages.tiramisu;
       tir-asl-specification = tirPackages.asl-specification;
@@ -3698,6 +3818,14 @@
       tir-no-replay-smoke = {
         type = "app";
         program = "${tirSmokeRunner}/bin/tir-no-replay-smoke";
+      };
+      tir-issue-364-online = {
+        type = "app";
+        program = "${tirIssue364Runner}/bin/tir-issue-364-online";
+      };
+      tir-issue-2419-online = {
+        type = "app";
+        program = "${tirIssue2419Runner}/bin/tir-issue-2419-online";
       };
       # Query derivation metadata through the client, without building optional
       # inputs or requiring a Nix daemon inside a sandboxed check.
@@ -3862,6 +3990,44 @@
         nativeBuildInputs = [ tirSmokeRunner ];
       } ''
         tir-no-replay-smoke --run-directory "$out"
+      '';
+      tir-issue-364-e2e = pkgs.runCommand "tir-issue-364-e2e" {
+        nativeBuildInputs = [ tirIssue364Runner ];
+      } ''
+        tir-issue-364-online --run-directory "$out"
+      '';
+      tir-issue-2419-e2e = pkgs.runCommand "tir-issue-2419-e2e" {
+        nativeBuildInputs = [ tirIssue2419Runner ];
+      } ''
+        tir-issue-2419-online --run-directory "$out"
+      '';
+      tir-aarch64-evaluation-matrix = pkgs.runCommand "tir-aarch64-evaluation-matrix" {
+        nativeBuildInputs = [ tirIssue364Runner tirIssue2419Runner pkgs.python3 ];
+      } ''
+        mkdir "$out"
+        tir-issue-364-online --run-directory "$out/issue-364"
+        tir-issue-2419-online --run-directory "$out/issue-2419"
+        python - "$out" <<'PY'
+        import json, sys
+        from pathlib import Path
+        root = Path(sys.argv[1])
+        rows = []
+        for issue in (364, 2419):
+            result = json.loads((root / f"issue-{issue}" / "result.json").read_text())
+            for implementation in ("fixed", "injected"):
+                case = result["cases"][implementation]
+                rows.append({
+                    "issue": issue,
+                    "implementation": implementation,
+                    "validation": case["status"],
+                    "guest_exit_status": case["guest_exit_status"],
+                    "qemu_executions": case["qemu_executions"],
+                    "terminal_evidence": case["terminal_evidence"],
+                })
+        assert all(row["qemu_executions"] == 1 for row in rows)
+        matrix = {"schema": 1, "status": "passed", "rows": rows}
+        (root / "result-matrix.json").write_text(json.dumps(matrix, indent=2) + "\n")
+        PY
       '';
       default-without-tir = pkgs.runCommand "focaccia-default-without-tir" {
         # Runtime closure check. The companion app checks the full build graph

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "issue": 364,
+  "instructions": [
+    {
+      "bytes": "20402238",
+      "class": "decode_aarch64_memory_atomicops_ld",
+      "assembly": "ldsmaxb w2, w0, [x1]",
+      "evidence": "one TIR atomic state transition reads the old byte, returns it in W0, and conditionally writes the signed maximum"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-"""Static contracts for the whole-program #2248 harness; no QEMU is launched."""
+"""Static contracts for the whole-program AArch64 TIR harness; no QEMU is launched."""
 
 import json
 from pathlib import Path
@@ -13,10 +13,30 @@ probe = SimpleNamespace(**PROBE)
 PC = 0x400000
 
 
-def test_fixture_has_canonical_focaccia_eval_semantics():
-    source = (Path(__file__).parents[1] / "reproducers/issue-2248-tir/main.c").read_text()
-    assert "return callme(0, 0, 0, 1, 2) == -1 ? 0 : 1;" in source
-    assert "printf" not in source
+def test_fixtures_have_canonical_focaccia_eval_semantics():
+    root = Path(__file__).parents[1] / "reproducers"
+    source2248 = (root / "issue-2248-tir/main.c").read_text()
+    source364 = (root / "issue-364-tir/main.c").read_text()
+    source2419 = (root / "issue-2419-tir/main.c").read_text()
+    assert "return callme(0, 0, 0, 1, 2) == -1 ? 0 : 1;" in source2248
+    assert "int8_t values[3] = { 0, -1, 3 };" in source364
+    assert "0x11111111deadbeef" in source2419
+    assert "0x22222222cafebabe" in source2419
+    assert all("printf" not in source for source in (source2248, source364, source2419))
+
+
+def test_remaining_trigger_opcodes_and_claims_are_exact():
+    root = Path(__file__).parents[1] / "reproducers"
+    atomic = json.loads((root / "issue-364-tir/instruction-classes.json").read_text())
+    ldapur = json.loads((root / "issue-2419-tir/instruction-classes.json").read_text())
+    assert atomic["instructions"] == [{
+        "bytes": "20402238",
+        "class": "decode_aarch64_memory_atomicops_ld",
+        "assembly": "ldsmaxb w2, w0, [x1]",
+        "evidence": "one TIR atomic state transition reads the old byte, returns it in W0, and conditionally writes the signed maximum",
+    }]
+    assert ldapur["instructions"][0]["bytes"] == "20805fd9"
+    assert ldapur["instructions"][0]["class"].endswith("signed_offset_lda_stl")
 
 
 def elf(code=probe.EXPECTED_CALLME, *, dynamic=False):
@@ -87,7 +107,9 @@ def report(*, mismatch=False):
 
 @pytest.mark.parametrize("mismatch", [False, True])
 def test_report_requires_complete_terminal_evidence_and_localized_x0(mismatch):
-    probe.validate_report(report(mismatch=mismatch), mismatch=mismatch, terminal_pc=PC + 8)
+    probe.validate_report(
+        report(mismatch=mismatch), issue=2248, mismatch=mismatch, terminal_pc=PC + 8
+    )
 
 
 @pytest.mark.parametrize("mutation", [
@@ -101,7 +123,7 @@ def test_report_rejects_weakened_whole_program_evidence(mutation):
     document = report()
     mutation(document)
     with pytest.raises(ValueError):
-        probe.validate_report(document, mismatch=False, terminal_pc=PC + 8)
+        probe.validate_report(document, issue=2248, mismatch=False, terminal_pc=PC + 8)
 
 
 def test_harness_is_single_execution_online_without_path_oracle():

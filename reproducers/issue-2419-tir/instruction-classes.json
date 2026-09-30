@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "issue": 2419,
+  "instructions": [
+    {
+      "bytes": "20805fd9",
+      "class": "decode_aarch64_memory_single_general_immediate_signed_offset_lda_stl",
+      "assembly": "ldapur x0, [x1, #-8]",
+      "evidence": "TIR computes the signed address X1-8 and reads eight little-endian bytes"
+    }
+  ]
+}
