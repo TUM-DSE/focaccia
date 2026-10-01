@@ -21,6 +21,7 @@ from focaccia.qemu.transport import (
     PluginProtocolError,
     PluginLaunchIdentity,
     PluginTransport,
+    SnapshotPlan,
     read_exact,
 )
 
@@ -343,6 +344,43 @@ def test_event_stream_accepts_contiguous_translation_block_descriptor():
     assert (block.pc, block.address, block.size) == (0x4000, 0x4008, 3)
     transport.close()
     peer.close()
+
+
+def test_boundary_snapshot_plan_is_installed_once_and_reused_by_occurrence():
+    client, peer = socket.socketpair()
+
+    def serve(sock):
+        for occurrence, value in ((1, 7), (2, 9)):
+            sock.sendall(event(EVENT_TRANSLATION_BLOCK, occurrence, occurrence,
+                               pc=0x4000, address=0x4000, size=1))
+            if occurrence == 1:
+                command = read_exact(sock, COMMAND_SIZE)
+                assert command[0] == 6
+                assert struct.unpack_from("<QQI", command, 8) == (0x4000, 1, 1)
+                assert read_exact(sock, 16).split(b"\0", 1)[0] == b"rax"
+                sock.sendall(struct.pack("<B7xQQI4x", 0, 0x4000, 1, 1))
+            command = read_exact(sock, COMMAND_SIZE)
+            assert command[0] == 7
+            sock.sendall(struct.pack("<B3xIQQQQ", 0, 1, 0x4000, 1,
+                                     occurrence, occurrence))
+            sock.sendall(struct.pack("<B7x64s", 8, value.to_bytes(8, "little")))
+            assert read_exact(sock, COMMAND_SIZE)[0] == 3
+
+    thread, errors = peer_thread(peer, serve)
+    transport = PluginTransport(client, x86.ArchX86())
+    plan = SnapshotPlan(0x4000, 1, ("rax",))
+    values = []
+    for occurrence in (1, 2):
+        transport.receive_event()
+        if occurrence == 1:
+            transport.install_snapshot_plan(plan)
+        snapshot = transport.capture_snapshot(0x4000)
+        assert snapshot.occurrence == occurrence
+        values.append(snapshot.registers[0].value)
+        transport.advance()
+    assert values == [7, 9]
+    transport.close()
+    finish_peer(thread, errors)
 
 
 def test_event_stream_rejects_noncontiguous_translation_block_descriptor():

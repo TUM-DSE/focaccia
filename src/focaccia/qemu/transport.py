@@ -31,12 +31,20 @@ HANDSHAKE_SIZE = 176
 EVENT_SIZE = 96
 MAX_REGISTER_BYTES = 64
 DEFAULT_MAX_MEMORY_PAYLOAD = 16 * 1024 * 1024
+MAX_SNAPSHOT_PLANS = 4096
+MAX_PLAN_REGISTERS = 32
+PLAN_REGISTER_SIZE = 16
+PLAN_ACK_SIZE = 32
+SNAPSHOT_HEADER_SIZE = 40
+SNAPSHOT_VALUE_SIZE = 64
 
 _COMMAND_READ_REGISTER = 1
 _COMMAND_READ_MEMORY = 2
 _COMMAND_STEP = 3
 _COMMAND_FINISH = 4
 _COMMAND_ABORT = 5
+_COMMAND_INSTALL_PLAN = 6
+_COMMAND_CAPTURE_PLAN = 7
 _RESPONSE_OK = 0
 _RESPONSE_UNAVAILABLE = 1
 _ENDIANNESS_CODES = {"little": 1, "big": 2}
@@ -46,6 +54,7 @@ CAP_STATUS = 1 << 2
 CAP_VECTOR = 1 << 3
 CAP_TLS = 1 << 4
 CAP_AARCH64_SVC = 1 << 5
+CAP_BOUNDARY_SNAPSHOTS = 1 << 6
 
 EVENT_CUTPOINT = 1
 EVENT_STORE = 2
@@ -120,6 +129,27 @@ class PluginEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundarySnapshotUnavailable(RuntimeError):
+    """The plugin could not capture a plan; the caller must fall back synchronously."""
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotPlan:
+    pc: int
+    generation: int
+    registers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BoundarySnapshot:
+    pc: int
+    generation: int
+    occurrence: int
+    event_sequence: int
+    registers: tuple[RegisterObservation, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PluginHandshake:
     pid: int
     target: str
@@ -173,6 +203,11 @@ def _pack_command(
         frame = struct.pack("<B31x", _COMMAND_FINISH)
     elif command == "abort":
         frame = struct.pack("<B31x", _COMMAND_ABORT)
+    elif command in {"install-plan", "capture-plan"}:
+        if address < 0 or address >= 1 << 64 or size <= 0 or size >= 1 << 64:
+            raise ValueError("Snapshot plan identity must use nonzero bounded integers.")
+        opcode = _COMMAND_INSTALL_PLAN if command == "install-plan" else _COMMAND_CAPTURE_PLAN
+        frame = struct.pack("<B7xQQI4x", opcode, address, size, 0)
     else:
         raise ValueError(f"Unknown plugin command {command!r}.")
     if len(frame) != COMMAND_SIZE:
@@ -216,6 +251,9 @@ class PluginTransport:
         self._last_sequence = 0
         self._last_epoch = 0
         self._completed = False
+        self._plans: dict[int, SnapshotPlan] = {}
+        self._snapshot_occurrences: dict[tuple[int, int], int] = {}
+        self._boundary_pc: int | None = None
 
     @property
     def closed(self) -> bool:
@@ -312,10 +350,88 @@ class PluginTransport:
             raise PluginProtocolError("Plugin returned payload bytes for a non-store event.")
         self._last_sequence = sequence
         self._last_epoch = epoch
+        self._boundary_pc = pc if kind == EVENT_TRANSLATION_BLOCK else None
         return PluginEvent(kind, sequence, epoch, pc, address, size, auxiliary, value[:size])
+
+    def install_snapshot_plan(self, plan: SnapshotPlan) -> None:
+        if self._boundary_pc != plan.pc:
+            raise PluginProtocolError("Snapshot plan installation is not at its TB boundary.")
+        if not 1 <= len(plan.registers) <= MAX_PLAN_REGISTERS:
+            raise ValueError("Snapshot plans must contain between 1 and 32 registers.")
+        old = self._plans.get(plan.pc)
+        if plan.generation <= 0 or (old is not None and plan.generation <= old.generation):
+            raise ValueError("Snapshot plan generation must increase at each PC.")
+        encoded = []
+        for register in plan.registers:
+            try:
+                raw = register.encode("ascii")
+            except UnicodeEncodeError as error:
+                raise ValueError("Snapshot register names must be ASCII.") from error
+            if not raw or len(raw) >= PLAN_REGISTER_SIZE:
+                raise ValueError("Snapshot register names must contain 1 to 15 bytes.")
+            encoded.append(raw + bytes(PLAN_REGISTER_SIZE - len(raw)))
+        if len(set(plan.registers)) != len(plan.registers):
+            raise ValueError("Snapshot plans cannot contain duplicate registers.")
+        self._send_command(struct.pack(
+            "<B7xQQI4x", _COMMAND_INSTALL_PLAN, plan.pc, plan.generation,
+            len(plan.registers),
+        ))
+        self._connection.sendall(b"".join(encoded))
+        status, pc, generation, count = struct.unpack(
+            "<B7xQQI4x", read_exact(self._connection, PLAN_ACK_SIZE)
+        )
+        if status != _RESPONSE_OK or (pc, generation, count) != (
+            plan.pc, plan.generation, len(plan.registers)
+        ):
+            raise PluginProtocolError("Plugin returned a malformed plan acknowledgement.")
+        if len(self._plans) >= MAX_SNAPSHOT_PLANS and old is None:
+            raise PluginProtocolError("Snapshot plan table limit exceeded.")
+        self._plans[plan.pc] = plan
+        self._snapshot_occurrences[(plan.pc, plan.generation)] = 0
+
+    def capture_snapshot(self, pc: int) -> BoundarySnapshot:
+        if self._boundary_pc != pc or pc not in self._plans:
+            raise PluginProtocolError("Snapshot capture is not at an installed TB boundary.")
+        plan = self._plans[pc]
+        self._send_command(struct.pack(
+            "<B7xQQ8x", _COMMAND_CAPTURE_PLAN, pc, plan.generation
+        ))
+        status, count, returned_pc, generation, occurrence, sequence = struct.unpack(
+            "<B3xIQQQQ", read_exact(self._connection, SNAPSHOT_HEADER_SIZE)
+        )
+        identity = (returned_pc, generation)
+        if identity != (pc, plan.generation):
+            raise PluginProtocolError("Plugin snapshot identity does not match its plan.")
+        if status == _RESPONSE_UNAVAILABLE:
+            if count != 0 or sequence != 0:
+                raise PluginProtocolError("Malformed unavailable boundary snapshot.")
+            raise BoundarySnapshotUnavailable(
+                f"Plugin could not capture plan {generation} at {pc:#x}."
+            )
+        expected_occurrence = self._snapshot_occurrences[identity] + 1
+        if (
+            status != _RESPONSE_OK or count != len(plan.registers)
+            or occurrence != expected_occurrence or sequence != self._last_sequence
+        ):
+            raise PluginProtocolError("Boundary snapshot ordering or bounds are invalid.")
+        observations = []
+        for register in plan.registers:
+            size, raw = struct.unpack(
+                "<B7x64s", read_exact(self._connection, SNAPSHOT_VALUE_SIZE + 8)
+            )
+            if size <= 0 or size > MAX_REGISTER_BYTES or any(raw[size:]):
+                raise PluginProtocolError("Plugin returned a malformed snapshot register.")
+            observations.append(RegisterObservation(
+                register, int.from_bytes(raw[:size], self.arch.endianness), size * 8
+            ))
+        self._snapshot_occurrences[identity] = occurrence
+        return BoundarySnapshot(
+            pc, generation, occurrence, sequence, tuple(observations)
+        )
 
     def advance(self) -> None:
         self._send_command(_pack_command("step"))
+        self._boundary_pc = None
 
     def _send_command(self, frame: bytes) -> None:
         if self._closed:

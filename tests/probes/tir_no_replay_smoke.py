@@ -13,16 +13,25 @@ import subprocess
 
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.qemu.transport import (
+    CAP_AARCH64_SVC,
+    CAP_BOUNDARY_SNAPSHOTS,
+    CAP_INTEGER,
+    CAP_PC,
+    CAP_STATUS,
     EVENT_AARCH64_SVC_ENTRY,
     EVENT_AARCH64_SVC_SUCCESSOR,
     EVENT_STORE,
     EVENT_TRANSLATION_BLOCK,
+    BoundarySnapshotUnavailable,
     PluginLaunchIdentity,
     PluginListener,
     PluginTransport,
+    SnapshotPlan as WireSnapshotPlan,
     manifest_sha256,
 )
+from focaccia.qemu.snapshot import plan_minimal_snapshot
 from focaccia.qemu.validation_server import PluginProgramState
+from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform, SymbolicTransformComposer
 from focaccia.tir_backend import decode_response
 
@@ -167,6 +176,10 @@ class OnlineTirValidator:
         self.terminal: dict | None = None
         self.oracle_batches = 0
         self.specializations = 0
+        self.snapshot_plans: dict[int, WireSnapshotPlan] = {}
+        self.snapshot_plan_installs = 0
+        self.snapshot_plan_reuses = 0
+        self.snapshot_fallbacks = 0
 
     @staticmethod
     def _is_svc(code: bytes) -> bool:
@@ -244,14 +257,57 @@ class OnlineTirValidator:
         # descriptor is the explicit boundary PC.
         self.state.flush_observations()
         self.state.write_register("PC", event.pc)
+        evaluation_state = self.state
+        if transform is not None:
+            dependency_plan = plan_minimal_snapshot(self.state, None, transform)
+            def wire_register(name: str) -> str:
+                if name == "CPSR":
+                    return "cpsr"
+                if name == "WSP":
+                    return "sp"
+                if name.startswith("W") and name[1:].isdigit():
+                    return f"x{name[1:]}"
+                return name.lower()
+
+            wire_aliases: dict[str, list[str]] = {}
+            for canonical in dependency_plan.registers:
+                if canonical in {"Z", "WZR", "XZR"}:
+                    continue
+                wire_aliases.setdefault(wire_register(canonical), []).append(canonical)
+            wire_registers = tuple(wire_aliases)
+            if not dependency_plan.memory and 0 < len(wire_registers) <= 32:
+                plan = self.snapshot_plans.get(event.pc)
+                if plan is None or plan.registers != wire_registers:
+                    plan = WireSnapshotPlan(
+                        event.pc, 1 if plan is None else plan.generation + 1,
+                        wire_registers,
+                    )
+                    self.transport.install_snapshot_plan(plan)
+                    self.snapshot_plans[event.pc] = plan
+                    self.snapshot_plan_installs += 1
+                else:
+                    self.snapshot_plan_reuses += 1
+                try:
+                    snapshot = self.transport.capture_snapshot(event.pc)
+                except BoundarySnapshotUnavailable:
+                    self.snapshot_fallbacks += 1
+                else:
+                    captured = ProgramState(self.arch)
+                    captured.write_register("PC", event.pc)
+                    for observation in snapshot.registers:
+                        for canonical in wire_aliases[observation.name]:
+                            captured.write_register(canonical, observation.value)
+                    evaluation_state = captured
+            else:
+                self.snapshot_fallbacks += 1
         if transform is None:
             expected_registers: dict[str, int] = {}
             expected_stores: tuple[tuple[int, bytes], ...] = ()
             expected_memory: dict[int, bytes] = {}
         else:
-            expected_registers = transform.eval_validation_register_transforms(self.state)
-            expected_stores = transform.eval_ordered_memory_transforms(self.state)
-            expected_memory = transform.eval_memory_transforms(self.state)
+            expected_registers = transform.eval_validation_register_transforms(evaluation_state)
+            expected_stores = transform.eval_ordered_memory_transforms(evaluation_state)
+            expected_memory = transform.eval_memory_transforms(evaluation_state)
         self.active = PendingBlock(
             event.pc, event.address, event.size, event.sequence,
             hashlib.sha256(raw).hexdigest(), transform, expected_registers,
@@ -381,6 +437,9 @@ class OnlineTirValidator:
                 "specialized_instructions": self.specializations,
                 "instruction_cache_entries": len(self.instruction_cache),
                 "oracle_batches": self.oracle_batches,
+                "snapshot_plan_installs": self.snapshot_plan_installs,
+                "snapshot_plan_reuses": self.snapshot_plan_reuses,
+                "snapshot_synchronous_fallbacks": self.snapshot_fallbacks,
             },
         }
 
@@ -425,7 +484,13 @@ def run_case(
     text_start = min(base for base, _ in executable_loads)
     text_stop = max(base + len(raw) - 4 for base, raw in executable_loads)
     socket_path = directory / "plugin.sock"
-    listener = PluginListener(str(socket_path), ArchAArch64("little"), expected_identity=identity)
+    listener = PluginListener(
+        str(socket_path), ArchAArch64("little"), expected_identity=identity,
+        required_capabilities=(
+            CAP_PC | CAP_INTEGER | CAP_STATUS | CAP_AARCH64_SVC
+            | CAP_BOUNDARY_SNAPSHOTS
+        ),
+    )
     listener.start()
     qemu_path = args.qemu_injected if mismatch else args.qemu_fixed
     plugin_path = args.plugin_injected if mismatch else args.plugin_fixed
