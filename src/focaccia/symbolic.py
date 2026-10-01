@@ -583,12 +583,60 @@ class _TransformEvaluator(MiasmSymbolResolver):
             return None
         return ExprInt(data[0], args[0].size)
 
+    def _rewrite_deferred_memory(self, expression: Expr) -> Expr:
+        """Resolve concrete deferred bytes bottom-up before generic evaluation."""
+        results: dict[int, Expr] = {}
+        pending: list[tuple[Expr, bool]] = [(expression, False)]
+        while pending:
+            current, expanded = pending.pop()
+            key = id(current)
+            if key in results:
+                continue
+            children = expression_children(current)
+            if not expanded:
+                pending.append((current, True))
+                pending.extend(
+                    (child, False) for child in reversed(children)
+                    if id(child) not in results
+                )
+                continue
+            if isinstance(current, (ExprInt, ExprId, ExprLoc)):
+                rewritten = current
+            elif isinstance(current, ExprMem):
+                rewritten = ExprMem(results[id(current.ptr)], current.size)
+            elif isinstance(current, ExprSlice):
+                rewritten = ExprSlice(results[id(current.arg)], current.start, current.stop)
+            elif isinstance(current, ExprCond):
+                rewritten = ExprCond(
+                    results[id(current.cond)], results[id(current.src1)],
+                    results[id(current.src2)],
+                )
+            elif isinstance(current, ExprCompose):
+                rewritten = ExprCompose(*(results[id(arg)] for arg in current.args))
+            elif isinstance(current, ExprOp):
+                args = tuple(results[id(arg)] for arg in current.args)
+                rewritten = ExprOp(current.op, *args)
+                if current.op == _DEFERRED_MEMORY_BYTE_OP and len(args) == 2:
+                    concrete_args = tuple(
+                        expr_simp(eval_expr(arg, self)) for arg in args
+                    )
+                    resolved = self.resolve_environment_operation(
+                        current.op, concrete_args
+                    ) if all(isinstance(arg, ExprInt) for arg in concrete_args) else None
+                    if resolved is not None:
+                        rewritten = resolved
+            else:
+                rewritten = current
+            results[key] = expr_simp(rewritten)
+        return results[id(expression)]
+
     def evaluate(self, expression: Expr) -> int:
         for node in iter_expression_dag(expression):
             if isinstance(node, ExprId) and isinstance(node.name, str):
                 contextual = node.name == EXECUTION_TID.name or _allocation_occurrence(node.name) is not None
                 if contextual and node.size != 64:
                     raise SymbolEvaluationError("Execution context requires 64-bit expression width.")
+        expression = self._rewrite_deferred_memory(expression)
         result = expr_simp(eval_expr(expression, self))
         if not isinstance(result, ExprInt):
             failing = None
