@@ -180,7 +180,7 @@ def test_unsupported_architecture_is_rejected_before_launch(monkeypatch):
 def test_response_depth_is_bounded():
     document = response()
     expression = constant(64, 0)
-    for _ in range(66):
+    for _ in range(130):
         expression = {"kind": "unary", "bits": 64, "op": "not", "value": expression}
     document["outputs"]["X0"] = expression
     with pytest.raises(SymbolEvaluationError, match="depth"):

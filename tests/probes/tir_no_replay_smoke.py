@@ -142,6 +142,15 @@ class OnlineTirValidator:
         if not self.loads:
             raise ValueError("ELF has no executable file-backed load segment")
         self.oracle = oracle
+        oracle_env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
+        }
+        self.oracle_process = subprocess.Popen(
+            [oracle, "--export-transitions"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            env=oracle_env,
+        )
         self.transport = transport
         self.pid = pid
         self.arch = ArchAArch64("little")
@@ -167,23 +176,27 @@ class OnlineTirValidator:
         missing = [(pc, code) for pc, code in instructions if (pc, code) not in self.instruction_cache]
         if not missing:
             return
-        payload = "".join(f"{pc} {code.hex()}\n" for pc, code in missing)
-        env = {
-            key: value for key, value in os.environ.items()
-            if not key.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
-        }
-        completed = subprocess.run(
-            [self.oracle, "--export-transitions"], input=payload, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600,
-            check=False, env=env,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"TIR specialization failed: {completed.stderr[-4096:].strip()}")
-        lines = completed.stdout.splitlines()
-        if len(lines) != len(missing):
-            raise RuntimeError("TIR batch response cardinality mismatch")
+        if self.oracle_process.poll() is not None:
+            diagnostic = self.oracle_process.stderr.read()[-4096:].strip()
+            raise RuntimeError(f"TIR specialization process exited: {diagnostic}")
+        oracle_input = self.oracle_process.stdin
+        oracle_output = self.oracle_process.stdout
+        if oracle_input is None or oracle_output is None:
+            raise RuntimeError("TIR specialization pipes are unavailable")
+        oracle_input.write("".join(f"{pc} {code.hex()}\n" for pc, code in missing))
+        oracle_input.flush()
+        lines = [oracle_output.readline().rstrip("\n") for _ in missing]
+        if any(not line for line in lines):
+            diagnostic = self.oracle_process.stderr.read()[-4096:].strip() if self.oracle_process.poll() is not None else ""
+            raise RuntimeError(f"TIR batch response cardinality mismatch: {diagnostic}")
         for (pc, code), line in zip(missing, lines, strict=True):
-            _next_pc, outputs = decode_response(line, pc, code)
+            try:
+                _next_pc, outputs = decode_response(line, pc, code)
+            except BaseException as error:
+                raise RuntimeError(
+                    f"TIR specialization failed closed at PC {pc:#x}, "
+                    f"opcode {code.hex()}: {error}"
+                ) from error
             self.instruction_cache[(pc, code)] = outputs
         self.oracle_batches += 1
         self.specializations += len(missing)
@@ -329,6 +342,19 @@ class OnlineTirValidator:
         self.pending_svc = None
         self.transport.advance()
 
+    def close(self) -> None:
+        if self.oracle_process.stdin is not None:
+            self.oracle_process.stdin.close()
+        try:
+            status = self.oracle_process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.oracle_process.kill()
+            self.oracle_process.wait()
+            raise RuntimeError("TIR specialization process did not stop")
+        if status != 0:
+            diagnostic = self.oracle_process.stderr.read()[-4096:].strip()
+            raise RuntimeError(f"TIR specialization process failed: {diagnostic}")
+
     def run(self) -> dict:
         while self.terminal is None:
             event = self.transport.receive_event()
@@ -414,6 +440,7 @@ def run_case(
     ).open("wb") as stderr:
         process = subprocess.Popen(command, env={}, stdout=stdout, stderr=stderr)
         transport: PluginTransport | None = None
+        validator: OnlineTirValidator | None = None
         try:
             transport, handshake = listener.accept()
             validator = OnlineTirValidator(binary, loads, args.oracle, transport, handshake.pid)
@@ -427,6 +454,8 @@ def run_case(
             process.wait(timeout=30)
             raise
         finally:
+            if validator is not None:
+                validator.close()
             listener.close()
         guest_status = process.wait(timeout=30)
     expected_status = 1 if mismatch else 0

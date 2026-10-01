@@ -575,7 +575,7 @@ class _TransformEvaluator(MiasmSymbolResolver):
                 contextual = node.name == EXECUTION_TID.name or _allocation_occurrence(node.name) is not None
                 if contextual and node.size != 64:
                     raise SymbolEvaluationError("Execution context requires 64-bit expression width.")
-        result = eval_expr(expression, self)
+        result = expr_simp(eval_expr(expression, self))
         if not isinstance(result, ExprInt):
             raise SymbolEvaluationError(
                 f"Expression {expression} remains unresolved as {result}; "

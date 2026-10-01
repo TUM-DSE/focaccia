@@ -97,6 +97,20 @@ def test_32bit_destination_zero_extends(backend):
     assert tx.eval_register_transforms(before)["X0"] == 0
 
 
+@pytest.mark.parametrize(
+    ("code", "operation"),
+    [
+        ("4200c05a", lambda value: int(f"{value:032b}"[::-1], 2)),  # RBIT W2, W2
+        ("4210c05a", lambda value: 32 - value.bit_length()),  # CLZ W2, W2
+    ],
+)
+def test_bit_operations_use_exact_asl_residual_and_zero_extend(backend, code, operation):
+    tx = transform(backend, code)
+    for value in (0, 1, 0x80000000, 0x01234567, 0xFFFFFFFF):
+        actual = tx.eval_register_transforms(state(X2=value | (0xA5A5A5A5 << 32)))
+        assert actual == {"PC": PC + 4, "X2": operation(value)}
+
+
 @pytest.mark.parametrize("bits", [32, 64])
 @pytest.mark.parametrize("subtract", [False, True])
 @pytest.mark.parametrize("set_flags", [False, True])

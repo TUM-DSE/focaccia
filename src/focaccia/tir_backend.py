@@ -63,7 +63,8 @@ class _ExpressionDecoder:
 
     def decode(self, node: object, depth: int = 0) -> Expr:
         self.remaining -= 1
-        if self.remaining < 0 or depth > 64:
+        # ASL's audited RBIT residual is a bounded 32/64-level concatenation.
+        if self.remaining < 0 or depth > 128:
             raise ValueError("Oracle expression exceeds size/depth limit")
         if not isinstance(node, dict):
             raise ValueError("Oracle expression must be an object")

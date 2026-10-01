@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use specializer::specializer::KnownState;
 use std::{
     collections::{BTreeMap, HashMap},
-    io::BufRead,
+    io::{BufRead, Write},
     path::Path,
 };
 use tir::{module::Module, primitives::Primitive, syntax::*};
@@ -34,6 +34,8 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_ins_ext_insert_movewide",
     "decode_aarch64_integer_logical_immediate",
     "decode_aarch64_integer_logical_shiftedreg",
+    "decode_aarch64_integer_arithmetic_cnt",
+    "decode_aarch64_integer_arithmetic_rbit",
     "decode_aarch64_integer_shift_variable",
     "decode_aarch64_memory_pair_general_offset",
     "decode_aarch64_memory_pair_general_post_idx",
@@ -863,6 +865,7 @@ fn run() -> Result<()> {
                     }
                 }
                 println!("{}", serde_json::to_string(&response).map_err(|e| e.to_string())?);
+                std::io::stdout().flush().map_err(|e| e.to_string())?;
             }
         }
         return Ok(());
