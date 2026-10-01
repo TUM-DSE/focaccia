@@ -111,6 +111,13 @@ def test_bit_operations_use_exact_asl_residual_and_zero_extend(backend, code, op
         assert actual == {"PC": PC + 4, "X2": operation(value)}
 
 
+def test_lua_mul_fixture_uses_exact_asl_transition(backend):
+    tx = transform(backend, "c07e009b")  # MUL X0, X22, X0
+    for left, right in ((0, 0), (1, 2), (0xFFFFFFFFFFFFFFFF, 2), (1 << 63, 3)):
+        actual = tx.eval_register_transforms(state(X0=right, X22=left))
+        assert actual == {"PC": PC + 4, "X0": left * right & ((1 << 64) - 1)}
+
+
 @pytest.mark.parametrize("bits", [32, 64])
 @pytest.mark.parametrize("subtract", [False, True])
 @pytest.mark.parametrize("set_flags", [False, True])

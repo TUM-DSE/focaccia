@@ -207,6 +207,7 @@ class OnlineTirValidator:
         self.snapshot_plan_installs = 0
         self.snapshot_plan_reuses = 0
         self.snapshot_fallbacks = 0
+        self.program_break: int | None = None
         self._seen_tbs: set[tuple[int, bytes]] = set()
         self._log("oracle-started", pids=','.join(str(p.pid) for p in self.oracle_processes))
 
@@ -555,7 +556,7 @@ class OnlineTirValidator:
             }
             self.transport.finish()
             return
-        if event.auxiliary != 96 or self.pending_svc is not None:
+        if event.auxiliary not in {96, 214} or self.pending_svc is not None:
             raise RuntimeError(f"unsupported interior syscall {event.auxiliary}")
         self.pending_svc = evidence
         self.transport.advance()
@@ -564,8 +565,19 @@ class OnlineTirValidator:
         pending = self.pending_svc
         if pending is None or event.address != pending["pc"]:
             raise RuntimeError("SVC successor is not bound to its entry")
-        if event.pc != 0 or event.auxiliary != self.pid:
+        if event.pc != 0:
+            raise RuntimeError("syscall successor result framing is invalid")
+        number = pending["number"]
+        if number == 96 and event.auxiliary != self.pid:
             raise RuntimeError("set_tid_address result is not bound to the launch PID")
+        if number == 214:
+            requested = pending["argument0"]
+            if requested == 0:
+                self.program_break = event.auxiliary
+            elif event.auxiliary == requested:
+                self.program_break = requested
+            elif self.program_break is None or event.auxiliary != self.program_break:
+                raise RuntimeError("brk result is neither requested nor the prior break")
         pending.update({
             "successor_pc": event.pc, "successor_epoch": event.epoch,
             "result": event.auxiliary,
