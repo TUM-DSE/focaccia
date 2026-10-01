@@ -282,16 +282,26 @@ class OnlineTirValidator:
         ]
         self._specialize(instructions)
         composer = None
-        for address, code in instructions:
+        self._log("compose-start", pc=hex(pc), instructions=len(instructions))
+        for index, (address, code) in enumerate(instructions):
+            started = time.monotonic()
+            outputs = self.instruction_cache[(address, code)]
             transform = SymbolicTransform(
-                self.pid, self.instruction_cache[(address, code)], [], self.arch,
+                self.pid, outputs, [], self.arch,
                 address, address + 4,
             )
             if composer is None:
                 composer = SymbolicTransformComposer(transform)
             else:
                 composer.append(transform)
+            self._log(
+                "compose-instruction", tb=hex(pc), index=index,
+                instruction_pc=hex(address), elapsed=f"{time.monotonic()-started:.6f}",
+                output_chars=sum(len(str(value)) for value in outputs.values()),
+            )
+        started = time.monotonic()
         result = composer.finish() if composer is not None else None
+        self._log("compose-end", pc=hex(pc), elapsed=f"{time.monotonic()-started:.6f}")
         self.block_cache[key] = result
         return result, svc_pc
 
@@ -312,8 +322,15 @@ class OnlineTirValidator:
         self.state.write_register("PC", event.pc)
         evaluation_state = self.state
         if transform is not None or incoming is not None:
+            started = time.monotonic()
             dependency_plan = plan_minimal_snapshot(
                 self.state, incoming, transform
+            )
+            self._log(
+                "dependency-plan", pc=hex(event.pc),
+                elapsed=f"{time.monotonic()-started:.6f}",
+                registers=len(dependency_plan.registers),
+                memory=len(dependency_plan.memory),
             )
             def wire_register(name: str) -> str:
                 if name in {"CPSR", "N", "Z", "C", "V"}:
