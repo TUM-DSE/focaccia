@@ -113,6 +113,7 @@ def plugin_option(
     stop: int,
     *,
     online_blocks: bool = True,
+    automatic_snapshots: bool = True,
 ) -> str:
     fields = [
         plugin, f"socket={socket_path}", f"start={start}", f"stop={stop}",
@@ -123,6 +124,8 @@ def plugin_option(
     ]
     if online_blocks:
         fields.append("online-blocks=on")
+    if not automatic_snapshots:
+        fields.append("automatic-snapshots=off")
     return ",".join(fields)
 
 
@@ -559,7 +562,10 @@ def run_case(
     plugin_path = args.plugin_injected if mismatch else args.plugin_fixed
     command = [
         qemu_path, "-cpu", "max,sve=off", "-plugin",
-        plugin_option(plugin_path, socket_path, identity, text_start, text_stop),
+        plugin_option(
+            plugin_path, socket_path, identity, text_start, text_stop,
+            automatic_snapshots=not args.synchronous_snapshots,
+        ),
         str(binary),
     ]
     (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
@@ -666,6 +672,7 @@ def run_case(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--synchronous-snapshots", action="store_true")
     parser.add_argument("--issue", required=True, type=int, choices=(2248, 364, 2419))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--oracle", required=True)
