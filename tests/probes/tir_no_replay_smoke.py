@@ -208,6 +208,7 @@ class OnlineTirValidator:
         self.snapshot_plan_reuses = 0
         self.snapshot_fallbacks = 0
         self.program_break: int | None = None
+        self.mappings: list[tuple[int, int]] = []
         self._seen_tbs: set[tuple[int, bytes]] = set()
         self._log("oracle-started", pids=','.join(str(p.pid) for p in self.oracle_processes))
 
@@ -544,9 +545,16 @@ class OnlineTirValidator:
         if self.active is None or self.active.svc_pc != event.pc:
             raise RuntimeError("SVC evidence is not the final instruction of the active TB")
         self._compare_active(event.pc, event.sequence)
+        arguments = [event.address]
+        if event.auxiliary in {222}:
+            arguments.extend(
+                self.transport.read_register(f"x{index}").value
+                for index in range(1, 6)
+            )
         evidence = {
             "sequence": event.sequence, "entry_epoch": event.epoch,
             "pc": event.pc, "number": event.auxiliary, "argument0": event.address,
+            "arguments": arguments,
         }
         self.syscall_evidence.append(evidence)
         if event.auxiliary == 94:
@@ -556,7 +564,7 @@ class OnlineTirValidator:
             }
             self.transport.finish()
             return
-        if event.auxiliary not in {96, 214} or self.pending_svc is not None:
+        if event.auxiliary not in {96, 214, 222} or self.pending_svc is not None:
             raise RuntimeError(f"unsupported interior syscall {event.auxiliary}")
         self.pending_svc = evidence
         self.transport.advance()
@@ -570,6 +578,20 @@ class OnlineTirValidator:
         number = pending["number"]
         if number == 96 and event.auxiliary != self.pid:
             raise RuntimeError("set_tid_address result is not bound to the launch PID")
+        if number == 222:
+            address, length, protection, flags, fd, offset = pending["arguments"]
+            if length == 0 or offset & 0xfff:
+                raise RuntimeError("mmap request has invalid length or offset")
+            result = event.auxiliary
+            if result < (1 << 64) - 4095:
+                if result & 0xfff:
+                    raise RuntimeError("successful mmap result is not page aligned")
+                self.mappings.append((result, length))
+            pending.update({
+                "address": address, "length": length, "protection": protection,
+                "flags": flags, "fd": fd, "offset": offset,
+                "mapping_created": result < (1 << 64) - 4095,
+            })
         if number == 214:
             requested = pending["argument0"]
             if requested == 0:

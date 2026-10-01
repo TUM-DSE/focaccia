@@ -111,6 +111,13 @@ def test_bit_operations_use_exact_asl_residual_and_zero_extend(backend, code, op
         assert actual == {"PC": PC + 4, "X2": operation(value)}
 
 
+def test_lua_umull_fixture_uses_exact_asl_transition(backend):
+    tx = transform(backend, "e07eb39b")  # UMULL X0, W23, W19
+    for left, right in ((0, 0), (1, 2), (0xFFFFFFFF, 0xFFFFFFFF)):
+        actual = tx.eval_register_transforms(state(X19=right, X23=left))
+        assert actual == {"PC": PC + 4, "X0": left * right}
+
+
 def test_lua_mul_fixture_uses_exact_asl_transition(backend):
     tx = transform(backend, "c07e009b")  # MUL X0, X22, X0
     for left, right in ((0, 0), (1, 2), (0xFFFFFFFFFFFFFFFF, 2), (1 << 63, 3)):

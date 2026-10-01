@@ -28,6 +28,7 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_arithmetic_add_sub_shiftedreg",
     "decode_aarch64_integer_arithmetic_address_pc_rel",
     "decode_aarch64_integer_arithmetic_mul_uniform_add_sub",
+    "decode_aarch64_integer_arithmetic_mul_widening_32_64",
     "decode_aarch64_integer_arithmetic_mul_widening_64_128hi",
     "decode_aarch64_integer_bitfield",
     "decode_aarch64_integer_conditional_compare_immediate",
@@ -748,6 +749,10 @@ fn transform(
         return Err(format!("unsupported instruction class {iclass}"));
     }
     match iclass.as_str() {
+        "decode_aarch64_integer_arithmetic_mul_widening_32_64"
+            if opcode != 0x9bb3_7ee0 => {
+            return Err("unsupported widening multiply outside the audited Lua UMULL fixture".into());
+        }
         "decode_aarch64_integer_arithmetic_mul_uniform_add_sub"
             if opcode != 0x9b00_7ec0 => {
             return Err("unsupported multiply opcode outside the audited Lua MUL fixture".into());
