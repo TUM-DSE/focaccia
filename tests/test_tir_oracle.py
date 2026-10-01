@@ -111,6 +111,15 @@ def test_bit_operations_use_exact_asl_residual_and_zero_extend(backend, code, op
         assert actual == {"PC": PC + 4, "X2": operation(value)}
 
 
+def test_lua_udiv_fixture_uses_exact_asl_transition(backend):
+    tx = transform(backend, "4308d79a")  # UDIV X3, X2, X23
+    mask = (1 << 64) - 1
+    for dividend, divisor in ((0, 0), (7, 3), (mask, 1), (mask, 17)):
+        actual = tx.eval_register_transforms(state(X2=dividend, X23=divisor))
+        expected = 0 if divisor == 0 else dividend // divisor
+        assert actual == {"PC": PC + 4, "X3": expected}
+
+
 def test_lua_ccmp_register_fixture_uses_exact_asl_transition(backend):
     tx = transform(backend, "621046fa")  # CCMP X3, X6, #2, NE
     assert tx.eval_register_transforms(state(X3=7, X6=3, CPSR=0x40000000)) == {

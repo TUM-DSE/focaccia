@@ -102,6 +102,7 @@ class _ExpressionDecoder:
                 "add",
                 "sub",
                 "mul",
+                "udiv",
                 "eq",
                 "ne",
                 "ugt",
@@ -137,7 +138,10 @@ class _ExpressionDecoder:
                 else:
                     comparison = "<u" if op == "ult" else "<=u"
                 return ExprOp(comparison, left, right)
-            names = {"add": "+", "mul": "*", "and": "&", "or": "|", "xor": "^"}
+            names = {
+                "add": "+", "mul": "*", "udiv": "udiv",
+                "and": "&", "or": "|", "xor": "^",
+            }
             return ExprOp(names[op], left, right)
         if kind == "unary":
             _fields(node, common | {"op", "value"})

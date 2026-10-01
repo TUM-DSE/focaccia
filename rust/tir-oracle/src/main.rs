@@ -38,6 +38,7 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_logical_immediate",
     "decode_aarch64_integer_logical_shiftedreg",
     "decode_aarch64_integer_arithmetic_cnt",
+    "decode_aarch64_integer_arithmetic_div",
     "decode_aarch64_integer_arithmetic_rbit",
     "decode_aarch64_integer_shift_variable",
     "decode_aarch64_memory_pair_general_offset",
@@ -519,7 +520,7 @@ impl Exporter {
                     },
                 }
             }
-            AddBits | SubBits | MulBits | EqBits | NeBits | GtBits | LtBits | GeBits | LeBits
+            AddBits | SubBits | MulBits | UdivBits | EqBits | NeBits | GtBits | LtBits | GeBits | LeBits
             | AndBits | OrBits | EorBits | AndBool | OrBool | ShlBits | LshrBits | AshrBits
                 if args.len() == 2 =>
             {
@@ -536,6 +537,7 @@ impl Exporter {
                     AddBits => "add",
                     SubBits => "sub",
                     MulBits => "mul",
+                    UdivBits => "udiv",
                     EqBits => "eq",
                     NeBits => "ne",
                     GtBits => "ugt",
@@ -750,6 +752,9 @@ fn transform(
         return Err(format!("unsupported instruction class {iclass}"));
     }
     match iclass.as_str() {
+        "decode_aarch64_integer_arithmetic_div" if opcode != 0x9ad7_0843 => {
+            return Err("unsupported divide outside the audited Lua UDIV fixture".into());
+        }
         "decode_aarch64_integer_conditional_compare_register"
             if opcode != 0xfa46_1062 => {
             return Err("unsupported conditional compare outside the audited Lua CCMP fixture".into());
