@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import faulthandler
 import hashlib
 import json
 import os
@@ -161,6 +162,9 @@ class OnlineTirValidator:
         event_timeout: float = 60.0, oracle_workers: int = 4,
     ) -> None:
         self.progress = progress
+        if progress:
+            faulthandler.enable()
+            faulthandler.dump_traceback_later(30, repeat=True)
         self.oracle_timeout = oracle_timeout
         self.event_timeout = event_timeout
         self.last_progress = time.monotonic()
@@ -359,17 +363,25 @@ class OnlineTirValidator:
                     raise UnsupportedSnapshotRecipe(
                         "A required register is unavailable to the plugin."
                     )
-                wire_memory = tuple(
-                    WireSnapshotMemoryPlan(
-                        dependency.expression.size // 8,
-                        compile_address_recipe(
-                            dependency.expression.ptr, register_indices
-                        ),
+                wire_memory_items = []
+                for index, dependency in enumerate(dependency_plan.memory):
+                    self._log(
+                        "memory-dependency", pc=hex(event.pc), index=index,
+                        state=dependency.address_state,
+                        expression=type(dependency.expression).__name__,
+                        transformed=dependency.transform is not None,
                     )
-                    for dependency in dependency_plan.memory
-                    if dependency.address_state == "current"
-                    and dependency.transform is None
-                )
+                    if dependency.address_state != "current" or dependency.transform is not None:
+                        continue
+                    self._log("recipe-start", pc=hex(event.pc), index=index)
+                    recipe = compile_address_recipe(
+                        dependency.expression.ptr, register_indices
+                    )
+                    self._log("recipe-end", pc=hex(event.pc), index=index, bytes=len(recipe))
+                    wire_memory_items.append(WireSnapshotMemoryPlan(
+                        dependency.expression.size // 8, recipe,
+                    ))
+                wire_memory = tuple(wire_memory_items)
                 if len(wire_memory) != len(dependency_plan.memory):
                     raise UnsupportedSnapshotRecipe(
                         "Memory dependency does not use current source state."
@@ -387,13 +399,17 @@ class OnlineTirValidator:
                         event.pc, 1 if plan is None else plan.generation + 1,
                         wire_registers, wire_memory,
                     )
+                    self._log("plan-install-start", pc=hex(event.pc), generation=plan.generation)
                     self.transport.install_snapshot_plan(plan)
+                    self._log("plan-install-end", pc=hex(event.pc), generation=plan.generation)
                     self.snapshot_plans[event.pc] = plan
                     self.snapshot_plan_installs += 1
                 else:
                     self.snapshot_plan_reuses += 1
                 try:
+                    self._log("capture-start", pc=hex(event.pc))
                     snapshot = self.transport.capture_snapshot(event.pc)
+                    self._log("capture-end", pc=hex(event.pc), occurrence=snapshot.occurrence)
                 except BoundarySnapshotUnavailable:
                     self.snapshot_fallbacks += 1
                 else:
@@ -411,10 +427,12 @@ class OnlineTirValidator:
             else:
                 self.snapshot_fallbacks += 1
         if self.active is not None:
+            self._log("compare-start", pc=hex(event.pc))
             self._compare_active(
                 event.pc, event.sequence,
                 observed_state=evaluation_state,
             )
+            self._log("compare-end", pc=hex(event.pc))
         if transform is None:
             expected_registers: dict[str, int] = {}
             expected_stores: tuple[tuple[int, bytes], ...] = ()

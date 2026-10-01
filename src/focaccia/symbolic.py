@@ -578,8 +578,9 @@ class _TransformEvaluator(MiasmSymbolResolver):
         result = expr_simp(eval_expr(expression, self))
         if not isinstance(result, ExprInt):
             raise SymbolEvaluationError(
-                f"Expression {expression} remains unresolved as {result}; "
-                "a concrete value is required."
+                "Expression remains unresolved; a concrete value is required "
+                f"(input={type(expression).__name__}/{expression.size}, "
+                f"result={type(result).__name__}/{result.size})."
             )
         return int(result)
 
