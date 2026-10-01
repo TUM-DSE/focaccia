@@ -993,7 +993,18 @@ class SymbolicTransform:
         for regname, expression in self.validation_register_outputs().items():
             if not conc_state.strict and regname.upper() in self.arch.ignored_regs:
                 continue
-            result[regname] = evaluator.evaluate(expression)
+            try:
+                result[regname] = evaluator.evaluate(expression)
+            except SymbolEvaluationError as error:
+                unresolved = sorted({
+                    f"{type(node).__name__}:{getattr(node, 'name', '')}:{node.size}"
+                    for node in iter_expression_dag(expression)
+                    if isinstance(node, (ExprId, ExprMem))
+                })
+                raise SymbolEvaluationError(
+                    f"Validation output {regname} is unresolved; bounded leaves="
+                    f"{unresolved[:32]}"
+                ) from error
         return result
 
     def eval_register_transforms(self, conc_state: ReadableProgramState) -> dict[str, int]:
