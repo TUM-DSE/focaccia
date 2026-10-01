@@ -66,6 +66,20 @@ def test_shared_snapshot_plan_covers_incoming_outputs_and_outgoing_inputs():
     }
 
 
+def test_source_only_plan_is_not_completion_evidence():
+    current = state(0x1001)
+
+    source_only = plan_minimal_snapshot(current, None, outgoing_transform())
+    complete = plan_minimal_snapshot(
+        current, incoming_transform(), outgoing_transform()
+    )
+
+    assert "RAX" not in source_only.registers
+    assert not any(item.address_state == "previous" for item in source_only.memory)
+    assert "RAX" in complete.registers
+    assert any(item.address_state == "previous" for item in complete.memory)
+
+
 def test_snapshot_uses_previous_state_for_incoming_write_addresses():
     previous = state(0x1000, RDI=0x2000)
     current = state(0x1001, RAX=7, RSI=0x3000, RDI=0xDEAD)
