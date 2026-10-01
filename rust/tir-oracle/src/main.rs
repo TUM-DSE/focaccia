@@ -750,7 +750,7 @@ fn transform(
     }
     match iclass.as_str() {
         "decode_aarch64_integer_arithmetic_mul_widening_32_64"
-            if opcode != 0x9bb3_7ee0 => {
+            if ![0x9bb3_7ee0, 0x9bba_7f85].contains(&opcode) => {
             return Err("unsupported widening multiply outside the audited Lua UMULL fixture".into());
         }
         "decode_aarch64_integer_arithmetic_mul_uniform_add_sub"
