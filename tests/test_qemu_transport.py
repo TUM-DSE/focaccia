@@ -455,6 +455,15 @@ def test_terminal_commands_require_acknowledgement_and_close_transport(
     finish_peer(thread, errors)
 
 
+def test_receive_event_has_bounded_no_progress_timeout():
+    client, peer = socket.socketpair()
+    transport = PluginTransport(client, x86.ArchX86())
+    with pytest.raises(TimeoutError, match="no ordered event"):
+        transport.receive_event(0.01)
+    transport.close()
+    peer.close()
+
+
 def test_transport_context_manager_closes_owned_socket():
     client, peer = socket.socketpair()
     with PluginTransport(client, x86.ArchX86()) as transport:

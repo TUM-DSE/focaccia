@@ -157,9 +157,11 @@ class OnlineTirValidator:
         transport: PluginTransport,
         pid: int,
         *, progress: bool = False, oracle_timeout: float = 60.0,
+        event_timeout: float = 60.0,
     ) -> None:
         self.progress = progress
         self.oracle_timeout = oracle_timeout
+        self.event_timeout = event_timeout
         self.last_progress = time.monotonic()
         self.binary = binary
         self.loads = [(base, flags, raw) for base, flags, raw in loads if flags & 1]
@@ -510,7 +512,7 @@ class OnlineTirValidator:
 
     def run(self) -> dict:
         while self.terminal is None:
-            event = self.transport.receive_event()
+            event = self.transport.receive_event(self.event_timeout)
             if event.kind == EVENT_TRANSLATION_BLOCK:
                 self._begin_block(event)
             elif event.kind == EVENT_STORE:
@@ -621,6 +623,7 @@ def run_case(
             validator = OnlineTirValidator(
                 binary, loads, args.oracle, transport, handshake.pid,
                 progress=args.progress, oracle_timeout=args.oracle_timeout,
+                event_timeout=args.event_timeout,
             )
             online = validator.run()
         except BaseException:
@@ -729,6 +732,7 @@ def main() -> None:
     parser.add_argument("--run-directory", required=True, type=Path)
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--oracle-timeout", type=float, default=60.0)
+    parser.add_argument("--event-timeout", type=float, default=60.0)
     args = parser.parse_args()
     root = args.run_directory.resolve()
     root.mkdir(parents=True, exist_ok=False)

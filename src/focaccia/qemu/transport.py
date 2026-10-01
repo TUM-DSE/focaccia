@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import socket
 import stat
 import struct
@@ -341,7 +342,15 @@ class PluginTransport:
             api_min, api_current, capabilities, identity,
         )
 
-    def receive_event(self) -> PluginEvent:
+    def receive_event(self, timeout: float | None = None) -> PluginEvent:
+        if timeout is not None:
+            if timeout <= 0:
+                raise ValueError("Event timeout must be positive.")
+            ready, _, _ = select.select([self._connection], [], [], timeout)
+            if not ready:
+                raise TimeoutError(
+                    f"Plugin produced no ordered event for {timeout} seconds."
+                )
         raw = read_exact(self._connection, EVENT_SIZE)
         kind, flags, sequence, epoch, pc, address, size, auxiliary, value, padding = struct.unpack(
             "<BB6xQQQQQQ16s24s", raw
