@@ -265,6 +265,8 @@ class PluginTransport:
         self._plans: dict[int, SnapshotPlan] = {}
         self._snapshot_occurrences: dict[tuple[int, int], int] = {}
         self._boundary_pc: int | None = None
+        self._automatic_snapshot = False
+        self._automatic_advanced = False
 
     @property
     def closed(self) -> bool:
@@ -337,7 +339,7 @@ class PluginTransport:
         kind, flags, sequence, epoch, pc, address, size, auxiliary, value, padding = struct.unpack(
             "<BB6xQQQQQQ16s24s", raw
         )
-        if flags or any(padding) or kind not in {
+        if flags not in (0, 1) or any(padding) or kind not in {
             EVENT_CUTPOINT, EVENT_STORE, EVENT_AARCH64_SVC_ENTRY,
             EVENT_AARCH64_SVC_SUCCESSOR, EVENT_TRANSLATION_BLOCK,
         }:
@@ -348,6 +350,8 @@ class PluginTransport:
             if size not in (1, 2, 4, 8, 16) or any(value[size:]):
                 raise PluginProtocolError("Plugin returned a malformed store event.")
         elif kind == EVENT_TRANSLATION_BLOCK:
+            if flags and (pc not in self._plans or self._plans[pc].memory):
+                raise PluginProtocolError("Invalid automatic register snapshot event.")
             if (
                 size == 0
                 or size > 1_048_576
@@ -357,11 +361,13 @@ class PluginTransport:
                 or any(value)
             ):
                 raise PluginProtocolError("Plugin returned a malformed translation-block event.")
-        elif size != 0 or any(value):
+        elif flags or size != 0 or any(value):
             raise PluginProtocolError("Plugin returned payload bytes for a non-store event.")
         self._last_sequence = sequence
         self._last_epoch = epoch
         self._boundary_pc = pc if kind == EVENT_TRANSLATION_BLOCK else None
+        self._automatic_snapshot = kind == EVENT_TRANSLATION_BLOCK and flags == 1
+        self._automatic_advanced = False
         return PluginEvent(kind, sequence, epoch, pc, address, size, auxiliary, value[:size])
 
     def install_snapshot_plan(self, plan: SnapshotPlan) -> None:
@@ -420,9 +426,11 @@ class PluginTransport:
         if self._boundary_pc != pc or pc not in self._plans:
             raise PluginProtocolError("Snapshot capture is not at an installed TB boundary.")
         plan = self._plans[pc]
-        self._send_command(struct.pack(
-            "<B7xQQ8x", _COMMAND_CAPTURE_PLAN, pc, plan.generation
-        ))
+        automatic = self._automatic_snapshot
+        if not automatic:
+            self._send_command(struct.pack(
+                "<B7xQQ8x", _COMMAND_CAPTURE_PLAN, pc, plan.generation
+            ))
         header = read_exact(self._connection, SNAPSHOT_HEADER_SIZE)
         status, memory_count, count, returned_pc, generation, occurrence, sequence = struct.unpack(
             "<B1xHIQQQQ", header
@@ -431,6 +439,7 @@ class PluginTransport:
         if identity != (pc, plan.generation):
             raise PluginProtocolError("Plugin snapshot identity does not match its plan.")
         if status == _RESPONSE_UNAVAILABLE:
+            self._automatic_snapshot = False
             if count != 0 or memory_count != 0 or sequence != 0:
                 raise PluginProtocolError("Malformed unavailable boundary snapshot.")
             raise BoundarySnapshotUnavailable(
@@ -466,14 +475,18 @@ class PluginTransport:
                 raise PluginProtocolError("Plugin snapshot memory payload exceeds its bound.")
             memory_values.append((address, read_exact(self._connection, size)))
         self._snapshot_occurrences[identity] = occurrence
+        self._automatic_advanced = automatic
         return BoundarySnapshot(
             pc, generation, occurrence, sequence, tuple(observations),
             tuple(memory_values),
         )
 
     def advance(self) -> None:
-        self._send_command(_pack_command("step"))
+        if not self._automatic_advanced:
+            self._send_command(_pack_command("step"))
         self._boundary_pc = None
+        self._automatic_snapshot = False
+        self._automatic_advanced = False
 
     def _send_command(self, frame: bytes) -> None:
         if self._closed:
