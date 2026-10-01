@@ -42,7 +42,9 @@ from focaccia.qemu.snapshot_recipe import (
 )
 from focaccia.qemu.validation_server import PluginProgramState
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import eval_symbol, SymbolicTransform, SymbolicTransformComposer
+from focaccia.symbolic import (
+    eval_symbol, SymbolEvaluationError, SymbolicTransform, SymbolicTransformComposer,
+)
 from focaccia.tir_backend import decode_response
 
 EXPECTED_CALLME = bytes.fromhex(
@@ -430,10 +432,34 @@ class OnlineTirValidator:
                 # every directly resolvable current-state source byte before
                 # evaluation so deferred memory operations cannot become
                 # unplanned live reads after release.
-                for dependency in dependency_plan.memory:
-                    if dependency.address_state == "current" and dependency.transform is None:
-                        address = eval_symbol(dependency.expression.ptr, self.state)
-                        self.state.read_memory(address, dependency.expression.size // 8)
+                pending = [
+                    dependency for dependency in dependency_plan.memory
+                    if dependency.address_state == "current"
+                ]
+                for _ in range(len(pending)):
+                    unresolved = []
+                    for dependency in pending:
+                        try:
+                            address = (
+                                dependency.transform.eval_memory_address(
+                                    dependency.expression.ptr, self.state
+                                ) if dependency.transform is not None else
+                                eval_symbol(dependency.expression.ptr, self.state)
+                            )
+                        except SymbolEvaluationError:
+                            unresolved.append(dependency)
+                            continue
+                        self.state.read_memory(
+                            address, dependency.expression.size // 8
+                        )
+                    if not unresolved or len(unresolved) == len(pending):
+                        pending = unresolved
+                        break
+                    pending = unresolved
+                if pending:
+                    raise UnsupportedSnapshotRecipe(
+                        "Synchronous dependency addresses remain unresolved."
+                    )
         if self.active is not None:
             self._log("compare-start", pc=hex(event.pc))
             self._compare_active(
