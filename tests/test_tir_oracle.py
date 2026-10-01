@@ -150,6 +150,16 @@ def test_lua_umull_fixture_uses_exact_asl_transition(
         assert actual == {"PC": PC + 4, output: left * right}
 
 
+def test_lua_madd_fixture_uses_exact_asl_transition(backend):
+    tx = transform(backend, "6010199b")  # MADD X0, X3, X25, X4
+    mask = (1 << 64) - 1
+    for left, right, addend in ((0, 0, 0), (2, 3, 4), (mask, 2, 7)):
+        actual = tx.eval_register_transforms(
+            state(X3=left, X25=right, X4=addend)
+        )
+        assert actual == {"PC": PC + 4, "X0": (left * right + addend) & mask}
+
+
 def test_lua_mul_fixture_uses_exact_asl_transition(backend):
     tx = transform(backend, "c07e009b")  # MUL X0, X22, X0
     for left, right in ((0, 0), (1, 2), (0xFFFFFFFFFFFFFFFF, 2), (1 << 63, 3)):

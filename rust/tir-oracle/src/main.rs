@@ -764,7 +764,7 @@ fn transform(
             return Err("unsupported widening multiply outside the audited Lua UMULL fixture".into());
         }
         "decode_aarch64_integer_arithmetic_mul_uniform_add_sub"
-            if opcode != 0x9b00_7ec0 => {
+            if ![0x9b00_7ec0, 0x9b19_1060].contains(&opcode) => {
             return Err("unsupported multiply opcode outside the audited Lua MUL fixture".into());
         }
         "decode_aarch64_memory_atomicops_ld" if opcode != 0x3822_4020 => {
