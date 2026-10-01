@@ -111,6 +111,22 @@ def test_bit_operations_use_exact_asl_residual_and_zero_extend(backend, code, op
         assert actual == {"PC": PC + 4, "X2": operation(value)}
 
 
+def test_lua_ccmp_register_fixture_uses_exact_asl_transition(backend):
+    tx = transform(backend, "621046fa")  # CCMP X3, X6, #2, NE
+    assert tx.eval_register_transforms(state(X3=7, X6=3, CPSR=0x40000000)) == {
+        "PC": PC + 4, "CPSR": 0x20000000,
+    }
+    assert tx.eval_register_transforms(state(X3=5, X6=5, CPSR=0)) == {
+        "PC": PC + 4, "CPSR": 0x60000000,
+    }
+    assert tx.eval_register_transforms(state(X3=0, X6=1, CPSR=0)) == {
+        "PC": PC + 4, "CPSR": 0x80000000,
+    }
+    assert tx.eval_register_transforms(state(X3=1 << 63, X6=1, CPSR=0)) == {
+        "PC": PC + 4, "CPSR": 0x30000000,
+    }
+
+
 @pytest.mark.parametrize(("code", "left_reg", "right_reg", "output"), [
     ("e07eb39b", "X23", "X19", "X0"),  # UMULL X0, W23, W19
     ("857fba9b", "X28", "X26", "X5"),  # UMULL X5, W28, W26

@@ -32,6 +32,7 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_arithmetic_mul_widening_64_128hi",
     "decode_aarch64_integer_bitfield",
     "decode_aarch64_integer_conditional_compare_immediate",
+    "decode_aarch64_integer_conditional_compare_register",
     "decode_aarch64_integer_conditional_select",
     "decode_aarch64_integer_ins_ext_insert_movewide",
     "decode_aarch64_integer_logical_immediate",
@@ -749,6 +750,10 @@ fn transform(
         return Err(format!("unsupported instruction class {iclass}"));
     }
     match iclass.as_str() {
+        "decode_aarch64_integer_conditional_compare_register"
+            if opcode != 0xfa46_1062 => {
+            return Err("unsupported conditional compare outside the audited Lua CCMP fixture".into());
+        }
         "decode_aarch64_integer_arithmetic_mul_widening_32_64"
             if ![0x9bb3_7ee0, 0x9bba_7f85].contains(&opcode) => {
             return Err("unsupported widening multiply outside the audited Lua UMULL fixture".into());
