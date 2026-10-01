@@ -131,6 +131,20 @@ def eval_symbol(symbol: Expr, conc_state: ReadableProgramState) -> int:
         def resolve_memory(self, addr: int, size: int) -> bytes:
             return self._state.read_memory(addr, size)
 
+        def resolve_environment_operation(
+            self, operation: str, args: tuple[Expr, ...],
+        ) -> Expr | None:
+            if operation != _DEFERRED_MEMORY_BYTE_OP:
+                return super().resolve_environment_operation(operation, args)
+            if (
+                len(args) != 2
+                or not all(isinstance(arg, ExprInt) for arg in args)
+                or int(args[1]) != 0
+            ):
+                return None
+            data = self._state.read_memory(int(args[0]), 1)
+            return ExprInt(data[0], args[0].size)
+
         def resolve_location(self, loc):
             raise ValueError(
                 "[In eval_symbol]: Unable to evaluate symbols that contain IR location expressions."

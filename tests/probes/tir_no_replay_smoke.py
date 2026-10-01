@@ -42,7 +42,7 @@ from focaccia.qemu.snapshot_recipe import (
 )
 from focaccia.qemu.validation_server import PluginProgramState
 from focaccia.snapshot import ProgramState
-from focaccia.symbolic import SymbolicTransform, SymbolicTransformComposer
+from focaccia.symbolic import eval_symbol, SymbolicTransform, SymbolicTransformComposer
 from focaccia.tir_backend import decode_response
 
 EXPECTED_CALLME = bytes.fromhex(
@@ -426,6 +426,14 @@ class OnlineTirValidator:
                     evaluation_state = captured
             else:
                 self.snapshot_fallbacks += 1
+                # Synchronous fallback remains at the stopped boundary. Cache
+                # every directly resolvable current-state source byte before
+                # evaluation so deferred memory operations cannot become
+                # unplanned live reads after release.
+                for dependency in dependency_plan.memory:
+                    if dependency.address_state == "current" and dependency.transform is None:
+                        address = eval_symbol(dependency.expression.ptr, self.state)
+                        self.state.read_memory(address, dependency.expression.size // 8)
         if self.active is not None:
             self._log("compare-start", pc=hex(event.pc))
             self._compare_active(
