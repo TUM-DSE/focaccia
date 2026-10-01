@@ -8,8 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import struct
 import subprocess
+import sys
+import time
 
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.qemu.transport import (
@@ -153,7 +156,11 @@ class OnlineTirValidator:
         oracle: str,
         transport: PluginTransport,
         pid: int,
+        *, progress: bool = False, oracle_timeout: float = 60.0,
     ) -> None:
+        self.progress = progress
+        self.oracle_timeout = oracle_timeout
+        self.last_progress = time.monotonic()
         self.binary = binary
         self.loads = [(base, flags, raw) for base, flags, raw in loads if flags & 1]
         if not self.loads:
@@ -188,6 +195,17 @@ class OnlineTirValidator:
         self.snapshot_plan_installs = 0
         self.snapshot_plan_reuses = 0
         self.snapshot_fallbacks = 0
+        self._seen_tbs: set[tuple[int, bytes]] = set()
+        self._log("oracle-started", pid=self.oracle_process.pid)
+
+    def _log(self, milestone: str, **fields) -> None:
+        self.last_progress = time.monotonic()
+        if self.progress:
+            detail = " ".join(f"{key}={value}" for key, value in fields.items())
+            print(
+                f"[{time.time():.6f}] lua-online {milestone} {detail}".rstrip(),
+                file=sys.stderr, flush=True,
+            )
 
     @staticmethod
     def _is_svc(code: bytes) -> bool:
@@ -196,6 +214,7 @@ class OnlineTirValidator:
     def _specialize(self, instructions: list[tuple[int, bytes]]) -> None:
         missing = [(pc, code) for pc, code in instructions if (pc, code) not in self.instruction_cache]
         if not missing:
+            self._log("oracle-cache-hit", instructions=len(instructions))
             return
         if self.oracle_process.poll() is not None:
             diagnostic = self.oracle_process.stderr.read()[-4096:].strip()
@@ -204,9 +223,23 @@ class OnlineTirValidator:
         oracle_output = self.oracle_process.stdout
         if oracle_input is None or oracle_output is None:
             raise RuntimeError("TIR specialization pipes are unavailable")
+        self._log(
+            "oracle-request-start", count=len(missing),
+            first_pc=hex(missing[0][0]), first_opcode=missing[0][1].hex(),
+        )
         oracle_input.write("".join(f"{pc} {code.hex()}\n" for pc, code in missing))
         oracle_input.flush()
-        lines = [oracle_output.readline().rstrip("\n") for _ in missing]
+        lines = []
+        for pc, code in missing:
+            ready, _, _ = select.select([oracle_output], [], [], self.oracle_timeout)
+            if not ready:
+                status = self.oracle_process.poll()
+                raise TimeoutError(
+                    f"TIR oracle timeout after {self.oracle_timeout}s at "
+                    f"PC {pc:#x}, opcode {code.hex()}, status={status}"
+                )
+            lines.append(oracle_output.readline().rstrip("\n"))
+        self._log("oracle-request-end", count=len(lines))
         if any(not line for line in lines):
             diagnostic = self.oracle_process.stderr.read()[-4096:].strip() if self.oracle_process.poll() is not None else ""
             raise RuntimeError(f"TIR batch response cardinality mismatch: {diagnostic}")
@@ -258,6 +291,10 @@ class OnlineTirValidator:
         if self.pending_svc is not None:
             raise RuntimeError("next TB arrived before SVC successor evidence")
         raw = read_image(self.loads, event.pc, event.size * 4)
+        tb_key = (event.pc, raw)
+        if tb_key not in self._seen_tbs:
+            self._seen_tbs.add(tb_key)
+            self._log("first-seen-tb", pc=hex(event.pc), instructions=event.size)
         transform, svc_pc = self._block_transform(event.pc, raw)
         # The TB callback runs before its first instruction, so the plugin's
         # instruction scoreboard is intentionally stale.  The immutable TB
@@ -577,7 +614,14 @@ def run_case(
         validator: OnlineTirValidator | None = None
         try:
             transport, handshake = listener.accept()
-            validator = OnlineTirValidator(binary, loads, args.oracle, transport, handshake.pid)
+            print(
+                f"[{time.time():.6f}] lua-online plugin-handshake pid={handshake.pid}",
+                file=sys.stderr, flush=True,
+            ) if args.progress else None
+            validator = OnlineTirValidator(
+                binary, loads, args.oracle, transport, handshake.pid,
+                progress=args.progress, oracle_timeout=args.oracle_timeout,
+            )
             online = validator.run()
         except BaseException:
             if transport is not None and not transport.closed:
@@ -683,6 +727,8 @@ def main() -> None:
     parser.add_argument("--tir-revision", required=True)
     parser.add_argument("--qemu-revision", required=True)
     parser.add_argument("--run-directory", required=True, type=Path)
+    parser.add_argument("--progress", action="store_true")
+    parser.add_argument("--oracle-timeout", type=float, default=60.0)
     args = parser.parse_args()
     root = args.run_directory.resolve()
     root.mkdir(parents=True, exist_ok=False)
