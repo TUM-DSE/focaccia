@@ -577,10 +577,28 @@ class _TransformEvaluator(MiasmSymbolResolver):
                     raise SymbolEvaluationError("Execution context requires 64-bit expression width.")
         result = expr_simp(eval_expr(expression, self))
         if not isinstance(result, ExprInt):
+            failing = None
+            for node in iter_expression_dag(expression):
+                children = expression_children(node)
+                child_results = [expr_simp(eval_expr(child, self)) for child in children]
+                node_result = expr_simp(eval_expr(node, self))
+                if (
+                    not isinstance(node_result, ExprInt)
+                    and all(isinstance(value, ExprInt) for value in child_results)
+                ):
+                    failing = (
+                        type(node).__name__, getattr(node, "op", None), node.size,
+                        tuple(int(value) for value in child_results),
+                    )
+                    break
+            direct = {}
+            for name, size in (("X0", 64), ("CPSR", 32)):
+                direct[name] = self.resolve_register(name)
             raise SymbolEvaluationError(
                 "Expression remains unresolved; a concrete value is required "
                 f"(input={type(expression).__name__}/{expression.size}, "
-                f"result={type(result).__name__}/{result.size})."
+                f"result={type(result).__name__}/{result.size}, "
+                f"smallest={failing!r}, direct={direct!r})."
             )
         return int(result)
 
