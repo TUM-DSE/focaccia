@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import json
@@ -157,7 +158,7 @@ class OnlineTirValidator:
         transport: PluginTransport,
         pid: int,
         *, progress: bool = False, oracle_timeout: float = 60.0,
-        event_timeout: float = 60.0,
+        event_timeout: float = 60.0, oracle_workers: int = 4,
     ) -> None:
         self.progress = progress
         self.oracle_timeout = oracle_timeout
@@ -172,11 +173,14 @@ class OnlineTirValidator:
             key: value for key, value in os.environ.items()
             if not key.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
         }
-        self.oracle_process = subprocess.Popen(
+        if not 1 <= oracle_workers <= 8:
+            raise ValueError("Oracle worker count must be between 1 and 8.")
+        self.oracle_processes = [subprocess.Popen(
             [oracle, "--export-transitions"], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
             env=oracle_env,
-        )
+        ) for _ in range(oracle_workers)]
+        self.oracle_process = self.oracle_processes[0]
         self.transport = transport
         self.pid = pid
         self.arch = ArchAArch64("little")
@@ -198,7 +202,7 @@ class OnlineTirValidator:
         self.snapshot_plan_reuses = 0
         self.snapshot_fallbacks = 0
         self._seen_tbs: set[tuple[int, bytes]] = set()
-        self._log("oracle-started", pid=self.oracle_process.pid)
+        self._log("oracle-started", pids=','.join(str(p.pid) for p in self.oracle_processes))
 
     def _log(self, milestone: str, **fields) -> None:
         self.last_progress = time.monotonic()
@@ -218,32 +222,35 @@ class OnlineTirValidator:
         if not missing:
             self._log("oracle-cache-hit", instructions=len(instructions))
             return
-        if self.oracle_process.poll() is not None:
-            diagnostic = self.oracle_process.stderr.read()[-4096:].strip()
-            raise RuntimeError(f"TIR specialization process exited: {diagnostic}")
-        oracle_input = self.oracle_process.stdin
-        oracle_output = self.oracle_process.stdout
-        if oracle_input is None or oracle_output is None:
-            raise RuntimeError("TIR specialization pipes are unavailable")
         self._log(
             "oracle-request-start", count=len(missing),
             first_pc=hex(missing[0][0]), first_opcode=missing[0][1].hex(),
         )
-        oracle_input.write("".join(f"{pc} {code.hex()}\n" for pc, code in missing))
-        oracle_input.flush()
-        lines = []
-        for pc, code in missing:
-            ready, _, _ = select.select([oracle_output], [], [], self.oracle_timeout)
-            if not ready:
-                status = self.oracle_process.poll()
-                raise TimeoutError(
-                    f"TIR oracle timeout after {self.oracle_timeout}s at "
-                    f"PC {pc:#x}, opcode {code.hex()}, status={status}"
-                )
-            lines.append(oracle_output.readline().rstrip("\n"))
+        groups = [missing[i::len(self.oracle_processes)] for i in range(len(self.oracle_processes))]
+        def request(worker_index: int):
+            group = groups[worker_index]
+            if not group:
+                return []
+            process = self.oracle_processes[worker_index]
+            if process.poll() is not None:
+                raise RuntimeError(f"TIR oracle worker {worker_index} exited: {process.stderr.read()[-4096:].strip()}")
+            oracle_input, oracle_output = process.stdin, process.stdout
+            if oracle_input is None or oracle_output is None:
+                raise RuntimeError(f"TIR oracle worker {worker_index} pipes unavailable")
+            oracle_input.write("".join(f"{pc} {code.hex()}\n" for pc, code in group)); oracle_input.flush()
+            result = []
+            for pc, code in group:
+                ready, _, _ = select.select([oracle_output], [], [], self.oracle_timeout)
+                if not ready:
+                    raise TimeoutError(f"TIR oracle worker {worker_index} timeout at PC {pc:#x}, opcode {code.hex()}, status={process.poll()}")
+                result.append(((pc, code), oracle_output.readline().rstrip("\n")))
+            return result
+        with ThreadPoolExecutor(max_workers=len(self.oracle_processes)) as pool:
+            responses = dict(item for result in pool.map(request, range(len(groups))) for item in result)
+        lines = [responses[item] for item in missing]
         self._log("oracle-request-end", count=len(lines))
         if any(not line for line in lines):
-            diagnostic = self.oracle_process.stderr.read()[-4096:].strip() if self.oracle_process.poll() is not None else ""
+            diagnostic = "one or more oracle workers returned an empty response"
             raise RuntimeError(f"TIR batch response cardinality mismatch: {diagnostic}")
         for (pc, code), line in zip(missing, lines, strict=True):
             try:
@@ -498,17 +505,18 @@ class OnlineTirValidator:
         self.transport.advance()
 
     def close(self) -> None:
-        if self.oracle_process.stdin is not None:
-            self.oracle_process.stdin.close()
-        try:
-            status = self.oracle_process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            self.oracle_process.kill()
-            self.oracle_process.wait()
-            raise RuntimeError("TIR specialization process did not stop")
-        if status != 0:
-            diagnostic = self.oracle_process.stderr.read()[-4096:].strip()
-            raise RuntimeError(f"TIR specialization process failed: {diagnostic}")
+        for process in self.oracle_processes:
+            if process.stdin is not None:
+                process.stdin.close()
+        for index, process in enumerate(self.oracle_processes):
+            try:
+                status = process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait()
+                raise RuntimeError(f"TIR oracle worker {index} did not stop")
+            if status != 0:
+                diagnostic = process.stderr.read()[-4096:].strip()
+                raise RuntimeError(f"TIR oracle worker {index} failed: {diagnostic}")
 
     def run(self) -> dict:
         while self.terminal is None:
@@ -623,7 +631,7 @@ def run_case(
             validator = OnlineTirValidator(
                 binary, loads, args.oracle, transport, handshake.pid,
                 progress=args.progress, oracle_timeout=args.oracle_timeout,
-                event_timeout=args.event_timeout,
+                event_timeout=args.event_timeout, oracle_workers=args.oracle_workers,
             )
             online = validator.run()
         except BaseException:
@@ -735,6 +743,7 @@ def main() -> None:
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--oracle-timeout", type=float, default=60.0)
     parser.add_argument("--event-timeout", type=float, default=60.0)
+    parser.add_argument("--oracle-workers", type=int, default=4)
     args = parser.parse_args()
     root = args.run_directory.resolve()
     root.mkdir(parents=True, exist_ok=False)
