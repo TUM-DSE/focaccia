@@ -239,6 +239,25 @@
       exec ${pythonEnv}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
     '';
 
+    tirLuaFixture = pkgs.stdenvNoCC.mkDerivation {
+      pname = "tir-lua-static-musl-fixture";
+      version = "1";
+      dontUnpack = true;
+      nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc pkgs.pkgsStatic.lua5_4 ];
+      buildPhase = ''
+        ${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc \
+          -static -no-pie -O2 -Wl,--build-id=none \
+          -I${pkgs.pkgsStatic.lua5_4}/include \
+          ${./reproducers/lua-tir/main.c} \
+          ${pkgs.pkgsStatic.lua5_4}/lib/liblua.a -lm -o program.elf
+        test "$(file program.elf)" = "program.elf: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, not stripped"
+      '';
+      installPhase = ''
+        mkdir -p "$out"
+        cp program.elf ${./reproducers/lua-tir/main.c} "$out/"
+      '';
+    };
+
     # Exact upstream #2248 source, linked as a static-musl AArch64 process.
     tirSmokeFixture = pkgs.stdenvNoCC.mkDerivation {
       pname = "tir-issue-2248-static-musl-fixture";
@@ -3798,6 +3817,7 @@
 
       rr = rrTool;
 
+      tir-lua-fixture = tirLuaFixture;
       tir-no-replay-fixture = tirSmokeFixture;
       tir-no-replay-smoke = tirSmokeRunner;
       tir-issue-364-fixture = tirIssue364Fixture;
