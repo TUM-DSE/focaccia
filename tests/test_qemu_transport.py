@@ -21,6 +21,7 @@ from focaccia.qemu.transport import (
     PluginProtocolError,
     PluginLaunchIdentity,
     PluginTransport,
+    SnapshotMemoryPlan,
     SnapshotPlan,
     read_exact,
 )
@@ -356,19 +357,24 @@ def test_boundary_snapshot_plan_is_installed_once_and_reused_by_occurrence():
             if occurrence == 1:
                 command = read_exact(sock, COMMAND_SIZE)
                 assert command[0] == 6
-                assert struct.unpack_from("<QQI", command, 8) == (0x4000, 1, 1)
+                assert struct.unpack_from("<QQII", command, 8) == (0x4000, 1, 1, 1)
                 assert read_exact(sock, 16).split(b"\0", 1)[0] == b"rax"
-                sock.sendall(struct.pack("<B7xQQI4x", 0, 0x4000, 1, 1))
+                assert read_exact(sock, 8) == struct.pack("<HH4x", 4, 1)
+                assert read_exact(sock, 1) == b"\0"
+                sock.sendall(struct.pack("<B7xQQII", 0, 0x4000, 1, 1, 1))
             command = read_exact(sock, COMMAND_SIZE)
             assert command[0] == 7
-            sock.sendall(struct.pack("<B3xIQQQQ", 0, 1, 0x4000, 1,
+            sock.sendall(struct.pack("<B1xHIQQQQ", 0, 1, 1, 0x4000, 1,
                                      occurrence, occurrence))
             sock.sendall(struct.pack("<B7x64s", 8, value.to_bytes(8, "little")))
+            sock.sendall(struct.pack("<QI4x", 0x8000, 4) + b"sync")
             assert read_exact(sock, COMMAND_SIZE)[0] == 3
 
     thread, errors = peer_thread(peer, serve)
     transport = PluginTransport(client, x86.ArchX86())
-    plan = SnapshotPlan(0x4000, 1, ("rax",))
+    plan = SnapshotPlan(
+        0x4000, 1, ("rax",), (SnapshotMemoryPlan(4, b"\0"),)
+    )
     values = []
     for occurrence in (1, 2):
         transport.receive_event()
@@ -377,6 +383,7 @@ def test_boundary_snapshot_plan_is_installed_once_and_reused_by_occurrence():
         snapshot = transport.capture_snapshot(0x4000)
         assert snapshot.occurrence == occurrence
         values.append(snapshot.registers[0].value)
+        assert snapshot.memory == ((0x8000, b"sync"),)
         transport.advance()
     assert values == [7, 9]
     transport.close()

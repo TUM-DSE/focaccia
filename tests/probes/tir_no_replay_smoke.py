@@ -26,10 +26,15 @@ from focaccia.qemu.transport import (
     PluginLaunchIdentity,
     PluginListener,
     PluginTransport,
+    SnapshotMemoryPlan as WireSnapshotMemoryPlan,
     SnapshotPlan as WireSnapshotPlan,
     manifest_sha256,
 )
 from focaccia.qemu.snapshot import plan_minimal_snapshot
+from focaccia.qemu.snapshot_recipe import (
+    UnsupportedSnapshotRecipe,
+    compile_address_recipe,
+)
 from focaccia.qemu.validation_server import PluginProgramState
 from focaccia.snapshot import ProgramState
 from focaccia.symbolic import SymbolicTransform, SymbolicTransformComposer
@@ -275,12 +280,39 @@ class OnlineTirValidator:
                     continue
                 wire_aliases.setdefault(wire_register(canonical), []).append(canonical)
             wire_registers = tuple(wire_aliases)
-            if not dependency_plan.memory and 0 < len(wire_registers) <= 32:
+            register_indices = {}
+            for index, wire in enumerate(wire_registers):
+                wire_width = 32 if wire == "cpsr" else 64
+                for canonical in wire_aliases[wire]:
+                    register_indices[canonical] = (index, wire_width)
+            try:
+                wire_memory = tuple(
+                    WireSnapshotMemoryPlan(
+                        dependency.expression.size // 8,
+                        compile_address_recipe(
+                            dependency.expression.ptr, register_indices
+                        ),
+                    )
+                    for dependency in dependency_plan.memory
+                    if dependency.address_state == "current"
+                    and dependency.transform is None
+                )
+                if len(wire_memory) != len(dependency_plan.memory):
+                    raise UnsupportedSnapshotRecipe(
+                        "Memory dependency does not use current source state."
+                    )
+            except UnsupportedSnapshotRecipe:
+                wire_memory = None
+            if (
+                wire_memory is not None and len(wire_registers) <= 32
+                and (wire_registers or wire_memory)
+            ):
+                candidate = (wire_registers, wire_memory)
                 plan = self.snapshot_plans.get(event.pc)
-                if plan is None or plan.registers != wire_registers:
+                if plan is None or (plan.registers, plan.memory) != candidate:
                     plan = WireSnapshotPlan(
                         event.pc, 1 if plan is None else plan.generation + 1,
-                        wire_registers,
+                        wire_registers, wire_memory,
                     )
                     self.transport.install_snapshot_plan(plan)
                     self.snapshot_plans[event.pc] = plan
@@ -297,6 +329,8 @@ class OnlineTirValidator:
                     for observation in snapshot.registers:
                         for canonical in wire_aliases[observation.name]:
                             captured.write_register(canonical, observation.value)
+                    for address, data in snapshot.memory:
+                        captured.write_memory(address, data)
                     evaluation_state = captured
             else:
                 self.snapshot_fallbacks += 1

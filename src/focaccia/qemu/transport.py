@@ -33,6 +33,9 @@ MAX_REGISTER_BYTES = 64
 DEFAULT_MAX_MEMORY_PAYLOAD = 16 * 1024 * 1024
 MAX_SNAPSHOT_PLANS = 4096
 MAX_PLAN_REGISTERS = 32
+MAX_PLAN_MEMORY = 32
+MAX_RECIPE_BYTES = 640
+MAX_SNAPSHOT_MEMORY_BYTES = 65536
 PLAN_REGISTER_SIZE = 16
 PLAN_ACK_SIZE = 32
 SNAPSHOT_HEADER_SIZE = 40
@@ -134,10 +137,17 @@ class BoundarySnapshotUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotMemoryPlan:
+    size: int
+    recipe: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotPlan:
     pc: int
     generation: int
     registers: tuple[str, ...]
+    memory: tuple[SnapshotMemoryPlan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +157,7 @@ class BoundarySnapshot:
     occurrence: int
     event_sequence: int
     registers: tuple[RegisterObservation, ...]
+    memory: tuple[tuple[int, bytes], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,8 +367,10 @@ class PluginTransport:
     def install_snapshot_plan(self, plan: SnapshotPlan) -> None:
         if self._boundary_pc != plan.pc:
             raise PluginProtocolError("Snapshot plan installation is not at its TB boundary.")
-        if not 1 <= len(plan.registers) <= MAX_PLAN_REGISTERS:
-            raise ValueError("Snapshot plans must contain between 1 and 32 registers.")
+        if len(plan.registers) > MAX_PLAN_REGISTERS:
+            raise ValueError("Snapshot plans cannot contain more than 32 registers.")
+        if not plan.registers and not plan.memory:
+            raise ValueError("Snapshot plans cannot be empty.")
         old = self._plans.get(plan.pc)
         if plan.generation <= 0 or (old is not None and plan.generation <= old.generation):
             raise ValueError("Snapshot plan generation must increase at each PC.")
@@ -372,16 +385,30 @@ class PluginTransport:
             encoded.append(raw + bytes(PLAN_REGISTER_SIZE - len(raw)))
         if len(set(plan.registers)) != len(plan.registers):
             raise ValueError("Snapshot plans cannot contain duplicate registers.")
+        if len(plan.memory) > MAX_PLAN_MEMORY:
+            raise ValueError("Snapshot plans cannot contain more than 32 memory reads.")
+        total_memory = 0
+        memory_payload = bytearray()
+        for memory in plan.memory:
+            if not 0 < memory.size <= MAX_SNAPSHOT_MEMORY_BYTES:
+                raise ValueError("Snapshot memory widths must be positive and bounded.")
+            if not 0 < len(memory.recipe) <= MAX_RECIPE_BYTES:
+                raise ValueError("Snapshot recipes must be positive and bounded.")
+            total_memory += memory.size
+            if total_memory > MAX_SNAPSHOT_MEMORY_BYTES:
+                raise ValueError("Snapshot memory payload exceeds its aggregate bound.")
+            memory_payload.extend(struct.pack("<HH4x", memory.size, len(memory.recipe)))
+            memory_payload.extend(memory.recipe)
         self._send_command(struct.pack(
-            "<B7xQQI4x", _COMMAND_INSTALL_PLAN, plan.pc, plan.generation,
-            len(plan.registers),
+            "<B7xQQII", _COMMAND_INSTALL_PLAN, plan.pc, plan.generation,
+            len(plan.registers), len(plan.memory),
         ))
-        self._connection.sendall(b"".join(encoded))
-        status, pc, generation, count = struct.unpack(
-            "<B7xQQI4x", read_exact(self._connection, PLAN_ACK_SIZE)
+        self._connection.sendall(b"".join(encoded) + memory_payload)
+        status, pc, generation, count, memory_count = struct.unpack(
+            "<B7xQQII", read_exact(self._connection, PLAN_ACK_SIZE)
         )
-        if status != _RESPONSE_OK or (pc, generation, count) != (
-            plan.pc, plan.generation, len(plan.registers)
+        if status != _RESPONSE_OK or (pc, generation, count, memory_count) != (
+            plan.pc, plan.generation, len(plan.registers), len(plan.memory)
         ):
             raise PluginProtocolError("Plugin returned a malformed plan acknowledgement.")
         if len(self._plans) >= MAX_SNAPSHOT_PLANS and old is None:
@@ -396,14 +423,15 @@ class PluginTransport:
         self._send_command(struct.pack(
             "<B7xQQ8x", _COMMAND_CAPTURE_PLAN, pc, plan.generation
         ))
-        status, count, returned_pc, generation, occurrence, sequence = struct.unpack(
-            "<B3xIQQQQ", read_exact(self._connection, SNAPSHOT_HEADER_SIZE)
+        header = read_exact(self._connection, SNAPSHOT_HEADER_SIZE)
+        status, memory_count, count, returned_pc, generation, occurrence, sequence = struct.unpack(
+            "<B1xHIQQQQ", header
         )
         identity = (returned_pc, generation)
         if identity != (pc, plan.generation):
             raise PluginProtocolError("Plugin snapshot identity does not match its plan.")
         if status == _RESPONSE_UNAVAILABLE:
-            if count != 0 or sequence != 0:
+            if count != 0 or memory_count != 0 or sequence != 0:
                 raise PluginProtocolError("Malformed unavailable boundary snapshot.")
             raise BoundarySnapshotUnavailable(
                 f"Plugin could not capture plan {generation} at {pc:#x}."
@@ -411,6 +439,7 @@ class PluginTransport:
         expected_occurrence = self._snapshot_occurrences[identity] + 1
         if (
             status != _RESPONSE_OK or count != len(plan.registers)
+            or memory_count != len(plan.memory)
             or occurrence != expected_occurrence or sequence != self._last_sequence
         ):
             raise PluginProtocolError("Boundary snapshot ordering or bounds are invalid.")
@@ -424,9 +453,22 @@ class PluginTransport:
             observations.append(RegisterObservation(
                 register, int.from_bytes(raw[:size], self.arch.endianness), size * 8
             ))
+        memory_values = []
+        total_memory = 0
+        for expected in plan.memory:
+            address, size = struct.unpack(
+                "<QI4x", read_exact(self._connection, 16)
+            )
+            if size != expected.size:
+                raise PluginProtocolError("Plugin snapshot memory width changed from its plan.")
+            total_memory += size
+            if total_memory > MAX_SNAPSHOT_MEMORY_BYTES:
+                raise PluginProtocolError("Plugin snapshot memory payload exceeds its bound.")
+            memory_values.append((address, read_exact(self._connection, size)))
         self._snapshot_occurrences[identity] = occurrence
         return BoundarySnapshot(
-            pc, generation, occurrence, sequence, tuple(observations)
+            pc, generation, occurrence, sequence, tuple(observations),
+            tuple(memory_values),
         )
 
     def advance(self) -> None:
