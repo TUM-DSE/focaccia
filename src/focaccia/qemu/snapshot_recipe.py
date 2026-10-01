@@ -70,7 +70,13 @@ def compile_address_recipe(expression, register_indices: dict[str, tuple[int, in
             emit(item.args[1])
             code.append(RECIPE_OPS[item.op])
         else:
-            raise UnsupportedSnapshotRecipe(f"Unsupported snapshot expression {item!r}.")
+            kind = type(item).__name__
+            operation = getattr(item, "op", None)
+            size = getattr(item, "size", None)
+            raise UnsupportedSnapshotRecipe(
+                f"Unsupported snapshot expression kind={kind}, "
+                f"operation={operation!r}, size={size!r}."
+            )
         if len(code) >= MAX_RECIPE_BYTES:
             raise UnsupportedSnapshotRecipe("Snapshot recipe byte bound exceeded.")
 

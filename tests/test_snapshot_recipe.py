@@ -1,5 +1,5 @@
 import pytest
-from miasm.expression.expression import ExprId, ExprInt, ExprMem
+from miasm.expression.expression import ExprId, ExprInt, ExprMem, ExprSlice
 
 from focaccia.qemu.snapshot_recipe import (
     RECIPE_ADD,
@@ -10,6 +10,15 @@ from focaccia.qemu.snapshot_recipe import (
     UnsupportedSnapshotRecipe,
     compile_address_recipe,
 )
+
+
+def test_unsupported_expression_diagnostic_does_not_render_expression_tree():
+    expression = ExprSlice(ExprId("X1", 128), 0, 64)
+    with pytest.raises(
+        UnsupportedSnapshotRecipe,
+        match="kind=ExprSlice, operation=None, size=64",
+    ):
+        compile_address_recipe(expression, {})
 
 
 def test_register_offset_recipe_matches_wire_language():
