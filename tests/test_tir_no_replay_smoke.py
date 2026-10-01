@@ -26,7 +26,7 @@ def test_fixtures_have_canonical_focaccia_eval_semantics():
 
     probe = (Path(__file__).parent / "probes/tir_no_replay_smoke.py").read_text()
     assert 'writes[0]["value"] != "03"' in probe
-    assert "self.state.read_memory(address, len(expected))" in probe
+    assert "observed_state.read_memory(address, len(expected))" in probe
     assert '"final_memory_verified": True' in probe
 
 

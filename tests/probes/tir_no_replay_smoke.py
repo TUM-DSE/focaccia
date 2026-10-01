@@ -251,8 +251,7 @@ class OnlineTirValidator:
         return result, svc_pc
 
     def _begin_block(self, event) -> None:
-        if self.active is not None:
-            self._compare_active(event.pc, event.sequence)
+        incoming = self.active.transform if self.active is not None else None
         if self.pending_svc is not None:
             raise RuntimeError("next TB arrived before SVC successor evidence")
         raw = read_image(self.loads, event.pc, event.size * 4)
@@ -263,13 +262,17 @@ class OnlineTirValidator:
         self.state.flush_observations()
         self.state.write_register("PC", event.pc)
         evaluation_state = self.state
-        if transform is not None:
-            dependency_plan = plan_minimal_snapshot(self.state, None, transform)
+        if transform is not None or incoming is not None:
+            dependency_plan = plan_minimal_snapshot(
+                self.state, incoming, transform
+            )
             def wire_register(name: str) -> str:
-                if name == "CPSR":
+                if name in {"CPSR", "N", "Z", "C", "V"}:
                     return "cpsr"
                 if name == "WSP":
                     return "sp"
+                if name == "TPIDR":
+                    return ""
                 if name.startswith("W") and name[1:].isdigit():
                     return f"x{name[1:]}"
                 return name.lower()
@@ -286,6 +289,10 @@ class OnlineTirValidator:
                 for canonical in wire_aliases[wire]:
                     register_indices[canonical] = (index, wire_width)
             try:
+                if "" in wire_registers:
+                    raise UnsupportedSnapshotRecipe(
+                        "A required register is unavailable to the plugin."
+                    )
                 wire_memory = tuple(
                     WireSnapshotMemoryPlan(
                         dependency.expression.size // 8,
@@ -327,13 +334,21 @@ class OnlineTirValidator:
                     captured = ProgramState(self.arch)
                     captured.write_register("PC", event.pc)
                     for observation in snapshot.registers:
-                        for canonical in wire_aliases[observation.name]:
-                            captured.write_register(canonical, observation.value)
+                        if observation.name == "cpsr":
+                            captured.write_register("CPSR", observation.value)
+                        else:
+                            for canonical in wire_aliases[observation.name]:
+                                captured.write_register(canonical, observation.value)
                     for address, data in snapshot.memory:
                         captured.write_memory(address, data)
                     evaluation_state = captured
             else:
                 self.snapshot_fallbacks += 1
+        if self.active is not None:
+            self._compare_active(
+                event.pc, event.sequence,
+                observed_state=evaluation_state,
+            )
         if transform is None:
             expected_registers: dict[str, int] = {}
             expected_stores: tuple[tuple[int, bytes], ...] = ()
@@ -349,15 +364,23 @@ class OnlineTirValidator:
         )
         self.transport.advance()
 
-    def _compare_active(self, destination_pc: int, boundary_sequence: int) -> None:
+    def _compare_active(
+        self, destination_pc: int, boundary_sequence: int,
+        *, observed_state=None,
+    ) -> None:
         block = self.active
         if block is None:
             raise RuntimeError("no active TB at comparison boundary")
-        self.state.flush_observations()
-        self.state.write_register("PC", destination_pc)
+        if observed_state is None:
+            observed_state = self.state
+            self.state.flush_observations()
+        observed_state.write_register("PC", destination_pc)
         block_errors = []
         for register, expected in block.expected_registers.items():
-            actual = destination_pc if register == "PC" else self.state.read_register(register)
+            actual = (
+                destination_pc if register == "PC"
+                else observed_state.read_register(register)
+            )
             if actual != expected:
                 error = {
                     "severity": "confirmed", "subject": register,
@@ -367,7 +390,7 @@ class OnlineTirValidator:
                 self.errors.append(error)
                 block_errors.append(error)
         for address, expected in block.expected_memory.items():
-            actual = self.state.read_memory(address, len(expected))
+            actual = observed_state.read_memory(address, len(expected))
             if actual != expected:
                 error = {
                     "severity": "confirmed", "subject": hex(address),
