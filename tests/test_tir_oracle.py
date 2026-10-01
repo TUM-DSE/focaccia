@@ -130,6 +130,7 @@ def test_lua_ccmp_register_fixture_uses_exact_asl_transition(backend):
 @pytest.mark.parametrize(("code", "left_reg", "right_reg", "output"), [
     ("e07eb39b", "X23", "X19", "X0"),  # UMULL X0, W23, W19
     ("857fba9b", "X28", "X26", "X5"),  # UMULL X5, W28, W26
+    ("807fa09b", "X28", "X0", "X0"),   # UMULL X0, W28, W0
 ])
 def test_lua_umull_fixture_uses_exact_asl_transition(
     backend, code, left_reg, right_reg, output

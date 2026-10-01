@@ -755,7 +755,7 @@ fn transform(
             return Err("unsupported conditional compare outside the audited Lua CCMP fixture".into());
         }
         "decode_aarch64_integer_arithmetic_mul_widening_32_64"
-            if ![0x9bb3_7ee0, 0x9bba_7f85].contains(&opcode) => {
+            if ![0x9bb3_7ee0, 0x9bba_7f85, 0x9ba0_7f80].contains(&opcode) => {
             return Err("unsupported widening multiply outside the audited Lua UMULL fixture".into());
         }
         "decode_aarch64_integer_arithmetic_mul_uniform_add_sub"
