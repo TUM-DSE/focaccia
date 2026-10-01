@@ -243,7 +243,7 @@
       pname = "tir-lua-static-musl-fixture";
       version = "1";
       dontUnpack = true;
-      nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc pkgs.pkgsStatic.lua5_4 ];
+      nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc pkgs.pkgsStatic.lua5_4 pkgs.python3 ];
       buildPhase = ''
         ${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc \
           -static -no-pie -O2 -Wl,--build-id=none \
@@ -251,12 +251,25 @@
           ${./reproducers/lua-tir/main.c} \
           ${pkgs.pkgsStatic.lua5_4}/lib/liblua.a -lm -o program.elf
         test "$(file program.elf)" = "program.elf: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, not stripped"
+        python - <<'PY'
+        import hashlib,json,struct
+        from pathlib import Path
+        b=Path('program.elf').read_bytes(); entry=struct.unpack_from('<Q',b,24)[0]; off=struct.unpack_from('<Q',b,32)[0]; size,num=struct.unpack_from('<HH',b,54)
+        for i in range(num):
+          k,_,o,v,_,fs,_,_=struct.unpack_from('<IIQQQQQQ',b,off+i*size)
+          if k==1 and v<=entry<v+fs: opcode=b[o+entry-v:o+entry-v+4].hex(); break
+        Path('manifest.json').write_text(json.dumps({'schema':3,'issue':0,'entry':entry,'witness_pc':entry,'witness_opcode':opcode,'sha256':hashlib.sha256(b).hexdigest(),'source_sha256':hashlib.sha256(Path('${./reproducers/lua-tir/main.c}').read_bytes()).hexdigest(),'trigger_sha256':'0'*64,'instruction_audit_sha256':'0'*64,'expected_stdout':'primes:2,3,5,7,11,13,17,19,23,29,31,37,41,43,47;sum=328\\n'})+'\n')
+        PY
       '';
       installPhase = ''
         mkdir -p "$out"
-        cp program.elf ${./reproducers/lua-tir/main.c} "$out/"
+        cp program.elf manifest.json ${./reproducers/lua-tir/main.c} "$out/"
       '';
     };
+
+    tirLuaRunner = pkgs.writeShellApplication { name = "tir-lua-online"; runtimeInputs = [ pythonEnv ]; text = ''
+      exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} --issue 0 --fixed-only --fixture ${tirLuaFixture} --oracle ${tirOracle}/bin/focaccia-tir-oracle --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --tir-revision ${tir.rev} --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 "$@"
+    ''; };
 
     # Exact upstream #2248 source, linked as a static-musl AArch64 process.
     tirSmokeFixture = pkgs.stdenvNoCC.mkDerivation {
@@ -3818,6 +3831,7 @@
       rr = rrTool;
 
       tir-lua-fixture = tirLuaFixture;
+      tir-lua-online = tirLuaRunner;
       tir-no-replay-fixture = tirSmokeFixture;
       tir-no-replay-smoke = tirSmokeRunner;
       tir-issue-364-fixture = tirIssue364Fixture;

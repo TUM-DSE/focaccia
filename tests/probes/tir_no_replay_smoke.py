@@ -640,7 +640,8 @@ def run_case(
             listener.close()
         guest_status = process.wait(timeout=30)
     expected_status = 1 if mismatch else 0
-    if guest_status != expected_status or (directory / "qemu.stdout").read_bytes():
+    stdout = (directory / "qemu.stdout").read_text()
+    if guest_status != expected_status or (not mismatch and stdout != fixture.get("expected_stdout", "")):
         raise RuntimeError(
             f"guest did not naturally exit {expected_status} without output: {guest_status}"
         )
@@ -720,7 +721,8 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--synchronous-snapshots", action="store_true")
-    parser.add_argument("--issue", required=True, type=int, choices=(2248, 364, 2419))
+    parser.add_argument("--issue", required=True, type=int, choices=(0, 2248, 364, 2419))
+    parser.add_argument("--fixed-only", action="store_true")
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--oracle", required=True)
     parser.add_argument("--qemu-fixed", required=True)
@@ -754,14 +756,9 @@ def main() -> None:
             loads, fixture["witness_pc"], len(EXPECTED_CALLME)
         ) != EXPECTED_CALLME:
             raise ValueError("fixture does not contain canonical callme.S bytes")
-        cases = {
-            "fixed": run_case(
-                args, binary, loads, entry, fixture, root / "fixed", mismatch=False
-            ),
-            "injected": run_case(
-                args, binary, loads, entry, fixture, root / "injected", mismatch=True
-            ),
-        }
+        cases = {"fixed": run_case(args, binary, loads, entry, fixture, root / "fixed", mismatch=False)}
+        if not args.fixed_only:
+            cases["injected"] = run_case(args, binary, loads, entry, fixture, root / "injected", mismatch=True)
         manifest = {
             "schema": 3, "architecture": "online-tb-tir", "scope": "whole-program",
             "issue": args.issue,
