@@ -267,6 +267,11 @@ class PluginTransport:
         self._boundary_pc: int | None = None
         self._automatic_snapshot = False
         self._automatic_advanced = False
+        self.snapshot_occurrence_count = 0
+        self.automatic_snapshot_count = 0
+        self.synchronous_command_count = 0
+        self.command_bytes_sent = 0
+        self.socket_bytes_sent = 0
 
     @property
     def closed(self) -> bool:
@@ -328,7 +333,9 @@ class PluginTransport:
             raise PluginProtocolError(
                 f"Plugin capabilities {capabilities:#x} do not satisfy required {required:#x}."
             )
-        self._connection.sendall(HANDSHAKE_ACK + struct.pack("<Q", required))
+        acknowledgement = HANDSHAKE_ACK + struct.pack("<Q", required)
+        self._connection.sendall(acknowledgement)
+        self.socket_bytes_sent += len(acknowledgement)
         return PluginHandshake(
             pid, target, self.arch.endianness, address_bits,
             api_min, api_current, capabilities, identity,
@@ -409,7 +416,9 @@ class PluginTransport:
             "<B7xQQII", _COMMAND_INSTALL_PLAN, plan.pc, plan.generation,
             len(plan.registers), len(plan.memory),
         ))
-        self._connection.sendall(b"".join(encoded) + memory_payload)
+        payload = b"".join(encoded) + memory_payload
+        self._connection.sendall(payload)
+        self.socket_bytes_sent += len(payload)
         status, pc, generation, count, memory_count = struct.unpack(
             "<B7xQQII", read_exact(self._connection, PLAN_ACK_SIZE)
         )
@@ -475,6 +484,9 @@ class PluginTransport:
                 raise PluginProtocolError("Plugin snapshot memory payload exceeds its bound.")
             memory_values.append((address, read_exact(self._connection, size)))
         self._snapshot_occurrences[identity] = occurrence
+        self.snapshot_occurrence_count += 1
+        if automatic:
+            self.automatic_snapshot_count += 1
         self._automatic_advanced = automatic
         return BoundarySnapshot(
             pc, generation, occurrence, sequence, tuple(observations),
@@ -496,6 +508,9 @@ class PluginTransport:
                 f"Plugin command has length {len(frame)}, expected {COMMAND_SIZE}."
             )
         self._connection.sendall(frame)
+        self.synchronous_command_count += 1
+        self.command_bytes_sent += len(frame)
+        self.socket_bytes_sent += len(frame)
 
     def read_register(self, register: str) -> RegisterObservation:
         self._send_command(_pack_command("read-register", register=register))

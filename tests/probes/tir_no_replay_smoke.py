@@ -497,6 +497,12 @@ class OnlineTirValidator:
                 "snapshot_plan_installs": self.snapshot_plan_installs,
                 "snapshot_plan_reuses": self.snapshot_plan_reuses,
                 "snapshot_synchronous_fallbacks": self.snapshot_fallbacks,
+                "snapshot_occurrences": self.transport.snapshot_occurrence_count,
+                "snapshot_automatic_occurrences": self.transport.automatic_snapshot_count,
+                "synchronous_commands": self.transport.synchronous_command_count,
+                "command_bytes_sent": self.transport.command_bytes_sent,
+                "socket_bytes_sent": self.transport.socket_bytes_sent,
+                "userspace_buffer_high_water_bytes": 0,
             },
         }
 
