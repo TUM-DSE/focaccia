@@ -153,6 +153,25 @@ class PendingBlock:
 class OnlineTirValidator:
     """Lazily specialize each observed TB and validate it at the next safe boundary."""
 
+    def _reduce_at_boundary(self, expressions, state, writes=()):
+        from focaccia.reduction import ReductionSession
+
+        session = ReductionSession(expressions, state, writes)
+        continuation = session.run()
+        try:
+            request = next(continuation)
+            while True:
+                data = state.read_memory(request.address, request.size)
+                request = continuation.send(data)
+        except StopIteration as completed:
+            return completed.value
+        finally:
+            session.close()
+            continuation.close()
+            self.reduction_requests += session.requests
+            self.reduction_bytes += session.bytes_captured
+            self.reduction_nodes += session.nodes_evaluated
+
     def __init__(
         self,
         binary: Path,
@@ -162,8 +181,13 @@ class OnlineTirValidator:
         pid: int,
         *, progress: bool = False, oracle_timeout: float = 60.0,
         event_timeout: float = 60.0, oracle_workers: int = 4,
+        iterative_reduction: bool = False,
     ) -> None:
         self.progress = progress
+        self.iterative_reduction = iterative_reduction
+        self.reduction_requests = 0
+        self.reduction_bytes = 0
+        self.reduction_nodes = 0
         if progress:
             faulthandler.enable()
             faulthandler.dump_traceback_later(30, repeat=True)
@@ -438,6 +462,16 @@ class OnlineTirValidator:
                     dependency for dependency in dependency_plan.memory
                     if dependency.address_state == "current"
                 ]
+                if self.iterative_reduction:
+                    # The boundary is still paused. Addresses come from the
+                    # residual, never from observed exit state.
+                    for dependency in pending:
+                        writes = (dependency.transform.memory_writes
+                                  if dependency.transform is not None else ())
+                        self._reduce_at_boundary(
+                            [dependency.expression], self.state, writes,
+                        )
+                    pending = []
                 for _ in range(len(pending)):
                     unresolved = []
                     for dependency in pending:
@@ -474,7 +508,13 @@ class OnlineTirValidator:
             expected_stores: tuple[tuple[int, bytes], ...] = ()
             expected_memory: dict[int, bytes] = {}
         else:
-            expected_registers = transform.eval_validation_register_transforms(evaluation_state)
+            if self.iterative_reduction:
+                outputs = transform.validation_register_outputs()
+                expected_registers = dict(zip(outputs, self._reduce_at_boundary(
+                    outputs.values(), evaluation_state, transform.memory_writes,
+                ), strict=True))
+            else:
+                expected_registers = transform.eval_validation_register_transforms(evaluation_state)
             expected_stores = transform.eval_ordered_memory_transforms(evaluation_state)
             expected_memory = transform.eval_memory_transforms(evaluation_state)
         self.active = PendingBlock(
@@ -647,6 +687,10 @@ class OnlineTirValidator:
                 "specialized_instructions": self.specializations,
                 "instruction_cache_entries": len(self.instruction_cache),
                 "oracle_batches": self.oracle_batches,
+                "iterative_reduction": self.iterative_reduction,
+                "reduction_requests": self.reduction_requests,
+                "reduction_bytes": self.reduction_bytes,
+                "reduction_nodes": self.reduction_nodes,
                 "snapshot_plan_installs": self.snapshot_plan_installs,
                 "snapshot_plan_reuses": self.snapshot_plan_reuses,
                 "snapshot_synchronous_fallbacks": self.snapshot_fallbacks,
@@ -735,6 +779,7 @@ def run_case(
                 binary, loads, args.oracle, transport, handshake.pid,
                 progress=args.progress, oracle_timeout=args.oracle_timeout,
                 event_timeout=args.event_timeout, oracle_workers=args.oracle_workers,
+                iterative_reduction=getattr(args, "iterative_reduction", False),
             )
             online = validator.run()
         except BaseException:
@@ -832,6 +877,7 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--synchronous-snapshots", action="store_true")
+    parser.add_argument("--iterative-reduction", action="store_true")
     parser.add_argument("--issue", required=True, type=int, choices=(0, 2248, 364, 2419))
     parser.add_argument("--fixed-only", action="store_true")
     parser.add_argument("--fixture", required=True, type=Path)

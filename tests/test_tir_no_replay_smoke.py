@@ -13,6 +13,26 @@ probe = SimpleNamespace(**PROBE)
 PC = 0x400000
 
 
+def test_iterative_boundary_driver_captures_pointer_chain():
+    from miasm.expression.expression import ExprId, ExprMem
+    from focaccia.arch.aarch64 import ArchAArch64
+    from focaccia.snapshot import ProgramState
+
+    source = ProgramState(ArchAArch64("little"))
+    source.write_register("X0", 0x1000)
+    source.write_memory(0x1000, (0x2000).to_bytes(8, "little"))
+    source.write_memory(0x2000, (7).to_bytes(8, "little"))
+    validator = object.__new__(probe.OnlineTirValidator)
+    validator.reduction_requests = 0
+    validator.reduction_bytes = 0
+    validator.reduction_nodes = 0
+    expression = ExprMem(ExprMem(ExprId("X0", 64), 64), 64)
+    assert validator._reduce_at_boundary([expression], source) == (7,)
+    assert validator.reduction_requests == 2
+    assert validator.reduction_bytes == 16
+    assert validator.reduction_nodes == 3
+
+
 def test_fixtures_have_canonical_focaccia_eval_semantics():
     root = Path(__file__).parents[1] / "reproducers"
     source2248 = (root / "issue-2248-tir/main.c").read_text()
