@@ -41,6 +41,7 @@ const CLASSES: &[&str] = &[
     "decode_aarch64_integer_arithmetic_div",
     "decode_aarch64_integer_arithmetic_rbit",
     "decode_aarch64_integer_shift_variable",
+    "decode_aarch64_memory_exclusive_single",
     "decode_aarch64_memory_pair_general_offset",
     "decode_aarch64_memory_pair_general_post_idx",
     "decode_aarch64_memory_pair_general_pre_idx",
@@ -231,7 +232,12 @@ fn replicate(value: Expression, count: u64) -> Result<Expression> {
 fn scalar(value: Value) -> Result<Expression> {
     match value {
         Value::Scalar(e) => Ok(e),
-        _ => Err("expected scalar residual".into()),
+        Value::Input(path) => Err(format!("expected scalar residual; input path={path:?}")),
+        Value::Record(_, fields) => Err(format!("expected scalar residual; record fields={:?}", fields.keys().take(16).collect::<Vec<_>>())),
+        Value::Array(_, fields) => Err(format!("expected scalar residual; array indices={:?}", fields.keys().take(16).collect::<Vec<_>>())),
+        Value::Writes(_, writes) => Err(format!("expected scalar residual; writes count={}", writes.len())),
+        Value::Integer(_) => Err("expected scalar residual; got integer".into()),
+        Value::Enum(name, variant) => Err(format!("expected scalar residual; enum={name}::{variant}")),
     }
 }
 fn integer(value: Value) -> Result<u64> {
@@ -264,6 +270,8 @@ fn register(path: &[String], bits: u32) -> Result<Expression> {
         [field] if field == "_PC" && bits == 64 => "PC".into(),
         [field] if field == "SP_EL0" && bits == 64 => "SP".into(),
         [field] if field == "TPIDR_EL0" && bits == 64 => "TPIDR".into(),
+        [field] if field == "__ExclusiveLocal" && bits == 1 => "__ExclusiveLocal".into(),
+        [field] if field == "__ExclusiveMonitorAddr" && bits == 64 => "__ExclusiveMonitorAddr".into(),
         _ => return Err(format!("unsupported architectural input {path:?}")),
     };
     Ok(Expression {
@@ -752,6 +760,10 @@ fn transform(
         return Err(format!("unsupported instruction class {iclass}"));
     }
     match iclass.as_str() {
+        "decode_aarch64_memory_exclusive_single"
+            if ![0xc85f_fc04, 0xc804_fc02].contains(&opcode) => {
+            return Err("unsupported exclusive opcode outside audited Lua pair".into());
+        }
         "decode_aarch64_integer_arithmetic_div" if opcode != 0x9ad7_0843 => {
             return Err("unsupported divide outside the audited Lua UDIV fixture".into());
         }
