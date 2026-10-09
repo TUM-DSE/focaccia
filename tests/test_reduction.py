@@ -1,5 +1,5 @@
 import pytest
-from miasm.expression.expression import ExprCond, ExprId, ExprInt, ExprMem, ExprOp
+from miasm.expression.expression import ExprCond, ExprId, ExprInt, ExprMem, ExprOp, ExprSlice
 
 from focaccia.arch.aarch64 import ArchAArch64
 from focaccia.reduction import MemoryRequest, ReductionSession
@@ -142,6 +142,20 @@ def test_invalid_prefix_and_write_budget():
     writes = [MemoryWrite(ExprInt(0, 64), ExprInt(0, 64))]
     with pytest.raises(SymbolEvaluationError, match="byte budget"):
         next(ReductionSession([deferred(0, 1)], state(), writes, max_bytes=1).run())
+
+
+def test_partial_register_snapshot_does_not_require_unused_upper_bits():
+    source = ProgramState(ArchAArch64("little"))
+    source.write_register("W1", 7)
+    expression = ExprSlice(ExprId("X1", 64), 0, 32)
+    assert finish(ReductionSession([expression], source).run(), None) == (7,)
+
+
+def test_missing_register_in_unselected_arm_does_not_fail():
+    expression = ExprCond(ExprInt(1, 1), ExprInt(7, 64), ExprId("X1", 64))
+    assert finish(ReductionSession([expression], state()).run(), None) == (7,)
+    with pytest.raises(SymbolEvaluationError, match="register input"):
+        next(ReductionSession([ExprId("X1", 64)], state()).run())
 
 
 def test_node_budget():

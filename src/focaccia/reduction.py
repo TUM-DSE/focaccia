@@ -12,6 +12,7 @@ from miasm.expression.expression import (
 from miasm.expression.simplifications import expr_simp
 
 from focaccia.miasm_util import eval_expr
+from focaccia.snapshot import RegisterAccessError
 from focaccia.symbolic import (
     SymbolEvaluationError, _DEFERRED_MEMORY_BYTE_OP, _TransformEvaluator,
     expression_children,
@@ -45,6 +46,7 @@ class ReductionSession:
         self.source = {}
         self.results = {}
         self.registers = {}
+        self.register_errors = {}
         self.versions = {}
         self.indexed = 0
         self.building = []
@@ -67,11 +69,20 @@ class ReductionSession:
             seen.add(id(node))
             if len(seen) > max_nodes:
                 raise SymbolEvaluationError("Residual node budget exceeded")
-            if isinstance(node, ExprId):
-                value = expr_simp(eval_expr(node, resolver))
-                if not isinstance(value, ExprInt):
-                    raise SymbolEvaluationError("Missing residual register input")
-                self.registers[node] = value
+            register_leaf = isinstance(node, ExprId) or (
+                isinstance(node, ExprSlice) and isinstance(node.arg, ExprId)
+            )
+            if register_leaf:
+                # A snapshot can contain only Wn or selected status bits. Do
+                # not require the unknown remainder of its canonical register.
+                try:
+                    value = expr_simp(eval_expr(node, resolver))
+                    if not isinstance(value, ExprInt):
+                        raise SymbolEvaluationError("Missing residual register input")
+                    self.registers[id(node)] = value
+                except (RegisterAccessError, ValueError, KeyError) as error:
+                    self.register_errors[id(node)] = error
+                continue
             pending.extend(expression_children(node))
 
     def close(self):
@@ -142,7 +153,11 @@ class ReductionSession:
             key = id(node)
             if key in self.results:
                 continue
-            if isinstance(node, ExprCond):
+            if key in self.register_errors:
+                raise SymbolEvaluationError("Missing residual register input") from self.register_errors[key]
+            if key in self.registers:
+                result = self.registers[key]
+            elif isinstance(node, ExprCond):
                 if id(node.cond) not in self.results:
                     pending.extend(((node, False), (node.cond, False)))
                     continue
@@ -162,7 +177,7 @@ class ReductionSession:
                 if isinstance(node, ExprInt):
                     result = node
                 elif isinstance(node, ExprId):
-                    result = self.registers[node]
+                    result = self.registers[key]
                 elif isinstance(node, ExprMem):
                     if node.size % 8:
                         raise SymbolEvaluationError("Non-byte memory access")

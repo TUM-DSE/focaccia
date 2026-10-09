@@ -55,11 +55,43 @@ nix develop --command python -m pytest -q tests/test_reduction.py \
   tests/test_symbolic_composition.py tests/test_tir_no_replay_smoke.py
 ```
 
-The TIR oracle and all three trigger fixtures build through Nix. Live trigger
-validation was attempted but the surviving QEMU plugin artifact rejects this
-branch's launch identity options before execution. Historical fixed/injected
-QEMU store paths are unavailable. These attempts are not successful end-to-end
-checks; a matching snapshot-branch QEMU build is still needed.
+The TIR oracle and all three trigger fixtures build through Nix. End-to-end
+validation passes with iterative reduction enabled using QEMU snapshot revision
+`e4e5a436dc9c804718d0d1877182d1ada3cf338a`:
+
+| Trigger | Fixed | Injected | Checked blocks per run |
+| --- | --- | --- | --- |
+| #2248 | accepted | mismatch | 351 |
+| #364 | accepted | mismatch | 360 |
+| #2419 | accepted | mismatch | 381 |
+
+All six cases use exactly one QEMU execution and report complete terminal
+evidence. The first live attempt exposed an input-capture bug: a slice of X1
+required the entire register although only its low 32 bits were available.
+Register slices are now frozen independently, with missing inputs rejected only
+when their computation is selected. Both cases have dedicated regressions.
+The focused suite contains 186 passing tests; Ruff passes.
+
+The root flake's historical QEMU pin does not supply the snapshot protocol.
+Use the snapshot source above rather than an unrelated installed plugin. Build
+its `with-focaccia-plugin`, `with-focaccia-plugin-2248`,
+`with-focaccia-plugin-364`, and `with-focaccia-plugin-2419` Nix packages, then
+invoke `tests/probes/tir_no_replay_smoke.py` through `nix develop`, supplying:
+
+```
+--iterative-reduction --issue ISSUE --fixture FIXTURE_DIRECTORY
+--oracle ORACLE/bin/focaccia-tir-oracle
+--qemu-fixed FIXED/bin/qemu-aarch64
+--plugin-fixed FIXED/lib/plugins/libfocaccia.so
+--qemu-injected INJECTED/bin/qemu-aarch64
+--plugin-injected INJECTED/lib/plugins/libfocaccia.so
+--tir-revision TIR_REVISION --qemu-revision QEMU_REVISION
+--run-directory OUTPUT_DIRECTORY
+```
+
+Repeat for all three triggers. Unit tests alone are not sufficient validation
+for changes to this path. Results from this run are retained at
+`/tmp/carbonara-iterative-e2e-r2-{2248,364,2419}/result.json`.
 
 Regressions cover suspended pointer chasing, completed-node reuse, conditional
 reads, overlapping ranges, ordered versions, entry-versus-forwarded bytes,
