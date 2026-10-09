@@ -156,7 +156,11 @@ class OnlineTirValidator:
     def _reduce_at_boundary(self, expressions, state, writes=()):
         from focaccia.reduction import ReductionSession
 
-        session = ReductionSession(expressions, state, writes)
+        native = getattr(self, "native_oracle", None)
+        session = ReductionSession(
+            expressions, state, writes, native=native,
+            native_context=(str(self.binary), state.read_register("PC")) if native else None,
+        )
         continuation = session.run()
         try:
             request = next(continuation)
@@ -181,10 +185,14 @@ class OnlineTirValidator:
         pid: int,
         *, progress: bool = False, oracle_timeout: float = 60.0,
         event_timeout: float = 60.0, oracle_workers: int = 4,
-        iterative_reduction: bool = False,
+        iterative_reduction: bool = False, native_jit: bool = False,
     ) -> None:
         self.progress = progress
-        self.iterative_reduction = iterative_reduction
+        self.iterative_reduction = iterative_reduction or native_jit
+        self.native_oracle = None
+        if native_jit:
+            from focaccia.native_oracle import NativeOracle
+            self.native_oracle = NativeOracle(oracle, timeout=oracle_timeout)
         self.reduction_requests = 0
         self.reduction_bytes = 0
         self.reduction_nodes = 0
@@ -648,6 +656,8 @@ class OnlineTirValidator:
         self.transport.advance()
 
     def close(self) -> None:
+        if self.native_oracle is not None:
+            self.native_oracle.close()
         for process in self.oracle_processes:
             if process.stdin is not None:
                 process.stdin.close()
@@ -687,6 +697,7 @@ class OnlineTirValidator:
                 "specialized_instructions": self.specializations,
                 "instruction_cache_entries": len(self.instruction_cache),
                 "oracle_batches": self.oracle_batches,
+                "native_jit": self.native_oracle.stats if self.native_oracle else None,
                 "iterative_reduction": self.iterative_reduction,
                 "reduction_requests": self.reduction_requests,
                 "reduction_bytes": self.reduction_bytes,
@@ -780,6 +791,7 @@ def run_case(
                 progress=args.progress, oracle_timeout=args.oracle_timeout,
                 event_timeout=args.event_timeout, oracle_workers=args.oracle_workers,
                 iterative_reduction=getattr(args, "iterative_reduction", False),
+                native_jit=getattr(args, "native_jit", False),
             )
             online = validator.run()
         except BaseException:
@@ -878,6 +890,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--synchronous-snapshots", action="store_true")
     parser.add_argument("--iterative-reduction", action="store_true")
+    parser.add_argument("--native-jit", action="store_true")
     parser.add_argument("--issue", required=True, type=int, choices=(0, 2248, 364, 2419))
     parser.add_argument("--fixed-only", action="store_true")
     parser.add_argument("--fixture", required=True, type=Path)

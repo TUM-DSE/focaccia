@@ -9,6 +9,8 @@ edition = "2024"
 tir = { path = "../crates/tir" }
 frontend = { path = "../crates/frontend" }
 specializer = { path = "../crates/specializer" }
+backend = { path = "../crates/backend" }
+inkwell = { version = "0.6.0", features = ["llvm18-1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1.3"

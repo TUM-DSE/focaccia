@@ -35,7 +35,11 @@ class ReductionSession:
     """
 
     def __init__(self, expressions, state, writes=(), *, max_nodes=100000,
-                 max_requests=4096, max_bytes=1048576, max_write_depth=128):
+                 max_requests=4096, max_bytes=1048576, max_write_depth=128,
+                 native=None, native_context=None):
+        self.native = native
+        self.native_context = native_context
+        self.native_plans = {}
         self.expressions = tuple(expressions)
         self.writes = tuple(writes)
         self.max_nodes = max_nodes
@@ -153,6 +157,25 @@ class ReductionSession:
             key = id(node)
             if key in self.results:
                 continue
+            if self.native is not None:
+                if key not in self.native_plans:
+                    plan = self.native.plan(node)
+                    self.native_plans[key] = (
+                        plan if plan is not None and self.native.hot(plan, self.native_context)
+                        else None
+                    )
+                plan = self.native_plans[key]
+                if plan is not None:
+                    missing = [leaf for leaf in plan.leaves if id(leaf) not in self.results]
+                    if missing:
+                        pending.append((node, True))
+                        pending.extend((leaf, False) for leaf in reversed(missing))
+                        continue
+                    values = [self.results[id(leaf)] for leaf in plan.leaves]
+                    result = ExprInt(self.native.evaluate(plan, values, self.native_context), node.size)
+                    self.results[key] = result
+                    self.nodes_evaluated += 1
+                    continue
             if key in self.register_errors:
                 raise SymbolEvaluationError("Missing residual register input") from self.register_errors[key]
             if key in self.registers:

@@ -323,16 +323,16 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1790770250,
-        "narHash": "sha256-4AYSPpmSWbM0pC8IEzgOj2zISrXHzZ1ba0XWnv4Ym10=",
-        "ref": "carbonara",
-        "rev": "c4761b71d385dc12f679da9e8bdf6930b2458831",
+        "lastModified": 1791549001,
+        "narHash": "sha256-HABca0HHjVHMAZO7Q8qXlec0/batapHfLqV3MuNYY4k=",
+        "ref": "ta/carbonara-oracle-jit",
+        "rev": "b92c56a76dc8118aead49ff6050ee8cdc2fe073a",
         "shallow": true,
         "type": "git",
         "url": "ssh://git@github.com/TUM-DSE/airlift.git"
       },
       "original": {
-        "ref": "carbonara",
+        "ref": "ta/carbonara-oracle-jit",
         "shallow": true,
         "type": "git",
         "url": "ssh://git@github.com/TUM-DSE/airlift.git"

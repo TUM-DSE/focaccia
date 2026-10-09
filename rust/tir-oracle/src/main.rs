@@ -835,8 +835,13 @@ fn decode_request(pc: &str, raw: &str) -> Result<(u64, Vec<u8>)> {
     Ok((pc, bytes))
 }
 
+mod kernel;
+
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--jit-kernels" {
+        return kernel::run();
+    }
     if args.len() == 2 && args[1] == "--help" {
         println!("usage: focaccia-tir-oracle <pc-decimal> <four-instruction-bytes-hex>\n       focaccia-tir-oracle --audit-classes < newline-delimited 'pc-decimal bytes-hex'");
         return Ok(());

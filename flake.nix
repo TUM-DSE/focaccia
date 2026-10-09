@@ -10,7 +10,7 @@
 
     # Track the development branch; flake.lock pins the exact tested revision.
     # Keep TIR's own toolchain/nixpkgs pins rather than replacing its tested build inputs.
-    tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=carbonara&shallow=1";
+    tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=ta/carbonara-oracle-jit&shallow=1";
 
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
@@ -4108,6 +4108,41 @@
         pytestTargets = [ "tests/test_semantics_backend.py" "tests/test_tir_backend.py"
           "tests/test_native_whole_program.py" ];
       };
+      tir-native-kernels = pkgs.stdenvNoCC.mkDerivation {
+        name = "tir-native-kernels";
+        src = staticUnitSource;
+        dontBuild = true;
+        doCheck = true;
+        nativeCheckInputs = [ pythonStaticUnitEnv tirOracle ];
+        FOCACCIA_NATIVE_ORACLE = "${tirOracle}/bin/focaccia-tir-oracle";
+        checkPhase = ''
+          python -m pytest -q tests/test_native_oracle.py tests/test_reduction.py
+        '';
+        installPhase = "mkdir -p $out";
+      };
+      # Override qemu-submodule with the matching snapshot branch until that
+      # protocol is published in the repository's default QEMU input.
+      tir-native-jit-e2e = pkgs.runCommand "tir-native-jit-e2e" {
+        nativeBuildInputs = [ tirSmokeRunner tirIssue364Runner tirIssue2419Runner pkgs.python3 ];
+      } ''
+        mkdir -p "$out"
+        tir-no-replay-smoke --native-jit --qemu-revision ${qemu-submodule.rev} --run-directory "$out/2248"
+        tir-issue-364-online --native-jit --qemu-revision ${qemu-submodule.rev} --run-directory "$out/364"
+        tir-issue-2419-online --native-jit --qemu-revision ${qemu-submodule.rev} --run-directory "$out/2419"
+        python - "$out" <<'PY'
+        import json, pathlib, sys
+        for path in pathlib.Path(sys.argv[1]).glob("*/result.json"):
+            result = json.loads(path.read_text())
+            assert result["status"] == "passed"
+            for case in result["cases"].values():
+                assert case["qemu_executions"] == 1
+                assert case["terminal_evidence"] == "complete"
+                native = case["cache"]["native_jit"]
+                assert native["native_calls"] > 0
+                assert native["compilations"] > 0
+                assert native["variant_hits"] > 0
+        PY
+      '';
       tir-oracle-validation = pkgs.stdenvNoCC.mkDerivation {
         name = "tir-oracle-validation";
         src = staticUnitSource;

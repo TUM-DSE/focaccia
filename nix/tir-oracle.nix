@@ -33,6 +33,11 @@ let
     cargoExtraArgs = "--locked -p focaccia-tir-oracle";
     strictDeps = true;
     doCheck = false;
+    nativeBuildInputs = [ pkgs.pkg-config pkgs.llvmPackages_18.llvm.dev ];
+    buildInputs = [ pkgs.llvmPackages_18.libllvm pkgs.libffi pkgs.libxml2 pkgs.ncurses pkgs.zlib ];
+    LLVM_CONFIG_PATH = "${pkgs.llvmPackages_18.llvm.dev}/bin/llvm-config";
+    LLVM_SYS_181_PREFIX = "${pkgs.llvmPackages_18.llvm.dev}";
+    RUSTFLAGS = "-C link-arg=-rdynamic";
     FOCACCIA_TIR_REVISION = tir.rev;
   };
   artifacts = craneLib.buildDepsOnly args;
