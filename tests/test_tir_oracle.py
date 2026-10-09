@@ -27,6 +27,46 @@ ENV = TraceEnvironment(None, (), (), binary_hash=None, architecture=ARCH.key)
 MASK = (1 << 64) - 1
 
 
+def test_configured_class_reuse_preserves_pc_encoding_and_admission():
+    # Same class at different PCs, different immediate/register encodings,
+    # an eviction, and an unaudited sibling after an admitted MUL.
+    requests = [
+        (PC, "00000010"), (PC + 0x4000, "00000010"),  # ADR X0, current PC
+        (PC + 4, "20040091"), (PC + 8, "42080091"),  # ADD immediate variants
+        (PC + 0x100, "20040011"),                   # 32-bit sibling after 64-bit
+        (PC + 12, "e20300aa"),                       # MOV forces another class
+        (PC + 16, "20040091"),
+        (PC + 20, "c07e009b"),                      # audited MUL
+        (PC + 24, "207c019b"),                      # unaudited MUL
+    ]
+    results = []
+    profiles = []
+    for capacity in (0, 1, 16):
+        env = {k:v for k,v in os.environ.items()
+               if not k.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))}
+        env.update(FOCACCIA_ORACLE_PROFILE="1", FOCACCIA_ORACLE_CLASS_CACHE=str(capacity))
+        completed = subprocess.run(
+            [os.environ["FOCACCIA_TIR_ORACLE"], "--export-transitions"],
+            input="".join(f"{pc} {code}\n" for pc,code in requests),
+            text=True, capture_output=True, check=True, timeout=120, env=env,
+        )
+        results.append([json.loads(line) for line in completed.stdout.splitlines()])
+        profiles.append(json.loads(next(
+            line.removeprefix("FOCACCIA_ORACLE_PROFILE ")
+            for line in completed.stderr.splitlines()
+            if line.startswith("FOCACCIA_ORACLE_PROFILE ")
+        )))
+    assert results[0] == results[1] == results[2]
+    assert len(results[0]) == len(requests)
+    assert all(row["status"] == "ok" for row in results[0][:-1])
+    assert results[0][-1]["status"] == "unsupported"
+    assert results[0][0]["outputs"]["X0"] != results[0][1]["outputs"]["X0"]
+    assert profiles[0]["class_hits"] == 0
+    assert profiles[2]["class_hits"] > 0
+    assert profiles[2]["class_misses"] < profiles[1]["class_misses"]
+    assert profiles[2]["cached_entries_bytes_peak"] <= 32 * 1024 * 1024
+
+
 @pytest.fixture(scope="module")
 def backend():
     # A missing package is a failure, not a skip or a Miasm fallback.

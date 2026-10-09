@@ -2,7 +2,9 @@
 
 Branches: Focaccia `ta/iterative-oracle-jit`, TIR `ta/carbonara-oracle-jit`.
 Enable with `tests/probes/tir_no_replay_smoke.py --native-jit`.
-This implies `--iterative-reduction`; the default remains unchanged.
+This implies `--iterative-reduction`; native execution remains opt-in.
+The specification-level class cache is now enabled independently of this tier;
+see `ORACLE-STAGES.md` for its stages, correctness checks, and measured benefit.
 
 ## Actual pipeline
 

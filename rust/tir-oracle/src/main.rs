@@ -722,11 +722,130 @@ fn configured_spec() -> Result<Module<TypedMeta>> {
         .map(Module::from)
         .map_err(|e| e.to_string())
 }
+#[derive(Default, Serialize)]
+struct StageProfile {
+    requests: u64,
+    load_seconds: f64,
+    decode_seconds: f64,
+    configuration_seconds: f64,
+    instruction_seconds: f64,
+    export_seconds: f64,
+    class_hits: u64,
+    class_misses: u64,
+    opcode_hits: u64,
+    cache_seconds: f64,
+    cached_entries_bytes_peak: u64,
+}
+impl StageProfile {
+    fn report(&self) {
+        if std::env::var_os("FOCACCIA_ORACLE_PROFILE").is_some() {
+            eprintln!("FOCACCIA_ORACLE_PROFILE {}", serde_json::to_string(self).unwrap());
+        }
+    }
+}
+
+struct ConfigurationCache<'m> {
+    // This immutable source fixes specification and configuration identity for
+    // the cache lifetime. No opcode, PC or runtime operand is bound here.
+    source: &'m Module<TypedMeta>,
+    capacity: usize,
+    classes: std::collections::VecDeque<(String, std::sync::Arc<Module<TypedMeta>>, u64)>,
+    opcodes: HashMap<u32, String>,
+    opcode_order: std::collections::VecDeque<u32>,
+    entries_bytes: u64,
+}
+impl<'m> ConfigurationCache<'m> {
+    fn new(source: &'m Module<TypedMeta>) -> Result<Self> {
+        let capacity = std::env::var("FOCACCIA_ORACLE_CLASS_CACHE")
+            .unwrap_or_else(|_| "16".into()).parse::<usize>()
+            .map_err(|_| "invalid class cache capacity")?;
+        if capacity > 64 { return Err("class cache capacity exceeds 64".into()); }
+        Ok(Self { source, capacity, classes: Default::default(), opcodes: HashMap::new(),
+                  opcode_order: Default::default(), entries_bytes: 0 })
+    }
+    fn classify(&mut self, opcode: u32, profile: &mut StageProfile)
+        -> Result<(String, Option<Module<TypedMeta>>)> {
+        let start = std::time::Instant::now();
+        let result = if self.capacity == 0 {
+            let (name, module) = specializer::specializer::prune_to_iclass(self.source, opcode);
+            (name, Some(module))
+        } else if let Some(name) = self.opcodes.get(&opcode) {
+            profile.opcode_hits += 1;
+            (name.clone(), None)
+        } else {
+            // Use the specification decoder, not handwritten masks or an
+            // external disassembler. Pruning is postponed until a class miss.
+            let classes = specializer::specializer::classify_iclasses(self.source, [opcode]);
+            if classes.len() != 1 { return Err("instruction class did not resolve".into()); }
+            let name = classes[0].0.clone();
+            if self.opcodes.len() >= 1024 {
+                let old = self.opcode_order.pop_front().unwrap(); self.opcodes.remove(&old);
+            }
+            self.opcodes.insert(opcode, name.clone()); self.opcode_order.push_back(opcode);
+            (name, None)
+        };
+        profile.decode_seconds += start.elapsed().as_secs_f64();
+        Ok(result)
+    }
+    fn configured(&mut self, name: &str, pruned: Option<Module<TypedMeta>>,
+                  profile: &mut StageProfile) -> Result<std::sync::Arc<Module<TypedMeta>>> {
+        if let Some(index) = self.classes.iter().position(|(n,_,_)|n==name) {
+            let entry = self.classes.remove(index).unwrap();
+            let result = entry.1.clone(); self.classes.push_back(entry);
+            profile.class_hits += 1;
+            return Ok(result);
+        }
+        profile.class_misses += 1;
+        let start = std::time::Instant::now();
+        let pruned = match pruned {
+            Some(module) => module,
+            None => {
+                let id = self.source.get_id_from_name(name).ok_or("missing semantic class")?;
+                specializer::specializer::prune_to_iclass_fid(self.source,id).1
+            }
+        };
+        profile.decode_seconds += start.elapsed().as_secs_f64();
+        let start = std::time::Instant::now();
+        let pins = KnownState::config_defaults(pruned.arch());
+        let mut conf = pruned.clone();
+        let folded: HashMap<VarId, TypedExpr> =
+            specializer::evaluator::conf_fold_all(&pruned, &pins, &mut conf)
+                .into_iter().collect();
+        for declaration in &mut conf.entries {
+            if let Decl::Func { id, body, .. } = declaration {
+                if let Some(folded) = folded.get(id) { *body = folded.clone(); }
+            }
+        }
+        profile.configuration_seconds += start.elapsed().as_secs_f64();
+        let start = std::time::Instant::now();
+        let conf = std::sync::Arc::new(conf);
+        if self.capacity > 0 {
+            // Bound both class count and serialized declaration volume. This
+            // is a representation budget, not an assertion about heap RSS.
+            let bytes = bincode::serialized_size(&conf.entries).map_err(|e| e.to_string())?;
+            const BUDGET: u64 = 32 * 1024 * 1024;
+            if bytes <= BUDGET {
+                while self.classes.len() >= self.capacity || self.entries_bytes + bytes > BUDGET {
+                    let (_,_,size) = self.classes.pop_front().unwrap(); self.entries_bytes -= size;
+                }
+                self.entries_bytes += bytes;
+                self.classes.push_back((name.into(),conf.clone(),bytes));
+                profile.cached_entries_bytes_peak = profile.cached_entries_bytes_peak.max(self.entries_bytes);
+            }
+        }
+        profile.cache_seconds += start.elapsed().as_secs_f64();
+        Ok(conf)
+    }
+}
+
 fn transform(
-    typed: &Module<TypedMeta>,
+    cache: &mut ConfigurationCache<'_>,
     pc: u64,
     bytes: &[u8],
+    profile: &mut StageProfile,
 ) -> Result<Transition> {
+    profile.requests += 1;
+    let typed = cache.source;
     if bytes.len() != 4 || pc % 4 != 0 {
         return Err("requires one aligned AArch64 instruction".into());
     }
@@ -747,7 +866,7 @@ fn transform(
             return Err("instruction overlaps specification configuration memory".into());
         }
     }
-    let (iclass, pruned) = specializer::specializer::prune_to_iclass(&typed, opcode);
+    let (iclass, pruned) = cache.classify(opcode, profile)?;
     if !CLASSES.contains(&iclass.as_str()) {
         return Err(format!("unsupported instruction class {iclass}"));
     }
@@ -777,24 +896,17 @@ fn transform(
         }
         _ => {}
     }
-    let pins = KnownState::config_defaults(pruned.arch());
-    let mut conf = pruned.clone();
-    let folded: HashMap<VarId, TypedExpr> =
-        specializer::evaluator::conf_fold_all(&pruned, &pins, &mut conf)
-            .into_iter()
-            .collect();
-    for declaration in &mut conf.entries {
-        if let Decl::Func { id, body, .. } = declaration {
-            if let Some(folded) = folded.get(id) {
-                *body = folded.clone();
-            }
-        }
-    }
+    // Admission above is checked even on cache hits. In particular, caching
+    // an audited opcode never admits its unaudited class siblings.
+    let conf = cache.configured(&iclass, pruned, profile)?;
+    let stage = std::time::Instant::now();
     let known = KnownState::usermode_at(conf.arch(), bytes, pc, pc);
-    let mut output = conf.clone();
+    let mut output = (*conf).clone();
     let (parameter, body) =
         specializer::evaluator::specialize_state_fn(&conf, "interp", &known, &mut output)
             .ok_or("specialization failed")?;
+    profile.instruction_seconds += stage.elapsed().as_secs_f64();
+    let stage = std::time::Instant::now();
     let primitives = output
         .get_primitives()
         .map(|(id, _, _, p)| (id, p))
@@ -815,6 +927,7 @@ fn transform(
     if metadata != [true; 2] || !outputs.contains_key("PC") {
         return Err("incomplete architectural transition".into());
     }
+    profile.export_seconds += stage.elapsed().as_secs_f64();
     Ok(Transition {
         outputs,
         memory_writes: writes
@@ -856,7 +969,11 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if args.len() == 2 && matches!(args[1].as_str(), "--audit-classes" | "--export-transitions") {
+        let stage = std::time::Instant::now();
         let typed = configured_spec()?;
+        let mut profile = StageProfile::default();
+        profile.load_seconds = stage.elapsed().as_secs_f64();
+        let mut cache = ConfigurationCache::new(&typed)?;
         for (index, line) in std::io::stdin().lock().lines().enumerate() {
             let line = line.map_err(|error| error.to_string())?;
             let fields: Vec<_> = line.split_whitespace().collect();
@@ -878,7 +995,7 @@ fn run() -> Result<()> {
                     "tir_revision": env!("FOCACCIA_TIR_REVISION"),
                     "profile": "aarch64-fullspec-el0",
                 });
-                match transform(&typed, pc, &bytes) {
+                match transform(&mut cache, pc, &bytes, &mut profile) {
                     Ok(transition) => {
                         response["status"] = "ok".into();
                         response["outputs"] = serde_json::to_value(transition.outputs).map_err(|e| e.to_string())?;
@@ -893,6 +1010,7 @@ fn run() -> Result<()> {
                 std::io::stdout().flush().map_err(|e| e.to_string())?;
             }
         }
+        profile.report();
         return Ok(());
     }
     if args.len() != 3 {
@@ -906,8 +1024,12 @@ fn run() -> Result<()> {
         "tir_revision": env!("FOCACCIA_TIR_REVISION"), "profile": "aarch64-fullspec-el0",
     });
     // Missing/corrupt package data is an infrastructure failure, not unsupported ISA semantics.
+    let stage = std::time::Instant::now();
     let typed = configured_spec()?;
-    match transform(&typed, pc, &bytes) {
+    let mut profile = StageProfile::default();
+    profile.load_seconds = stage.elapsed().as_secs_f64();
+    let mut cache = ConfigurationCache::new(&typed)?;
+    match transform(&mut cache, pc, &bytes, &mut profile) {
         Ok(transition) => {
             response["status"] = "ok".into();
             response["outputs"] = serde_json::to_value(transition.outputs).map_err(|e| e.to_string())?;
@@ -918,6 +1040,7 @@ fn run() -> Result<()> {
             response["reason"] = reason.into();
         }
     }
+    profile.report();
     println!(
         "{}",
         serde_json::to_string(&response).map_err(|e| e.to_string())?

@@ -186,7 +186,10 @@ class OnlineTirValidator:
         *, progress: bool = False, oracle_timeout: float = 60.0,
         event_timeout: float = 60.0, oracle_workers: int = 4,
         iterative_reduction: bool = False, native_jit: bool = False,
+        oracle_profile: bool = False, oracle_class_cache: int | None = None,
     ) -> None:
+        if oracle_class_cache is not None and not 0 <= oracle_class_cache <= 64:
+            raise ValueError("Oracle class cache must be between 0 and 64.")
         self.progress = progress
         self.iterative_reduction = iterative_reduction or native_jit
         self.native_oracle = None
@@ -200,6 +203,7 @@ class OnlineTirValidator:
             faulthandler.enable()
             faulthandler.dump_traceback_later(30, repeat=True)
         self.oracle_timeout = oracle_timeout
+        self.oracle_profiles = []
         self.event_timeout = event_timeout
         self.last_progress = time.monotonic()
         self.binary = binary
@@ -211,6 +215,10 @@ class OnlineTirValidator:
             key: value for key, value in os.environ.items()
             if not key.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
         }
+        if oracle_profile:
+            oracle_env["FOCACCIA_ORACLE_PROFILE"] = "1"
+        if oracle_class_cache is not None:
+            oracle_env["FOCACCIA_ORACLE_CLASS_CACHE"] = str(oracle_class_cache)
         if not 1 <= oracle_workers <= 8:
             raise ValueError("Oracle worker count must be between 1 and 8.")
         self.oracle_processes = [subprocess.Popen(
@@ -667,9 +675,15 @@ class OnlineTirValidator:
             except subprocess.TimeoutExpired:
                 process.kill(); process.wait()
                 raise RuntimeError(f"TIR oracle worker {index} did not stop")
+            diagnostic = process.stderr.read()
             if status != 0:
-                diagnostic = process.stderr.read()[-4096:].strip()
-                raise RuntimeError(f"TIR oracle worker {index} failed: {diagnostic}")
+                raise RuntimeError(f"TIR oracle worker {index} failed: {diagnostic[-4096:].strip()}")
+            for line in diagnostic.splitlines():
+                if line.startswith("FOCACCIA_ORACLE_PROFILE "):
+                    self.oracle_profiles.append(dict(
+                        worker=index,
+                        **json.loads(line.removeprefix("FOCACCIA_ORACLE_PROFILE ")),
+                    ))
 
     def run(self) -> dict:
         while self.terminal is None:
@@ -792,6 +806,8 @@ def run_case(
                 event_timeout=args.event_timeout, oracle_workers=args.oracle_workers,
                 iterative_reduction=getattr(args, "iterative_reduction", False),
                 native_jit=getattr(args, "native_jit", False),
+                oracle_profile=getattr(args, "oracle_profile", False),
+                oracle_class_cache=getattr(args, "oracle_class_cache", None),
             )
             online = validator.run()
         except BaseException:
@@ -807,6 +823,7 @@ def run_case(
                 validator.close()
             listener.close()
         guest_status = process.wait(timeout=30)
+        online["cache"]["oracle_stages"] = validator.oracle_profiles
     expected_status = 1 if mismatch else 0
     stdout = (directory / "qemu.stdout").read_text()
     if guest_status != expected_status or (not mismatch and stdout != fixture.get("expected_stdout", "")):
@@ -891,6 +908,8 @@ def main() -> None:
     parser.add_argument("--synchronous-snapshots", action="store_true")
     parser.add_argument("--iterative-reduction", action="store_true")
     parser.add_argument("--native-jit", action="store_true")
+    parser.add_argument("--oracle-profile", action="store_true")
+    parser.add_argument("--oracle-class-cache", type=int)
     parser.add_argument("--issue", required=True, type=int, choices=(0, 2248, 364, 2419))
     parser.add_argument("--fixed-only", action="store_true")
     parser.add_argument("--fixture", required=True, type=Path)

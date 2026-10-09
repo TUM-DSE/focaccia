@@ -13,6 +13,17 @@ probe = SimpleNamespace(**PROBE)
 PC = 0x400000
 
 
+def test_invalid_class_cache_is_rejected_before_spawning_workers(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("invalid configuration spawned a worker")
+    monkeypatch.setattr(probe.subprocess, "Popen", unexpected)
+    with pytest.raises(ValueError, match="class cache"):
+        probe.OnlineTirValidator(
+            Path("unused"), [], "unused", None, 1,
+            native_jit=True, oracle_class_cache=65,
+        )
+
+
 def test_iterative_boundary_driver_captures_pointer_chain():
     from miasm.expression.expression import ExprId, ExprMem
     from focaccia.arch.aarch64 import ArchAArch64

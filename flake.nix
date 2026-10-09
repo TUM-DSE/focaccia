@@ -4122,6 +4122,29 @@
       };
       # Override qemu-submodule with the matching snapshot branch until that
       # protocol is published in the repository's default QEMU input.
+      tir-class-reduction-e2e = pkgs.runCommand "tir-class-reduction-e2e" {
+        nativeBuildInputs = [ tirSmokeRunner tirIssue364Runner tirIssue2419Runner pkgs.python3 ];
+      } ''
+        mkdir -p "$out"
+        tir-no-replay-smoke --iterative-reduction --oracle-profile --oracle-class-cache 16 --qemu-revision ${qemu-submodule.rev} --run-directory "$out/2248"
+        tir-issue-364-online --iterative-reduction --oracle-profile --oracle-class-cache 16 --qemu-revision ${qemu-submodule.rev} --run-directory "$out/364"
+        tir-issue-2419-online --iterative-reduction --oracle-profile --oracle-class-cache 16 --qemu-revision ${qemu-submodule.rev} --run-directory "$out/2419"
+        python - "$out" <<'PY'
+        import json, pathlib, sys
+        paths = list(pathlib.Path(sys.argv[1]).glob("*/result.json"))
+        assert len(paths) == 3
+        for path in paths:
+            result = json.loads(path.read_text())
+            assert result["status"] == "passed"
+            for case in result["cases"].values():
+                assert case["qemu_executions"] == 1
+                assert case["terminal_evidence"] == "complete"
+                profiles = case["cache"]["oracle_stages"]
+                assert len(profiles) == 4
+                assert sum(p["class_hits"] for p in profiles) > 0
+                assert sum(p["requests"] for p in profiles) == case["cache"]["specialized_instructions"]
+        PY
+      '';
       tir-native-jit-e2e = pkgs.runCommand "tir-native-jit-e2e" {
         nativeBuildInputs = [ tirSmokeRunner tirIssue364Runner tirIssue2419Runner pkgs.python3 ];
       } ''
