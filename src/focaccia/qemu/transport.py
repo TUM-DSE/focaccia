@@ -49,6 +49,9 @@ _COMMAND_FINISH = 4
 _COMMAND_ABORT = 5
 _COMMAND_INSTALL_PLAN = 6
 _COMMAND_CAPTURE_PLAN = 7
+_COMMAND_MEMORY_PERMISSIONS = 8
+_COMMAND_DRAIN_STORE_FOOTPRINT = 9
+MAX_STORE_FOOTPRINT = 65536
 _RESPONSE_OK = 0
 _RESPONSE_UNAVAILABLE = 1
 _ENDIANNESS_CODES = {"little": 1, "big": 2}
@@ -59,6 +62,8 @@ CAP_VECTOR = 1 << 3
 CAP_TLS = 1 << 4
 CAP_AARCH64_SVC = 1 << 5
 CAP_BOUNDARY_SNAPSHOTS = 1 << 6
+CAP_MEMORY_PERMISSIONS = 1 << 7
+CAP_STORE_FOOTPRINT = 1 << 8
 
 EVENT_CUTPOINT = 1
 EVENT_STORE = 2
@@ -133,6 +138,31 @@ class PluginEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StoreSpan:
+    address: int
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoreFootprint:
+    """Ordered actual-store occurrences in one paused-event interval.
+
+    Opt-in plugin mode ``online-store-footprint=on`` advertises cap bit 8 and
+    disables auto-advance. Command 9 is ``<B7xQQ8x`` (current sequence, epoch).
+    Response ``<8sIIQQQQ`` is FOCSTOR-NUL, status, bounded count, previous
+    sequence/epoch and current sequence/epoch, followed by count ``<QQ>`` spans.
+    First previous identity is (0, 0). Every event must drain once before step;
+    overflow is fatal at the producer, not a truncated successful footprint.
+    This observes translated guest stores, not syscall/environment memory writes.
+    """
+    from_sequence: int
+    from_epoch: int
+    to_sequence: int
+    to_epoch: int
+    spans: tuple[StoreSpan, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BoundarySnapshotUnavailable(RuntimeError):
     """The plugin could not capture a plan; the caller must fall back synchronously."""
 
@@ -203,12 +233,13 @@ def _pack_command(
         if not encoded or len(encoded) >= 16:
             raise ValueError("Plugin register names must contain between 1 and 15 bytes.")
         frame = struct.pack("<B7x16s8x", _COMMAND_READ_REGISTER, encoded)
-    elif command == "read-memory":
+    elif command in {"read-memory", "memory-permissions"}:
         if address < 0 or size < 0:
             raise ValueError("Plugin memory addresses and sizes cannot be negative.")
         if address >= 1 << 64 or size >= 1 << 64:
             raise ValueError("Plugin memory addresses and sizes must fit in 64 bits.")
-        frame = struct.pack("<B7xQQ8x", _COMMAND_READ_MEMORY, address, size)
+        opcode = _COMMAND_READ_MEMORY if command == "read-memory" else _COMMAND_MEMORY_PERMISSIONS
+        frame = struct.pack("<B7xQQ8x", opcode, address, size)
     elif command == "step":
         frame = struct.pack("<B31x", _COMMAND_STEP)
     elif command == "finish":
@@ -260,8 +291,12 @@ class PluginTransport:
         self.expected_identity = expected_identity
         self.required_capabilities = required_capabilities
         self._closed = False
+        self._capabilities = 0
         self._last_sequence = 0
         self._last_epoch = 0
+        self._footprint_from = (0, 0)
+        self._footprint_drained = False
+        self._event_paused = False
         self._completed = False
         self._plans: dict[int, SnapshotPlan] = {}
         self._snapshot_occurrences: dict[tuple[int, int], int] = {}
@@ -337,6 +372,7 @@ class PluginTransport:
         acknowledgement = HANDSHAKE_ACK + struct.pack("<Q", required)
         self._connection.sendall(acknowledgement)
         self.socket_bytes_sent += len(acknowledgement)
+        self._capabilities = capabilities
         return PluginHandshake(
             pid, target, self.arch.endianness, address_bits,
             api_min, api_current, capabilities, identity,
@@ -371,14 +407,20 @@ class PluginTransport:
             if (
                 size == 0
                 or size > 1_048_576
-                or pc % 4
-                or address != pc + (size - 1) * 4
+                or (self.arch.archname == "aarch64" and (
+                    pc % 4 or address != pc + (size - 1) * 4
+                ))
+                or (self.arch.archname != "aarch64" and address < pc)
                 or auxiliary != 0
                 or any(value)
             ):
                 raise PluginProtocolError("Plugin returned a malformed translation-block event.")
         elif flags or size != 0 or any(value):
             raise PluginProtocolError("Plugin returned payload bytes for a non-store event.")
+        if self._capabilities & CAP_STORE_FOOTPRINT and flags:
+            raise PluginProtocolError("Store footprints require paused, non-automatic events.")
+        self._event_paused = True
+        self._footprint_drained = False
         self._last_sequence = sequence
         self._last_epoch = epoch
         self._boundary_pc = pc if kind == EVENT_TRANSLATION_BLOCK else None
@@ -502,7 +544,42 @@ class PluginTransport:
             tuple(memory_values),
         )
 
+    def drain_store_footprint(self) -> StoreFootprint:
+        """Drain actual guest-store spans since the previous drained event.
+
+        Addresses/sizes are observations only, never oracle input values. The
+        caller compares their coverage with predictions and separately reads
+        actual post-memory. Repeated overlapping stores remain separate records.
+        """
+        if not self._capabilities & CAP_STORE_FOOTPRINT:
+            raise PluginProtocolError("Plugin has no store-footprint capability.")
+        if not self._event_paused or self._footprint_drained:
+            raise PluginProtocolError("Store footprint requires a unique paused event.")
+        self._send_command(struct.pack(
+            "<B7xQQ8x", _COMMAND_DRAIN_STORE_FOOTPRINT,
+            self._last_sequence, self._last_epoch,
+        ))
+        magic, status, count, from_seq, from_epoch, to_seq, to_epoch = struct.unpack(
+            "<8sIIQQQQ", read_exact(self._connection, 48)
+        )
+        if (magic != b"FOCSTOR\0" or status != 0 or count > MAX_STORE_FOOTPRINT
+                or (from_seq, from_epoch) != self._footprint_from
+                or (to_seq, to_epoch) != (self._last_sequence, self._last_epoch)):
+            raise PluginProtocolError("Invalid store-footprint status, bound, or event identity.")
+        spans = []
+        for _ in range(count):
+            address, size = struct.unpack("<QQ", read_exact(self._connection, 16))
+            if size not in (1, 2, 4, 8, 16) or address > (1 << 64) - size:
+                raise PluginProtocolError("Invalid store-footprint span.")
+            spans.append(StoreSpan(address, size))
+        self._footprint_from = (to_seq, to_epoch)
+        self._footprint_drained = True
+        return StoreFootprint(from_seq, from_epoch, to_seq, to_epoch, tuple(spans))
+
     def advance(self) -> None:
+        if self._capabilities & CAP_STORE_FOOTPRINT and not self._footprint_drained:
+            raise PluginProtocolError("Advance requires draining the store footprint.")
+        self._event_paused = False
         if not self._automatic_advanced:
             self._send_command(_pack_command("step"))
         self._boundary_pc = None
@@ -553,6 +630,32 @@ class PluginTransport:
             )
         value = int.from_bytes(raw_value[:size], byteorder=self.arch.endianness)
         return RegisterObservation(name, value, size * 8)
+
+    def memory_permissions(self, address: int, size: int) -> int:
+        """Observe common guest-page R/W/X/mapped bits (1/2/4/8).
+
+        Zero means at least one page is unmapped. This observes guest mappings,
+        not host /proc permissions or debugger-read availability. The caller
+        must use it while paused at the same input boundary as captured bytes.
+        """
+        if not self._capabilities & CAP_MEMORY_PERMISSIONS:
+            raise PluginProtocolError("Plugin lacks guest memory permission evidence.")
+        if type(address) is not int or type(size) is not int or not 0 <= address < 1 << 64:
+            raise ValueError("Invalid permission query address/size.")
+        if not 1 <= size <= MAX_SNAPSHOT_MEMORY_BYTES or address + size > 1 << 64:
+            raise ValueError("Permission query range exceeds bounds.")
+        self._send_command(_pack_command("memory-permissions", address=address, size=size))
+        raw = read_exact(self._connection, MEMORY_HEADER_SIZE)
+        status, flags, padding, returned_address, returned_size = struct.unpack("<BB6sQQ", raw)
+        if any(padding) or returned_address != address or returned_size != size or flags & ~15:
+            raise PluginProtocolError("Malformed guest permission response.")
+        if status == _RESPONSE_UNAVAILABLE:
+            if flags:
+                raise PluginProtocolError("Unavailable permission response contains flags.")
+            raise MemoryAccessError(address, size, "Guest permission evidence is unavailable.")
+        if status != _RESPONSE_OK or (flags and not flags & 8):
+            raise PluginProtocolError("Invalid guest permission status/flags.")
+        return flags
 
     def read_memory(self, address: int, size: int) -> bytes:
         if size < 0:

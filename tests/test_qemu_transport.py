@@ -390,6 +390,17 @@ def test_boundary_snapshot_plan_is_installed_once_and_reused_by_occurrence():
     finish_peer(thread, errors)
 
 
+def test_x86_translation_block_descriptor_accepts_variable_length_end_pc():
+    client, peer = socket.socketpair()
+    peer.sendall(event(EVENT_TRANSLATION_BLOCK, 1, 2, pc=0x4001,
+                       address=0x4010, size=3))
+    transport = PluginTransport(client, x86.ArchX86())
+    block = transport.receive_event()
+    assert (block.pc, block.address, block.size) == (0x4001, 0x4010, 3)
+    transport.close()
+    peer.close()
+
+
 def test_event_stream_rejects_noncontiguous_translation_block_descriptor():
     client, peer = socket.socketpair()
     peer.sendall(event(EVENT_TRANSLATION_BLOCK, 1, 2, pc=0x4000,
