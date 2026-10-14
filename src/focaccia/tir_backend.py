@@ -54,7 +54,20 @@ def _fields(value: object, expected: set[str]) -> dict:
 
 
 class _ExpressionDecoder:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, registers: dict[str, int] | None = None,
+        allow_vector_zero_extension: bool = True,
+    ) -> None:
+        # The register contract belongs to the selected source profile, not to
+        # the wire response. Never accept a response-supplied arbitrary name.
+        self.registers = dict(_REGISTERS if registers is None else registers)
+        if any(
+            not isinstance(name, str) or not name or type(width) is not int
+            or not 1 <= width <= 2048
+            for name, width in self.registers.items()
+        ):
+            raise ValueError("Invalid source register contract")
+        self.allow_vector_zero_extension = allow_vector_zero_extension
         # The response is already capped at 1 MiB. Extended-register flag
         # semantics legitimately repeat a ~1,100-node carry/overflow cone for
         # N/Z/C/V, so the old 4,096 aggregate budget rejected an audited musl
@@ -85,12 +98,13 @@ class _ExpressionDecoder:
         if kind == "register":
             _fields(node, common | {"name"})
             name = node["name"]
-            if not isinstance(name, str) or name not in _REGISTERS:
+            if not isinstance(name, str) or name not in self.registers:
                 raise ValueError("Unsupported architectural input register")
-            register_bits = _REGISTERS[name]
+            register_bits = self.registers[name]
             if bits == register_bits:
                 return ExprId(name, bits)
-            if name.startswith("V") and register_bits == 128 and bits > 128:
+            if (self.allow_vector_zero_extension and name.startswith("V")
+                    and register_bits == 128 and bits > 128):
                 return ExprId(name, 128).zeroExtend(bits)
             raise ValueError("Unsupported architectural input register width")
         if kind == "binary":
@@ -103,12 +117,17 @@ class _ExpressionDecoder:
                 "sub",
                 "mul",
                 "udiv",
+                "sdiv",
                 "eq",
                 "ne",
                 "ugt",
                 "ult",
                 "uge",
                 "ule",
+                "sgt",
+                "slt",
+                "sge",
+                "sle",
                 "and",
                 "or",
                 "xor",
@@ -117,7 +136,8 @@ class _ExpressionDecoder:
                 "ashr",
             ):
                 raise ValueError("Unsupported oracle binary operation")
-            expected_bits = 1 if op in ("eq", "ne", "ugt", "ult", "uge", "ule") else left.size
+            comparisons = ("eq", "ne", "ugt", "ult", "uge", "ule", "sgt", "slt", "sge", "sle")
+            expected_bits = 1 if op in comparisons else left.size
             if left.size != right.size or bits != expected_bits:
                 raise ValueError("Oracle binary operation width mismatch")
             if op == "sub":
@@ -130,16 +150,14 @@ class _ExpressionDecoder:
                 unequal = ExprInt(int(op == "ne"), 1)
                 equal = ExprInt(int(op == "eq"), 1)
                 return ExprCond(left ^ right, unequal, equal)
-            if op in ("ugt", "ult", "uge", "ule"):
-                if op == "ugt":
-                    left, right, comparison = right, left, "<u"
-                elif op == "uge":
-                    left, right, comparison = right, left, "<=u"
-                else:
-                    comparison = "<u" if op == "ult" else "<=u"
+            if op in ("ugt", "ult", "uge", "ule", "sgt", "slt", "sge", "sle"):
+                signedness, relation = op[0], op[1:]
+                if relation in ("gt", "ge"):
+                    left, right = right, left
+                comparison = ("<" if relation in ("lt", "gt") else "<=") + signedness
                 return ExprOp(comparison, left, right)
             names = {
-                "add": "+", "mul": "*", "udiv": "udiv",
+                "add": "+", "mul": "*", "udiv": "udiv", "sdiv": "sdiv",
                 "and": "&", "or": "|", "xor": "^",
             }
             return ExprOp(names[op], left, right)

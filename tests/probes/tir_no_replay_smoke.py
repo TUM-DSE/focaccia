@@ -17,6 +17,10 @@ import sys
 import time
 
 from focaccia.arch.aarch64 import ArchAArch64
+from focaccia.boundary_oracle import (
+    BoundaryPrediction, RegisterPrediction,
+    compare as compare_boundary, predict as predict_boundary,
+)
 from focaccia.qemu.transport import (
     CAP_AARCH64_SVC,
     CAP_BOUNDARY_SNAPSHOTS,
@@ -530,9 +534,13 @@ class OnlineTirValidator:
                     outputs.values(), evaluation_state, transform.memory_writes,
                 ), strict=True))
             else:
-                expected_registers = transform.eval_validation_register_transforms(evaluation_state)
-            expected_stores = transform.eval_ordered_memory_transforms(evaluation_state)
-            expected_memory = transform.eval_memory_transforms(evaluation_state)
+                prediction = predict_boundary(transform, evaluation_state)
+                expected_registers = {name: item.value for name, item in prediction.registers.items()}
+                expected_stores = prediction.ordered_writes
+                expected_memory = dict(prediction.memory)
+            if self.iterative_reduction:
+                expected_stores = transform.eval_ordered_memory_transforms(evaluation_state)
+                expected_memory = transform.eval_memory_transforms(evaluation_state)
         self.active = PendingBlock(
             event.pc, event.address, event.size, event.sequence,
             hashlib.sha256(raw).hexdigest(), transform, expected_registers,
@@ -552,29 +560,46 @@ class OnlineTirValidator:
             self.state.flush_observations()
         observed_state.write_register("PC", destination_pc)
         block_errors = []
-        for register, expected in block.expected_registers.items():
-            actual = (
-                destination_pc if register == "PC"
-                else observed_state.read_register(register)
-            )
-            if actual != expected:
+        observed_registers = {
+            register: destination_pc if register == "PC" else observed_state.read_register(register)
+            for register in block.expected_registers
+        }
+        observed_memory = {
+            address: observed_state.read_memory(address, len(expected))
+            for address, expected in block.expected_memory.items()
+        }
+        prediction = BoundaryPrediction(
+            {register: RegisterPrediction(value, (1 << self.arch.get_reg_accessor(register).num_bits) - 1,
+                                          self.arch.get_reg_accessor(register).num_bits)
+             for register, value in block.expected_registers.items()},
+            tuple(block.expected_stores), block.expected_memory,
+        )
+        comparison = compare_boundary(prediction, observed_registers, observed_memory)
+        for diagnostic in comparison.diagnostics:
+            if diagnostic["kind"] == "register_mismatch":
+                register = diagnostic["register"]
                 error = {
                     "severity": "confirmed", "subject": register,
-                    "expected": hex(expected), "actual": hex(actual),
+                    "expected": hex(block.expected_registers[register]),
+                    "actual": hex(observed_registers[register]),
                     "block_pc": hex(block.first_pc),
                 }
-                self.errors.append(error)
-                block_errors.append(error)
-        for address, expected in block.expected_memory.items():
-            actual = observed_state.read_memory(address, len(expected))
-            if actual != expected:
+            elif diagnostic["kind"] == "memory_mismatch":
+                address = diagnostic["address"]
                 error = {
                     "severity": "confirmed", "subject": hex(address),
-                    "expected": expected.hex(), "actual": actual.hex(),
+                    "expected": block.expected_memory[address].hex(),
+                    "actual": observed_memory[address].hex(),
                     "block_pc": hex(block.first_pc),
                 }
-                self.errors.append(error)
-                block_errors.append(error)
+            else:
+                error = {
+                    "severity": "confirmed", "subject": str(diagnostic.get("register", diagnostic["kind"])),
+                    "expected": str(diagnostic), "actual": "unavailable",
+                    "block_pc": hex(block.first_pc),
+                }
+            self.errors.append(error)
+            block_errors.append(error)
         for ordinal, (address, value) in enumerate(block.expected_stores):
             self.store_evidence.append({
                 "block_pc": block.first_pc, "ordinal": ordinal,

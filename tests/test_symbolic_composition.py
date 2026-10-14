@@ -17,8 +17,10 @@ from focaccia.symbolic import (
     _TransformEvaluator,
     Instruction,
     SymbolicCompositionError,
+    SymbolEvaluationError,
     SymbolicTransform,
     SymbolicTransformComposer,
+    knownness_symbol,
 )
 
 
@@ -213,6 +215,228 @@ def test_x86_extended_register_aliases_are_canonical_and_composable():
 
     assert values["R8"] == 0x1234
     assert values["R9"] == 0x1235
+
+
+def test_source_owned_masks_remain_symbolic_and_evaluate_with_runtime_knownness():
+    mask = ExprOp("&", knownness_symbol("RCX", 64), ExprInt(0xFFFF, 64))
+    source = SymbolicTransform(
+        1,
+        {ExprId("RAX", 64): ExprId("RCX", 64)},
+        [], X86, 0x1000, 0x1001,
+        defined_masks={"RAX": mask}, source_owned=True,
+    )
+    concrete = state(X86, RAX=0, RCX=0x1234)
+    outputs = source.validation_register_outputs_with_masks()
+    value, defined = outputs["RAX"]
+    assert source.eval_validation_register_transforms_with_masks(
+        concrete, {"RAX": 0, "RCX": 0xA5A5}
+    )["RAX"] == (0x1234, 0xA5A5 & 0xFFFF)
+    assert value == ExprId("RCX", 64)
+    assert defined.size == 64
+
+
+def test_source_guard_rewrites_at_prefix_and_survives_dead_output():
+    first = SymbolicTransform(
+        1, {ExprId("EAX", 32): ExprId("ECX", 32)}, [], X86, 0x1000, 0x1001,
+        defined_masks={"EAX": ExprInt((1 << 32) - 1, 32)}, source_owned=True,
+    )
+    second = SymbolicTransform(
+        1, {ExprId("EBX", 32): ExprInt(7, 32)}, [], X86, 0x1001, 0x1002,
+        defined_masks={"EBX": ExprInt((1 << 32) - 1, 32)},
+        guards=(ExprSlice(ExprId("EAX", 32), 0, 1),), source_owned=True,
+    )
+    composed = first.composed_with(second)
+    third = SymbolicTransform(
+        1, {ExprId("EAX", 32): ExprInt(0, 32)}, [], X86, 0x1002, 0x1003,
+        defined_masks={"EAX": ExprInt((1 << 32) - 1, 32)}, source_owned=True,
+    )
+    composed = composed.composed_with(third)
+    assert composed.guards == (ExprSlice(ExprId("RCX", 64), 0, 1),)
+    composed.eval_guards(state(X86, RCX=1), {
+        "RAX": (1 << 64) - 1, "RCX": (1 << 64) - 1,
+    })
+    with pytest.raises(SymbolEvaluationError, match="guard 0 is false"):
+        composed.eval_guards(state(X86, RCX=0), {
+            "RAX": (1 << 64) - 1, "RCX": (1 << 64) - 1,
+        })
+
+
+def test_source_masks_follow_flag_alias_overwrites_and_heuristic_is_bypassed():
+    arch = x86.ArchX86()
+    source_shift = SymbolicTransform(
+        1, {ExprId("OF", 1): ExprInt(0, 1)},
+        [Instruction.from_string("SHL EAX, 5", arch, 0x1000, 2)],
+        arch, 0x1000, 0x1002,
+        defined_masks={"OF": ExprInt(0, 1)}, source_owned=True,
+    )
+    assert "OF" in source_shift.validation_register_outputs_with_masks()
+    later = SymbolicTransform(
+        1, {ExprId("OF", 1): ExprInt(1, 1)}, [], arch, 0x1002, 0x1003,
+        defined_masks={"OF": ExprInt(1, 1)}, source_owned=True,
+    )
+    composed = source_shift.composed_with(later)
+    assert composed.validation_register_outputs_with_masks()["OF"] == (
+        ExprInt(1, 1), ExprInt(1, 1)
+    )
+
+
+def test_source_metadata_rejects_unsafe_legacy_evaluation_and_bad_serialization():
+    source = SymbolicTransform(
+        1, {ExprId("RAX", 64): ExprId("RCX", 64)}, [], X86, 0x1000, 0x1001,
+        defined_masks={"RAX": ExprInt((1 << 64) - 1, 64)},
+        guards=(ExprInt(0, 1),), source_owned=True,
+    )
+    concrete = state(X86, RAX=0, RCX=4, RSP=0x1000)
+    for evaluate in (
+        lambda: source.eval_register_transforms(concrete),
+        lambda: source.eval_validation_register_transforms(concrete),
+        lambda: source.eval_ordered_memory_transforms(concrete),
+        lambda: source.eval_memory_transforms(concrete),
+        lambda: source.validation_register_outputs(),
+    ):
+        with pytest.raises(SymbolEvaluationError, match="guard- and definedness-aware"):
+            evaluate()
+    encoded = source.to_json()
+    encoded["source_owned"] = "false"
+    with pytest.raises(ValueError, match="must be boolean"):
+        SymbolicTransform.from_json(encoded)
+    encoded = source.to_json()
+    encoded["source_owned"] = False
+    with pytest.raises(ValueError, match="requires source_owned"):
+        SymbolicTransform.from_json(encoded)
+    with pytest.raises(SymbolicCompositionError, match="requires source_owned"):
+        SymbolicTransform(1, {}, [], X86, 0, 1, guards=(ExprInt(0, 1),))
+    encoded = source.to_json()
+    encoded.pop("guards")
+    with pytest.raises(ValueError, match="missing definedness/guard"):
+        SymbolicTransform.from_json(encoded)
+
+
+def test_source_metadata_round_trips_without_loss():
+    item = SymbolicTransform(
+        1, {ExprId("RAX", 64): ExprId("RCX", 64)}, [], X86, 0x1000, 0x1001,
+        defined_masks={"RAX": ExprOp("&", knownness_symbol("RCX", 64), ExprInt(7, 64))},
+        guards=(ExprSlice(knownness_symbol("RCX", 64), 0, 1),),
+        source_owned=True,
+    )
+    restored = SymbolicTransform.from_json(item.to_json())
+    assert restored.source_owned
+    assert restored.defined_masks == item.defined_masks
+    assert restored.guards == item.guards
+
+
+def test_mask_only_effect_survives_and_knownness_guards_rewrite_through_mask_state():
+    first = SymbolicTransform(
+        1, {ExprId("RAX", 64): ExprId("RAX", 64)}, [], X86, 0x1000, 0x1001,
+        defined_masks={"RAX": ExprInt(0, 64)}, source_owned=True,
+    )
+    second = SymbolicTransform(
+        1, {ExprId("RBX", 64): ExprInt(1, 64)}, [], X86, 0x1001, 0x1002,
+        defined_masks={"RBX": ExprInt((1 << 64) - 1, 64)},
+        guards=(ExprSlice(knownness_symbol("RAX", 64), 0, 1),),
+        source_owned=True,
+    )
+    composed = first.composed_with(second)
+    assert "RAX" in composed.changed_regs
+    assert composed.changed_regs["RAX"] == ExprId("RAX", 64)
+    assert composed.guards == (ExprInt(0, 1),)
+    with pytest.raises(SymbolEvaluationError, match="guard 0 is false"):
+        composed.eval_validation_register_transforms_with_masks(
+            state(X86, RAX=7, RBX=0), {"RAX": (1 << 64) - 1, "RBX": (1 << 64) - 1}
+        )
+
+
+def test_source_memory_evaluation_forwards_ordered_store_load_alias():
+    first_store = ExprMem(ExprId("RAX", 64), 8)
+    second_store = ExprMem(ExprId("RAX", 64), 8)
+    first = SymbolicTransform(
+        1,
+        {first_store: ExprId("BL", 8)},
+        [], X86, 0x1000, 0x1001,
+        defined_masks={},
+        memory_defined_masks={first_store: (
+            knownness_symbol("RAX", 64),
+            ExprSlice(knownness_symbol("RBX", 64), 0, 8),
+        )},
+        source_owned=True,
+    )
+    second = SymbolicTransform(
+        1,
+        {second_store: ExprMem(ExprId("RAX", 64), 8)},
+        [], X86, 0x1001, 0x1002,
+        defined_masks={},
+        memory_defined_masks={second_store: (
+            knownness_symbol("RAX", 64), ExprInt(0xFF, 8),
+        )},
+        source_owned=True,
+    )
+    composed = first.composed_with(second)
+    before = state(X86, RAX=0x2000, RBX=0xA5)
+    known = {"RAX": (1 << 64) - 1, "RBX": 0xFF}
+    assert composed.eval_source_ordered_memory_transforms(before, known) == (
+        (0x2000, b"\xA5"), (0x2000, b"\xA5")
+    )
+    assert composed.eval_source_memory_transforms(before, known) == {0x2000: b"\xA5"}
+
+
+def test_source_memory_evaluation_checks_guards_and_requires_runtime_knownness():
+    guarded_store = ExprMem(ExprId("RAX", 64), 8)
+    guarded = SymbolicTransform(
+        1,
+        {guarded_store: ExprId("BL", 8)},
+        [], X86, 0x1000, 0x1001,
+        defined_masks={}, guards=(ExprInt(0, 1),),
+        memory_defined_masks={guarded_store: (
+            knownness_symbol("RAX", 64), ExprSlice(knownness_symbol("RBX", 64), 0, 8),
+        )},
+        source_owned=True,
+    )
+    before = state(X86, RAX=0x2000, RBX=0xA5)
+    with pytest.raises(SymbolEvaluationError, match="guard 0 is false"):
+        guarded.eval_source_ordered_memory_transforms(
+            before, {"RAX": (1 << 64) - 1, "RBX": 0xFF}
+        )
+    unguarded_store = ExprMem(ExprId("RAX", 64), 8)
+    unguarded = SymbolicTransform(
+        1,
+        {unguarded_store: ExprId("BL", 8)},
+        [], X86, 0x1000, 0x1001,
+        defined_masks={},
+        memory_defined_masks={unguarded_store: (
+            knownness_symbol("RAX", 64), ExprSlice(knownness_symbol("RBX", 64), 0, 8),
+        )},
+        source_owned=True,
+    )
+    with pytest.raises(SymbolEvaluationError, match="knownness input for RBX is missing"):
+        unguarded.eval_source_ordered_memory_transforms(
+            before, {"RAX": (1 << 64) - 1}
+        )
+    with pytest.raises(SymbolEvaluationError, match="undefined value bit"):
+        unguarded.eval_source_ordered_memory_transforms(
+            before, {"RAX": (1 << 64) - 1, "RBX": 0x7F}
+        )
+
+
+def test_source_definedness_masks_compose_through_flag_alias_writes():
+    first = SymbolicTransform(
+        1, {ExprId("OF", 1): ExprInt(0, 1)}, [], X86, 0x1000, 0x1001,
+        defined_masks={"OF": ExprInt(0, 1)}, source_owned=True,
+    )
+    second = SymbolicTransform(
+        1, {ExprId("iopl_f", 2): ExprInt(3, 2)}, [], X86, 0x1001, 0x1002,
+        defined_masks={"IOPL": ExprInt(3, 2)}, source_owned=True,
+    )
+    combined = first.composed_with(second)
+    pairs = combined.validation_register_outputs_with_masks()
+    assert pairs["OF"][1] == ExprInt(0, 1)
+    assert pairs["IOPL"][1] == ExprInt(3, 2)
+    # A later alias overwrite replaces only its own definedness bits.
+    overwrite = SymbolicTransform(
+        1, {ExprId("OF", 1): ExprInt(1, 1)}, [], X86, 0x1002, 0x1003,
+        defined_masks={"OF": ExprInt(1, 1)}, source_owned=True,
+    )
+    combined.concat(overwrite)
+    assert combined.validation_register_outputs_with_masks()["OF"][1] == ExprInt(1, 1)
 
 
 def test_undefined_shift_flag_propagates_until_a_later_definition():

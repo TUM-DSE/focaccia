@@ -25,7 +25,7 @@ from miasm.expression.expression import (
     ExprSlice,
 )
 
-from .snapshot import ReadableProgramState, MemoryAccessError
+from .snapshot import ReadableProgramState, MemoryAccessError, RegisterAccessError
 from .arch import Arch, supported_architectures
 from .arch.arch import RegisterAccessor
 from .miasm_util import (
@@ -60,6 +60,15 @@ def _allocation_occurrence(name: str) -> int | None:
 
 
 _ARCHITECTURAL_UNKNOWN_PREFIX = "FOCACCIA_UNDEFINED_"
+_SYMBOLIC_KNOWNNESS_PREFIX = "__focaccia_known_"
+
+
+def knownness_symbol(register: str, width: int) -> ExprId:
+    """Return the synthetic source-knownness input for an architectural base register."""
+    if type(width) is not int or width <= 0:
+        raise ValueError("Knownness width must be positive.")
+    canonical = register.upper()
+    return ExprId(f"{_SYMBOLIC_KNOWNNESS_PREFIX}{canonical}", width)
 
 
 def _architectural_unknown(register: str, instruction_address: int, size: int) -> ExprId:
@@ -489,10 +498,16 @@ class MemoryWrite:
 
     address: Expr
     value: Expr
+    address_mask: Expr | None = None
+    value_mask: Expr | None = None
 
     def __post_init__(self) -> None:
         if self.value.size <= 0 or self.value.size % 8 != 0:
             raise ValueError("Symbolic memory writes must contain whole bytes.")
+        if self.address_mask is not None and self.address_mask.size != self.address.size:
+            raise ValueError("Memory address definedness mask width mismatch.")
+        if self.value_mask is not None and self.value_mask.size != self.value.size:
+            raise ValueError("Memory value definedness mask width mismatch.")
 
     @property
     def size_bytes(self) -> int:
@@ -510,15 +525,29 @@ class _TransformEvaluator(MiasmSymbolResolver):
         self,
         state: ReadableProgramState,
         writes: list[MemoryWrite],
+        knownness_inputs: dict[str, int] | None = None,
     ):
         super().__init__(state, LocationDB())
         self._writes = writes
+        self._knownness_inputs = knownness_inputs or {}
         self._versions: dict[int, list[tuple[int, int]]] = {}
         self._concrete_writes: list[tuple[int, bytes]] = []
         self._indexed_write_count = 0
         self._building_index = False
 
     def resolve_register(self, regname: str) -> int | None:
+        if regname.startswith(_SYMBOLIC_KNOWNNESS_PREFIX):
+            base_reg = regname.removeprefix(_SYMBOLIC_KNOWNNESS_PREFIX)
+            if base_reg not in self._knownness_inputs:
+                raise SymbolEvaluationError(
+                    f"Runtime knownness input for {base_reg} is missing."
+                )
+            accessor = self._state.arch.get_reg_accessor(base_reg)
+            value = self._knownness_inputs[base_reg]
+            if (accessor is None or accessor.base_reg != base_reg
+                    or type(value) is not int or not 0 <= value < (1 << accessor.num_bits)):
+                raise SymbolEvaluationError(f"Invalid runtime knownness input for {base_reg}.")
+            return value
         if regname == EXECUTION_TID.name:
             tid = self._state.execution_tid
             if tid is None:
@@ -534,6 +563,11 @@ class _TransformEvaluator(MiasmSymbolResolver):
     def resolve_register_slice(
         self, regname: str, register_size: int, start: int, stop: int
     ) -> int | None:
+        if regname.startswith(_SYMBOLIC_KNOWNNESS_PREFIX):
+            value = self.resolve_register(regname)
+            if value is None or not 0 <= start < stop <= register_size:
+                raise SymbolEvaluationError("Invalid synthetic knownness slice.")
+            return (value >> start) & ((1 << (stop - start)) - 1)
         if regname == EXECUTION_TID.name:
             if register_size != 64 or start < 0 or start >= stop or stop > 64:
                 raise ValueError("Invalid independent execution TID slice.")
@@ -542,12 +576,15 @@ class _TransformEvaluator(MiasmSymbolResolver):
             return (tid >> start) & ((1 << (stop - start)) - 1)
         return super().resolve_register_slice(regname, register_size, start, stop)
 
-    def _ensure_write_index(self) -> None:
-        if self._indexed_write_count == len(self._writes) or self._building_index:
+    def _ensure_write_index(self, through: int | None = None) -> None:
+        target = len(self._writes) if through is None else through
+        if type(target) is not int or not 0 <= target <= len(self._writes):
+            raise SymbolEvaluationError("Invalid ordered-write prefix.")
+        if self._indexed_write_count >= target or self._building_index:
             return
         self._building_index = True
         try:
-            for index in range(self._indexed_write_count, len(self._writes)):
+            for index in range(self._indexed_write_count, target):
                 write = self._writes[index]
                 address = self.evaluate(write.address)
                 value = self.evaluate(write.value)
@@ -573,7 +610,9 @@ class _TransformEvaluator(MiasmSymbolResolver):
         if len(args) != 2 or not all(isinstance(arg, ExprInt) for arg in args):
             return None
         address, prefix = map(int, args)
-        self._ensure_write_index()
+        if prefix < 0 or prefix > len(self._writes):
+            return None
+        self._ensure_write_index(prefix)
         versions = self._versions.get(address, ())
         offset = bisect_right(versions, (prefix, 0xFF))
         if offset:
@@ -655,7 +694,10 @@ class _TransformEvaluator(MiasmSymbolResolver):
                     break
             direct = {}
             for name, size in (("X0", 64), ("CPSR", 32)):
-                direct[name] = self.resolve_register(name)
+                try:
+                    direct[name] = self.resolve_register(name)
+                except RegisterAccessError:
+                    direct[name] = None
             raise SymbolEvaluationError(
                 "Expression remains unresolved; a concrete value is required "
                 f"(input={type(expression).__name__}/{expression.size}, "
@@ -747,6 +789,11 @@ class SymbolicTransform:
         arch: Arch,
         from_addr: int,
         to_addr: int,
+        *,
+        defined_masks: dict[str, Expr] | None = None,
+        memory_defined_masks: dict[ExprMem, tuple[Expr, Expr]] | None = None,
+        guards: tuple[Expr, ...] = (),
+        source_owned: bool = False,
     ):
         """
         :param tid: The thread ID that executed the instructions effecting the transformation.
@@ -783,6 +830,27 @@ class SymbolicTransform:
 
         self.instructions: list[Instruction] = instrs
         """The sequence of instructions that comprise this transformation."""
+        if type(source_owned) is not bool:
+            raise SymbolicCompositionError("source_owned must be a boolean.")
+        if not source_owned and (defined_masks is not None or memory_defined_masks is not None or guards):
+            raise SymbolicCompositionError("Source metadata requires source_owned=True.")
+        self.source_owned = source_owned
+        self.guards = tuple(guards)
+        self.defined_masks: dict[str, Expr] = {}
+        if defined_masks is not None:
+            for name, mask in defined_masks.items():
+                canonical = arch.to_regname(name)
+                accessor = arch.get_reg_accessor(canonical) if canonical is not None else None
+                if accessor is None or mask.size != accessor.num_bits:
+                    raise SymbolicCompositionError(
+                        f"Definedness mask for {name} must match its architectural alias width."
+                    )
+                self.defined_masks[canonical] = mask
+
+        if any(guard.size != 1 for guard in self.guards):
+            raise SymbolicCompositionError("Source guards must be one-bit expressions.")
+        if source_owned and defined_masks is None:
+            raise SymbolicCompositionError("Source-owned transforms require explicit definedness masks.")
 
         for dst, expr in transform.items():
             assert isinstance(dst, ExprMem) or isinstance(dst, ExprId)
@@ -794,7 +862,10 @@ class SymbolicTransform:
                     )
                 if dst.size != expr.size or expr.size % 8 != 0:
                     raise ValueError("Memory destination and value widths must match in bytes.")
-                self.memory_writes.append(MemoryWrite(dst.ptr, expr))
+                masks = (memory_defined_masks or {}).get(dst)
+                self.memory_writes.append(
+                    MemoryWrite(dst.ptr, expr, *(masks or (None, None)))
+                )
             else:
                 assert isinstance(dst, ExprId)
                 regname = arch.to_regname(dst.name)
@@ -814,7 +885,23 @@ class SymbolicTransform:
                     )
                 self.changed_regs[regname] = expr
 
-        self.normalize_architectural_unknowns()
+        if memory_defined_masks is not None:
+            memory_destinations = {destination for destination in transform if isinstance(destination, ExprMem)}
+            if set(memory_defined_masks) - memory_destinations:
+                raise SymbolicCompositionError("Memory definedness metadata has no matching store.")
+        if self.source_owned:
+            written_names = set(self.changed_regs)
+            if written_names - self.defined_masks.keys():
+                raise SymbolicCompositionError(
+                    "Source-owned transform lacks definedness masks for written registers."
+                )
+            if any(write.address_mask is None or write.value_mask is None for write in self.memory_writes):
+                raise SymbolicCompositionError(
+                    "Source-owned memory writes require address and value definedness masks."
+                )
+
+        if not self.source_owned:
+            self.normalize_architectural_unknowns()
         self._reset_validation_register_names()
         self._register_output_cache_key: tuple[tuple[str, Expr], ...] | None = None
         self._canonical_register_output_cache: dict[str, Expr] = {}
@@ -826,7 +913,7 @@ class SymbolicTransform:
     def _reset_validation_register_names(self) -> None:
         names: set[str] = set()
         for regname, expression in self.changed_regs.items():
-            if _contains_architectural_unknown(expression):
+            if not self.source_owned and _contains_architectural_unknown(expression):
                 continue
             accessor = self.arch.get_reg_accessor(regname)
             if accessor is None:
@@ -893,6 +980,9 @@ class SymbolicTransform:
         self.changed_regs = composed.changed_regs
         self._validation_register_names = composed._validation_register_names
         self.memory_writes = list(composed.memory_writes)
+        self.defined_masks = composed.defined_masks.copy()
+        self.guards = tuple(composed.guards)
+        self.source_owned = composed.source_owned
         self.range = composed.range
         self.instructions = list(composed.instructions)
         return self
@@ -912,6 +1002,8 @@ class SymbolicTransform:
         accessed_regs: set[str] = set()
         expressions = [
             *self.canonical_register_outputs().values(),
+            *self.defined_masks.values(),
+            *self.guards,
             *(write.address for write in self.memory_writes),
             *(write.value for write in self.memory_writes),
         ]
@@ -950,6 +1042,8 @@ class SymbolicTransform:
         ]
         expressions.extend(write.address for write in self.memory_writes)
         expressions.extend(write.value for write in self.memory_writes)
+        expressions.extend(self.defined_masks.values())
+        expressions.extend(self.guards)
 
         registers: set[str] = set()
         for expression in expressions:
@@ -1000,6 +1094,8 @@ class SymbolicTransform:
         accessed_mem: dict[tuple[int, int], ExprMem] = {}
         expressions = [
             *self.changed_regs.values(),
+            *self.defined_masks.values(),
+            *self.guards,
             *(write.address for write in self.memory_writes),
             *(write.value for write in self.memory_writes),
         ]
@@ -1016,6 +1112,14 @@ class SymbolicTransform:
         return list(accessed_mem.values())
 
     def validation_register_outputs(self) -> dict[str, Expr]:
+        """Return legacy unmasked outputs; source-owned transforms require masks."""
+        if self.source_owned:
+            raise SymbolEvaluationError(
+                "Source-owned transforms require a guard- and definedness-aware output API."
+            )
+        return self._validation_register_outputs()
+
+    def _validation_register_outputs(self) -> dict[str, Expr]:
         """Return only register ranges whose values this transform defines.
 
         Canonical base-register equations remain the composition contract, but
@@ -1057,17 +1161,88 @@ class SymbolicTransform:
                     if accessor.start == 0 and accessor.end == base.size
                     else expr_simp(ExprSlice(base, accessor.start, accessor.end))
                 )
-            if not _contains_architectural_unknown(expression):
+            if self.source_owned or not _contains_architectural_unknown(expression):
                 outputs[regname] = expression
         self._validation_register_output_cache = outputs
         self._validation_register_output_cache_key = cache_key
         return outputs.copy()
+
+    def validation_register_outputs_with_masks(self) -> dict[str, tuple[Expr, Expr]]:
+        """Return defined register equations paired with symbolic definedness masks.
+
+        Masks are expressions over the transform source, not concrete booleans;
+        callers must evaluate them with the same runtime knownness inputs as values.
+        """
+        outputs = self._validation_register_outputs()
+        state = _SymbolicState.identity(self.arch)
+        _apply_symbolic_transform(state, self)
+        result: dict[str, tuple[Expr, Expr]] = {}
+        for name, expression in outputs.items():
+            accessor = self.arch.get_reg_accessor(name)
+            if accessor is None:
+                raise SymbolicCompositionError(f"Missing accessor for {name}.")
+            mask = state.defined_masks.get(accessor.base_reg)
+            if mask is None:
+                raise SymbolicCompositionError(
+                    f"Missing composed definedness mask for {accessor.base_reg}."
+                )
+            projected = (
+                mask if accessor.start == 0 and accessor.end == mask.size
+                else expr_simp(ExprSlice(mask, accessor.start, accessor.end))
+            )
+            result[name] = (expression, projected)
+        return result
+
+    def _require_source_validation(self) -> None:
+        if self.source_owned:
+            raise SymbolEvaluationError(
+                "Source-owned transforms require a guard- and definedness-aware evaluation API."
+            )
+
+    def eval_guards(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+    ) -> None:
+        """Require every source runtime guard to hold under explicit knownness inputs."""
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
+        self._check_source_guards(conc_state, knownness_inputs, evaluator)
+
+    def _check_source_guards(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+        evaluator: _TransformEvaluator,
+    ) -> None:
+        for index, guard in enumerate(self.guards):
+            mask = self._eval_source_definedness(
+                guard, conc_state, knownness_inputs, evaluator,
+                write_prefix=len(self.memory_writes),
+            )
+            if mask != 1:
+                raise SymbolEvaluationError(f"Source runtime guard {index} is undefined.")
+            if evaluator.evaluate(guard) != 1:
+                raise SymbolEvaluationError(f"Source runtime guard {index} is false.")
+
+    def eval_validation_register_transforms_with_masks(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+    ) -> dict[str, tuple[int, int]]:
+        """Evaluate source value/mask pairs using explicit runtime knownness inputs."""
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
+        self._check_source_guards(conc_state, knownness_inputs, evaluator)
+        result: dict[str, tuple[int, int]] = {}
+        for name, (value, mask) in self.validation_register_outputs_with_masks().items():
+            result[name] = (evaluator.evaluate(value), evaluator.evaluate(mask))
+        return result
 
     def eval_validation_register_transforms(
         self,
         conc_state: ReadableProgramState,
     ) -> dict[str, int]:
         """Evaluate register slices defined by this transform for validation."""
+        self._require_source_validation()
         evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         result: dict[str, int] = {}
         for regname, expression in self.validation_register_outputs().items():
@@ -1098,6 +1273,7 @@ class SymbolicTransform:
         :raise MemoryError:
         :raise ValueError:
         """
+        self._require_source_validation()
         evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         res = {}
         for regname, expr in self.canonical_register_outputs().items():
@@ -1108,12 +1284,209 @@ class SymbolicTransform:
 
     def eval_memory_address(self, expression: Expr, conc_state: ReadableProgramState) -> int:
         """Evaluate an output address with this transform's ordered-store context."""
+        self._require_source_validation()
         return _TransformEvaluator(conc_state, self.memory_writes).evaluate(expression)
+
+    def eval_source_ordered_memory_transforms(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+    ) -> tuple[tuple[int, bytes], ...]:
+        """Evaluate source stores after checking guards and symbolic definedness.
+
+        Every address/value bit must be proven defined. Ordered writes retain the
+        existing evaluator's prefix semantics, including store-to-load forwarding.
+        """
+        if not self.source_owned:
+            raise SymbolEvaluationError("Source memory evaluation requires source-owned metadata.")
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
+        self._check_source_guards(conc_state, knownness_inputs, evaluator)
+        for index, write in enumerate(self.memory_writes):
+            if write.address_mask is None or write.value_mask is None:
+                raise SymbolEvaluationError(
+                    f"Source memory store {index} lacks address/value definedness metadata."
+                )
+            address_mask_defined = self._eval_source_definedness(
+                write.address_mask, conc_state, knownness_inputs, evaluator,
+                write_prefix=index,
+            )
+            value_mask_defined = self._eval_source_definedness(
+                write.value_mask, conc_state, knownness_inputs, evaluator,
+                write_prefix=index,
+            )
+            if (address_mask_defined != (1 << write.address_mask.size) - 1
+                    or value_mask_defined != (1 << write.value_mask.size) - 1):
+                raise SymbolEvaluationError(
+                    f"Source memory store {index} has an undefined definedness mask."
+                )
+            address_mask = evaluator.evaluate(write.address_mask)
+            value_mask = evaluator.evaluate(write.value_mask)
+            if address_mask != (1 << write.address.size) - 1:
+                raise SymbolEvaluationError(f"Source memory store {index} has an undefined address bit.")
+            if value_mask != (1 << write.value.size) - 1:
+                raise SymbolEvaluationError(f"Source memory store {index} has an undefined value bit.")
+        return tuple(evaluator.concrete_writes())
+
+    def eval_source_memory_transforms(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+    ) -> dict[int, bytes]:
+        """Evaluate guarded, fully-defined source stores and coalesce final bytes."""
+        final_bytes: dict[int, int] = {}
+        for address, data in self.eval_source_ordered_memory_transforms(
+            conc_state, knownness_inputs
+        ):
+            for offset, byte in enumerate(data):
+                final_bytes[address + offset] = byte
+        ranges: dict[int, bytes] = {}
+        start: int | None = None
+        previous: int | None = None
+        data = bytearray()
+        for address in sorted(final_bytes):
+            if previous is None or address != previous + 1:
+                if start is not None:
+                    ranges[start] = bytes(data)
+                start, data = address, bytearray()
+            data.append(final_bytes[address])
+            previous = address
+        if start is not None:
+            ranges[start] = bytes(data)
+        return ranges
+
+    def _eval_source_definedness(
+        self,
+        expression: Expr,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+        evaluator: _TransformEvaluator,
+        *,
+        write_prefix: int | None = None,
+    ) -> int:
+        """Conservatively propagate bit-definedness through the supported Expr DAG."""
+        masks: dict[int, int] = {}
+        pending: list[tuple[Expr, bool]] = [(expression, False)]
+        while pending:
+            node, expanded = pending.pop()
+            key = id(node)
+            if key in masks:
+                continue
+            children = expression_children(node)
+            if not expanded and children:
+                pending.append((node, True))
+                pending.extend((child, False) for child in reversed(children) if id(child) not in masks)
+                continue
+            full = (1 << node.size) - 1
+            if isinstance(node, ExprInt):
+                mask = full
+            elif isinstance(node, ExprId) and isinstance(node.name, str):
+                if node.name.startswith(_SYMBOLIC_KNOWNNESS_PREFIX):
+                    base_reg = node.name.removeprefix(_SYMBOLIC_KNOWNNESS_PREFIX)
+                    if base_reg not in knownness_inputs:
+                        raise SymbolEvaluationError(f"Runtime knownness input for {base_reg} is missing.")
+                    raw = knownness_inputs[base_reg]
+                    accessor = conc_state.arch.get_reg_accessor(base_reg)
+                    if (accessor is None or accessor.base_reg != base_reg or type(raw) is not int
+                            or not 0 <= raw < (1 << accessor.num_bits) or node.size != accessor.num_bits):
+                        raise SymbolEvaluationError(f"Invalid runtime knownness input for {base_reg}.")
+                    mask = full
+                else:
+                    canonical = conc_state.arch.to_regname(node.name)
+                    if canonical is None:
+                        # Nonarchitectural symbols are not silently assumed defined.
+                        raise SymbolEvaluationError(f"Unknown source definedness input {node.name!r}.")
+                    accessor = conc_state.arch.get_reg_accessor(canonical)
+                    if accessor is None or accessor.num_bits != node.size:
+                        raise SymbolEvaluationError(f"Invalid source register width for {node.name}.")
+                    base_mask = knownness_inputs.get(accessor.base_reg)
+                    if base_mask is None:
+                        raise SymbolEvaluationError(
+                            f"Runtime knownness input for {accessor.base_reg} is missing."
+                        )
+                    if type(base_mask) is not int or not 0 <= base_mask < (1 << conc_state.arch.get_reg_accessor(accessor.base_reg).num_bits):
+                        raise SymbolEvaluationError(f"Invalid runtime knownness input for {accessor.base_reg}.")
+                    mask = (base_mask & accessor.mask) >> accessor.start
+            elif isinstance(node, ExprMem):
+                # A plain ExprMem is a source-state read. Composed prior-store
+                # reads are represented by the explicit deferred-byte operator.
+                address_mask = self._eval_source_definedness(
+                    node.ptr, conc_state, knownness_inputs, evaluator,
+                    write_prefix=write_prefix,
+                )
+                if address_mask != (1 << node.ptr.size) - 1:
+                    raise SymbolEvaluationError("Source memory read has an undefined address.")
+                address = evaluator.evaluate(node.ptr)
+                for offset in range(node.size // 8):
+                    try:
+                        conc_state.read_memory(address + offset, 1)
+                    except MemoryAccessError as error:
+                        raise SymbolEvaluationError(
+                            "Source store value depends on unavailable memory."
+                        ) from error
+                mask = full
+            elif isinstance(node, ExprSlice):
+                mask = (masks[id(node.arg)] >> node.start) & full
+            elif isinstance(node, ExprCompose):
+                shift = 0
+                mask = 0
+                for child in node.args:
+                    child_mask = masks[id(child)]
+                    mask |= child_mask << shift
+                    shift += child.size
+            elif isinstance(node, ExprCond):
+                condition_mask = masks[id(node.cond)]
+                if condition_mask != 1:
+                    raise SymbolEvaluationError("Source definedness depends on an undefined condition.")
+                condition = evaluator.evaluate(node.cond)
+                mask = masks[id(node.src1 if condition else node.src2)]
+            elif isinstance(node, ExprOp):
+                op = node.op
+                if op == _DEFERRED_MEMORY_BYTE_OP:
+                    if (len(node.args) != 2 or not isinstance(node.args[1], ExprInt)
+                            or write_prefix is None):
+                        raise SymbolEvaluationError("Malformed/out-of-prefix deferred source read.")
+                    prefix = int(node.args[1])
+                    if prefix > write_prefix:
+                        raise SymbolEvaluationError("Deferred source read exceeds checked write prefix.")
+                    address_mask = self._eval_source_definedness(
+                        node.args[0], conc_state, knownness_inputs, evaluator,
+                        write_prefix=write_prefix,
+                    )
+                    if address_mask != (1 << node.args[0].size) - 1:
+                        raise SymbolEvaluationError("Deferred source read has an undefined address.")
+                    address = evaluator.evaluate(node.args[0])
+                    evaluator._ensure_write_index(prefix)
+                    if address not in evaluator._versions or not any(
+                        version <= prefix for version, _byte in evaluator._versions[address]
+                    ):
+                        try:
+                            conc_state.read_memory(address, 1)
+                        except MemoryAccessError as error:
+                            raise SymbolEvaluationError(
+                                "Source store value depends on unavailable memory."
+                            ) from error
+                    mask = full
+                else:
+                    if any(masks[id(child)] != (1 << child.size) - 1 for child in node.args):
+                        raise SymbolEvaluationError(
+                            f"Unsupported partial-definedness propagation for {op}."
+                        )
+                    # Any pure, total expression of fully-defined inputs is itself
+                    # fully defined. Its concrete semantics are still checked by
+                    # the evaluator when the guard or mask is consumed.
+                    mask = full
+            else:
+                raise SymbolEvaluationError(
+                    f"Unsupported source definedness expression {type(node).__name__}."
+                )
+            masks[key] = mask
+        return masks[id(expression)]
 
     def eval_ordered_memory_transforms(
         self, conc_state: ReadableProgramState
     ) -> tuple[tuple[int, bytes], ...]:
         """Evaluate writes in architectural program order, including store forwarding."""
+        self._require_source_validation()
         evaluator = _TransformEvaluator(conc_state, self.memory_writes)
         return tuple(evaluator.concrete_writes())
 
@@ -1175,7 +1548,24 @@ class SymbolicTransform:
         start_addr = int(data["from_addr"])
         end_addr = int(data["to_addr"])
 
-        t = SymbolicTransform(tid, {}, [], arch, start_addr, end_addr)
+        source_owned = data.get("source_owned", False)
+        if type(source_owned) is not bool:
+            raise ValueError("Serialized source_owned marker must be boolean.")
+        if not source_owned and (data.get("defined_masks") or data.get("guards")):
+            raise ValueError("Source metadata requires source_owned=True.")
+        if source_owned and ("defined_masks" not in data or "guards" not in data):
+            raise ValueError("Source-owned serialization is missing definedness/guard metadata.")
+        defined_masks = {
+            name: parse(expression)
+            for name, expression in data.get("defined_masks", {}).items()
+        }
+        guards = tuple(parse(expression) for expression in data.get("guards", ()))
+        t = SymbolicTransform(
+            tid, {}, [], arch, start_addr, end_addr,
+            defined_masks=defined_masks if source_owned else None,
+            guards=guards,
+            source_owned=source_owned,
+        )
         for name, encoded_expression in data["regs"].items():
             canonical = arch.to_regname(name)
             if canonical is None or arch.is_constant_register(canonical):
@@ -1187,7 +1577,11 @@ class SymbolicTransform:
             t.changed_regs[canonical] = expression
         if "memory_writes" in data:
             t.memory_writes = [
-                MemoryWrite(parse(write["address"]), parse(write["value"]))
+                MemoryWrite(
+                    parse(write["address"]), parse(write["value"]),
+                    parse(write["address_mask"]) if "address_mask" in write else None,
+                    parse(write["value_mask"]) if "value_mask" in write else None,
+                )
                 for write in data["memory_writes"]
             ]
         else:
@@ -1202,7 +1596,16 @@ class SymbolicTransform:
         for inst in t.instructions:
             inst.addr = addr
             addr += inst.length
-        t.normalize_architectural_unknowns()
+        if source_owned:
+            written_names = set(t.changed_regs)
+            if written_names - t.defined_masks.keys():
+                raise ValueError("Source-owned transform lacks serialized definedness masks.")
+            if any(write.address_mask is None or write.value_mask is None for write in t.memory_writes):
+                raise ValueError("Source-owned transform lacks serialized memory definedness masks.")
+        else:
+            if any(write.address_mask is not None or write.value_mask is not None for write in t.memory_writes):
+                raise ValueError("Source memory metadata requires source_owned=True.")
+            t.normalize_architectural_unknowns()
         t._reset_validation_register_names()
 
         return t
@@ -1229,8 +1632,17 @@ class SymbolicTransform:
             "instructions": instrs,
             "regs": {name: repr(expr) for name, expr in self.changed_regs.items()},
             "validation_registers": sorted(self._validation_register_names),
+            "source_owned": self.source_owned,
+            "defined_masks": {
+                name: repr(mask) for name, mask in self.defined_masks.items()
+            },
+            "guards": [repr(guard) for guard in self.guards],
             "memory_writes": [
-                {"address": repr(write.address), "value": repr(write.value)}
+                {
+                    "address": repr(write.address), "value": repr(write.value),
+                    **({"address_mask": repr(write.address_mask)} if write.address_mask is not None else {}),
+                    **({"value_mask": repr(write.value_mask)} if write.value_mask is not None else {}),
+                }
                 for write in self.memory_writes
             ],
         }
@@ -1265,6 +1677,8 @@ class _SymbolicState:
     registers: dict[str, Expr]
     register_depths: dict[str, int]
     memory_writes: list[MemoryWrite]
+    defined_masks: dict[str, Expr]
+    guards: list[Expr]
 
     @classmethod
     def identity(cls, arch: Arch) -> _SymbolicState:
@@ -1276,7 +1690,13 @@ class _SymbolicState:
                 raise SymbolicCompositionError(f"Missing accessor for {base_reg}.")
             registers[base_reg] = ExprId(base_reg, accessor.num_bits)
             register_depths[base_reg] = 0
-        return cls(arch, registers, register_depths, [])
+        defined_masks: dict[str, Expr] = {}
+        for base_reg in sorted(arch.regnames):
+            accessor = arch.get_reg_accessor(base_reg)
+            if accessor is None:
+                raise SymbolicCompositionError(f"Missing accessor for {base_reg}.")
+            defined_masks[base_reg] = knownness_symbol(base_reg, accessor.num_bits)
+        return cls(arch, registers, register_depths, [], defined_masks, [])
 
 
 def _simplify_with_depth(expression: Expr, depth: int) -> tuple[Expr, int]:
@@ -1358,6 +1778,12 @@ def _read_symbolic_register(
 ) -> tuple[Expr, int]:
     if not isinstance(identifier.name, str):
         return identifier, 0
+    if identifier.name.startswith(_SYMBOLIC_KNOWNNESS_PREFIX):
+        base_reg = identifier.name.removeprefix(_SYMBOLIC_KNOWNNESS_PREFIX)
+        expression = state.defined_masks.get(base_reg)
+        if expression is None or identifier.size != expression.size:
+            raise SymbolicCompositionError("Unresolved synthetic knownness input.")
+        return expression, expression_depth(expression)
     if identifier.name == EXECUTION_TID.name or _allocation_occurrence(identifier.name) is not None:
         if identifier.size != 64:
             raise SymbolicCompositionError("Execution-context expression must have width 64.")
@@ -1517,9 +1943,25 @@ def _apply_symbolic_transform(
         state.registers.copy(),
         state.register_depths.copy(),
         state.memory_writes,
+        state.defined_masks.copy(),
+        list(state.guards),
     )
     register_updates: list[tuple[str, RegisterAccessor, Expr, int]] = []
     written_masks: dict[str, int] = {}
+    rewritten_defined_masks: dict[str, Expr] = {}
+    for name, mask in transform.defined_masks.items():
+        accessor = state.arch.get_reg_accessor(name)
+        if accessor is None or mask.size != accessor.num_bits:
+            raise SymbolicCompositionError(f"Invalid definedness mask for {name}.")
+        rewritten_defined_masks[name] = _rewrite_symbolic_expression(
+            mask, before, memory_dependencies
+        )[0]
+    rewritten_guards = [
+        _rewrite_symbolic_expression(guard, before, memory_dependencies)[0]
+        for guard in transform.guards
+    ]
+    if any(guard.size != 1 for guard in rewritten_guards):
+        raise SymbolicCompositionError("Rewritten source guard is not one bit.")
     for regname, expression in transform.changed_regs.items():
         canonical = state.arch.to_regname(regname)
         if canonical is None:
@@ -1552,7 +1994,15 @@ def _apply_symbolic_transform(
             before,
             memory_dependencies,
         )
-        memory_updates.append(MemoryWrite(address, value))
+        address_mask = (
+            _rewrite_symbolic_expression(write.address_mask, before, memory_dependencies)[0]
+            if write.address_mask is not None else None
+        )
+        value_mask = (
+            _rewrite_symbolic_expression(write.value_mask, before, memory_dependencies)[0]
+            if write.value_mask is not None else None
+        )
+        memory_updates.append(MemoryWrite(address, value, address_mask, value_mask))
 
     for canonical, accessor, value, value_depth in register_updates:
         current = state.registers[accessor.base_reg]
@@ -1567,6 +2017,25 @@ def _apply_symbolic_transform(
         )
         state.registers[accessor.base_reg] = updated
         state.register_depths[accessor.base_reg] = updated_depth
+    for name, mask in rewritten_defined_masks.items():
+        canonical = state.arch.to_regname(name)
+        accessor = state.arch.get_reg_accessor(canonical) if canonical is not None else None
+        if accessor is None or not written_masks.get(accessor.base_reg, 0) & accessor.mask:
+            raise SymbolicCompositionError(f"Definedness metadata for unwritten register {name}.")
+        current_mask = state.defined_masks[accessor.base_reg]
+        if state.arch.register_write_zero_extends(canonical) and accessor.end < current_mask.size:
+            mask = ExprCompose(
+                mask,
+                ExprInt((1 << (current_mask.size - accessor.end)) - 1,
+                        current_mask.size - accessor.end),
+            )
+            state.defined_masks[accessor.base_reg] = mask
+        else:
+            state.defined_masks[accessor.base_reg] = _write_symbolic_register(
+                current_mask, expression_depth(current_mask), accessor, mask,
+                expression_depth(mask), zero_extend=False,
+            )[0]
+    state.guards.extend(rewritten_guards)
     state.memory_writes.extend(memory_updates)
 
 
@@ -1590,6 +2059,7 @@ class SymbolicTransformComposer:
         self._start = first.range[0]
         self._end = first.range[0]
         self._state = _SymbolicState.identity(first.arch)
+        self._source_owned = first.source_owned
         self._instructions: list[Instruction] = []
         self._validation_register_names: set[str] = set()
         self._track_dependencies = track_dependencies
@@ -1602,6 +2072,10 @@ class SymbolicTransformComposer:
         if self._arch != transform.arch:
             raise SymbolicCompositionError(
                 f"Cannot compose architectures {self._arch} and {transform.arch}."
+            )
+        if self._source_owned != transform.source_owned:
+            raise SymbolicCompositionError(
+                "Cannot mix source-owned and legacy transform metadata in one composition."
             )
         if self._tid != transform.tid:
             raise SymbolicCompositionError(
@@ -1636,6 +2110,8 @@ class SymbolicTransformComposer:
         if self._track_dependencies:
             expressions = [
                 *transform.changed_regs.values(),
+                *transform.defined_masks.values(),
+                *transform.guards,
                 *(write.address for write in transform.memory_writes),
                 *(write.value for write in transform.memory_writes),
             ]
@@ -1681,12 +2157,23 @@ class SymbolicTransformComposer:
             for base_reg, expression in self._state.registers.items()
             if expression != identity.registers[base_reg]
         }
+        if self._source_owned:
+            for base_reg, mask in self._state.defined_masks.items():
+                if mask != identity.defined_masks[base_reg]:
+                    result.changed_regs.setdefault(base_reg, self._state.registers[base_reg])
         result._validation_register_names = {
             name
             for name in self._validation_register_names
             if name in result.arch.all_regnames
         }
         result.memory_writes = list(self._state.memory_writes)
+        changed_bases = set(result.changed_regs)
+        result.defined_masks = (
+            {name: self._state.defined_masks[name] for name in changed_bases}
+            if self._source_owned else {}
+        )
+        result.guards = tuple(self._state.guards)
+        result.source_owned = self._source_owned
         return result
 
 
