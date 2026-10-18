@@ -3,10 +3,15 @@ Online Intel/TIR probe
 
 ``intel_live_validate.py`` is a fail-closed integration driver, not a second x86
 implementation. It runs the selected software-SHA BusyBox under optimized QEMU
-TB callbacks, decodes instruction bytes from the paused pre-boundary, resolves
-exact XED forms against the private typed Intel model, and composes source TIR
-steps before advancing QEMU. A development disassembly inventory is never used
-as runtime input.
+TB callbacks and decodes instruction bytes from the paused pre-boundary using
+exact XED forms; a development disassembly inventory is never runtime input.
+
+The default path imports source residuals into Focaccia's source-owned
+``SymbolicTransform`` pipeline, composes them with
+``SymbolicTransformComposer``, and predicts/compares through
+``boundary_oracle``. Reports identify it as ``intel-symbolic-source``. The
+legacy concrete evaluator is available only with ``--concrete-diagnostic``
+and is labeled ``intel-concrete-evaluator-legacy``; it is diagnostic only.
 
 .. code-block:: sh
 
@@ -19,7 +24,7 @@ as runtime input.
       --oracle /tmp/carbonara-intel-eval/bin/intel-eval \
       --model /tmp/carbonara-usermode-full/typed.json \
       --guest-base 0x800000000000 --guest-limit 0x800000000000 \
-      --output /tmp/intel-live-report.json
+      --output /tmp/intel-symbolic-live-report.json
     nix develop --command python tests/probes/test_intel_live_validate.py
     # Opt into actual source-evaluator fixture tests (private model required):
     INTEL_LIVE_MODEL=/tmp/carbonara-usermode-full/typed.json \
@@ -32,6 +37,27 @@ until every boundary, exit syscall, independent stdout digest, exit status, and
 in-run deliberately corrupted observed-state negative control pass. Failure is
 not a validation success. The JSONL evidence artifact records actual input
 registers separately from predictions, decoded bytes, and lazy input memory.
+
+Symbolic convergence mode
+-------------------------
+
+The importer binds each residual to the exact PC, opcode bytes, XED iform,
+selected profile, and frozen model hash. Conditional effects retain ordered
+write-prefix slots (including inactive writes); pre-boundary reads are
+permission checked and fetched lazily. It never falls back to concrete
+instruction evaluation.
+
+Accepted native AArch64-host BusyBox software-SHA run:
+``/tmp/intel-symbolic-live-report-20261019-finaloracle.json`` and its
+``.evidence.jsonl`` companion. It completed 3,064 TB transitions, 16,998
+architectural instructions, and 17,024 source steps. All 3,115 event intervals
+had passive store-footprint coverage, and 10,344 predicted byte writes matched
+independent post-memory evidence. Stdout matched
+``713784ad24639a95b1c764f5cced9985c72fff472df3c4650e8ac8f05f4cc922`` and
+exit_group returned status zero. All 26 syscall cutpoints and in-run wrong-PC,
+syscall RBX/XMM preservation, resumed-PC, and unexpected-store controls passed.
+Earlier failed symbolic runs remain under distinct timestamped paths and are
+not acceptance evidence.
 
 Controlled address layout
 -------------------------
@@ -101,16 +127,10 @@ Trust boundary
 Validated execution
 -------------------
 
-The completed run in ``/tmp/intel-live-report.json`` validates 3,064 optimized
-TB transitions covering all 156 executed forms, 16,425 non-cutpoint architectural
-instructions, and 17,024 source steps including REP strides. All 3,115 event
-intervals have checked passive store coverage; 10,344 predicted byte writes
-match independently observed post-memory. Twenty-five returning syscalls pass
-preservation and resumed-PC checks; terminal exit_group has status zero.
-The expected SHA-256 stdout matches exactly. Live PC, extra-store, preserved
-RBX/XMM, and resumed-PC corruption controls are rejected.
-``/tmp/intel-live-final-audit.json`` independently reconciles every prediction,
-store interval, post-memory comparison, source step, and syscall continuation.
+The historical completed report in ``/tmp/intel-live-report.json`` is a
+legacy concrete-evaluator baseline and is not symbolic acceptance evidence.
+The accepted symbolic report and counts are recorded above. The prior concrete
+audit remains at ``/tmp/intel-live-final-audit.json``.
 
 Do not infer whole-program coverage from unit/synthetic tests or successful
 model typechecking. Only an actual report with both completion/validation flags

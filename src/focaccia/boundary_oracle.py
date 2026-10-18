@@ -10,6 +10,26 @@ from types import MappingProxyType
 from typing import Mapping
 
 
+def _final_memory(writes) -> dict[int, bytes]:
+    """Coalesce already evaluated stores without re-running their expressions."""
+    final_bytes = {}
+    for address, data in writes:
+        final_bytes.update({address + offset: byte for offset, byte in enumerate(data)})
+    final_memory = {}
+    if final_bytes:
+        addresses = sorted(final_bytes)
+        start = previous = addresses[0]
+        chunk = bytearray([final_bytes[start]])
+        for address in addresses[1:]:
+            if address != previous + 1:
+                final_memory[start] = bytes(chunk)
+                start, chunk = address, bytearray()
+            chunk.append(final_bytes[address])
+            previous = address
+        final_memory[start] = bytes(chunk)
+    return final_memory
+
+
 @dataclass(frozen=True)
 class RegisterPrediction:
     value: int
@@ -41,22 +61,7 @@ class BoundaryPrediction:
         if any(type(address) is not int or address < 0 or not isinstance(data, bytes)
                for address, data in memory.items()):
             raise ValueError("Memory predictions require nonnegative addresses and bytes values.")
-        final_bytes = {}
-        for address, data in writes:
-            final_bytes.update({address + offset: byte for offset, byte in enumerate(data)})
-        final_memory = {}
-        if final_bytes:
-            addresses = sorted(final_bytes)
-            start = previous = addresses[0]
-            chunk = bytearray([final_bytes[start]])
-            for address in addresses[1:]:
-                if address != previous + 1:
-                    final_memory[start] = bytes(chunk)
-                    start, chunk = address, bytearray()
-                chunk.append(final_bytes[address])
-                previous = address
-            final_memory[start] = bytes(chunk)
-        if memory != final_memory:
+        if memory != _final_memory(writes):
             raise ValueError("Final memory must equal coalesced ordered-write results.")
         object.__setattr__(self, "registers", MappingProxyType(registers))
         object.__setattr__(self, "ordered_writes", writes)
@@ -69,17 +74,24 @@ class ComparisonResult:
     diagnostics: tuple[Mapping[str, object], ...]
 
 
-def predict(transform, state, *, knownness_inputs=None) -> BoundaryPrediction:
-    """Evaluate a legacy or source-owned transform against adapter-provided state."""
+def predict(transform, state, *, knownness_inputs=None, register_names=None) -> BoundaryPrediction:
+    """Evaluate a transform, optionally checking a complete source observation view.
+
+    Source callers can request unchanged registers as well as modified outputs;
+    comparing only modified outputs would miss unexpected implementation clobbers.
+    """
     if transform.source_owned:
-        pairs = transform.eval_validation_register_transforms_with_masks(state, knownness_inputs or {})
-        stores = transform.eval_source_ordered_memory_transforms(state, knownness_inputs or {})
-        memory = transform.eval_source_memory_transforms(state, knownness_inputs or {})
+        pairs, stores = transform.eval_source_transition(
+            state, knownness_inputs or {}, register_names=register_names,
+        )
+        memory = _final_memory(stores)
     else:
+        if register_names is not None:
+            raise ValueError("An explicit observation view requires source-owned definedness.")
         pairs = {name: (value, (1 << transform.arch.get_reg_accessor(name).num_bits) - 1)
                  for name, value in transform.eval_validation_register_transforms(state).items()}
         stores = transform.eval_ordered_memory_transforms(state)
-        memory = transform.eval_memory_transforms(state)
+        memory = _final_memory(stores)
     registers = {}
     for name, (value, mask) in pairs.items():
         accessor = transform.arch.get_reg_accessor(name)

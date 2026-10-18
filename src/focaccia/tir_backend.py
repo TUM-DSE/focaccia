@@ -24,6 +24,10 @@ from focaccia.symbolic import (
     UnsupportedInstructionError,
     eval_symbol,
 )
+from focaccia.miasm_util import expression_children
+
+_MAX_EXPRESSION_TREE_DEPTH = 128
+_MAX_EXPRESSION_DAG_DEPTH = 2048
 
 _REGISTERS = {
     **{f"X{i}": 64 for i in range(31)},
@@ -53,10 +57,49 @@ def _fields(value: object, expected: set[str]) -> dict:
     return value
 
 
+def _expression_metadata(expression: Expr, cache: dict[int, tuple[frozenset[str], int, int]]):
+    """Return free register names, maximum memory prefix, and DAG depth."""
+    pending = [(expression, False)]
+    while pending:
+        node, expanded = pending.pop()
+        key = id(node)
+        if key in cache:
+            continue
+        children = expression_children(node)
+        if not expanded and children:
+            pending.append((node, True))
+            pending.extend((child, False) for child in children if id(child) not in cache)
+            continue
+        names = set()
+        max_prefix = -1
+        depth = 0
+        for child in children:
+            child_names, child_prefix, child_depth = cache[id(child)]
+            names.update(child_names)
+            max_prefix = max(max_prefix, child_prefix)
+            depth = max(depth, child_depth + 1)
+        if isinstance(node, ExprId) and isinstance(node.name, str):
+            names.add(node.name)
+        if isinstance(node, ExprOp) and node.op == "focaccia_memory_byte":
+            if len(node.args) != 2 or not isinstance(node.args[1], ExprInt):
+                raise ValueError("Malformed deferred memory expression in definition")
+            max_prefix = max(max_prefix, int(node.args[1]))
+        cache[key] = (frozenset(names), max_prefix, depth)
+    return cache[id(expression)]
+
+
 class _ExpressionDecoder:
     def __init__(
         self, *, registers: dict[str, int] | None = None,
         allow_vector_zero_extension: bool = True,
+        memory_prefix_limit: int | None = None,
+        definitions: list[object] | None = None,
+        definition_registers: dict[str, int] | None = None,
+        definition_memory_prefix_limit: int | None = None,
+        _cached_definitions: tuple[Expr, ...] = (),
+        _cached_metadata: tuple[tuple[frozenset[str], int, int], ...] = (),
+        _definition_context: bool = False,
+        _metadata_cache: dict[int, tuple[frozenset[str], int, int]] | None = None,
     ) -> None:
         # The register contract belongs to the selected source profile, not to
         # the wire response. Never accept a response-supplied arbitrary name.
@@ -68,16 +111,59 @@ class _ExpressionDecoder:
         ):
             raise ValueError("Invalid source register contract")
         self.allow_vector_zero_extension = allow_vector_zero_extension
+        if memory_prefix_limit is not None and (
+            type(memory_prefix_limit) is not int or not 0 <= memory_prefix_limit <= 4096
+        ):
+            raise ValueError("Invalid ordered-memory prefix limit")
+        self.memory_prefix_limit = memory_prefix_limit
+        self._definition_context = _definition_context
+        self._definitions = list(_cached_definitions)
+        self._definition_metadata = list(_cached_metadata)
+        self._metadata_cache = {} if _metadata_cache is None else _metadata_cache
+        if len(self._definitions) != len(self._definition_metadata):
+            raise ValueError("Malformed expression-definition cache")
+        definition_nodes = 0
+        if definitions is not None:
+            if not isinstance(definitions, list) or len(definitions) > 65_536:
+                raise ValueError("Malformed expression definition table")
+            definition_registers = (self.registers if definition_registers is None
+                                    else dict(definition_registers))
+            definition_prefix_limit = (memory_prefix_limit if definition_memory_prefix_limit is None
+                                       else definition_memory_prefix_limit)
+            for definition_index, definition in enumerate(definitions):
+                if not isinstance(definition, dict) or type(definition.get("id")) is not int:
+                    raise ValueError("Malformed expression definition id")
+                if definition["id"] != definition_index:
+                    raise ValueError("Expression definition ids must match topological order")
+                node = {key: value for key, value in definition.items() if key != "id"}
+                decoder = _ExpressionDecoder(
+                    registers=definition_registers,
+                    allow_vector_zero_extension=allow_vector_zero_extension,
+                    memory_prefix_limit=definition_prefix_limit,
+                    _cached_definitions=tuple(self._definitions),
+                    _cached_metadata=tuple(self._definition_metadata),
+                    _definition_context=True,
+                    _metadata_cache=self._metadata_cache,
+                )
+                expression = decoder.decode(node)
+                metadata = _expression_metadata(expression, self._metadata_cache)
+                if metadata[2] > _MAX_EXPRESSION_DAG_DEPTH:
+                    raise ValueError("Oracle expression DAG depth limit exceeded")
+                definition_nodes += 65_536 - decoder.remaining
+                if definition_nodes > 65_536:
+                    raise ValueError("Oracle expression exceeds size/depth limit")
+                self._definitions.append(expression)
+                self._definition_metadata.append(metadata)
         # The response is already capped at 1 MiB. Extended-register flag
         # semantics legitimately repeat a ~1,100-node carry/overflow cone for
         # N/Z/C/V, so the old 4,096 aggregate budget rejected an audited musl
         # CMP despite shallow depth and bounded wire size.
-        self.remaining = 65_536
+        self.remaining = 65_536 - definition_nodes
 
     def decode(self, node: object, depth: int = 0) -> Expr:
         self.remaining -= 1
         # ASL's audited RBIT residual is a bounded 32/64-level concatenation.
-        if self.remaining < 0 or depth > 128:
+        if self.remaining < 0 or depth > _MAX_EXPRESSION_TREE_DEPTH:
             raise ValueError("Oracle expression exceeds size/depth limit")
         if not isinstance(node, dict):
             raise ValueError("Oracle expression must be an object")
@@ -86,6 +172,28 @@ class _ExpressionDecoder:
             raise ValueError("Unsupported oracle bit width")
         kind = node.get("kind")
         common = {"kind", "bits"}
+        if kind == "reference":
+            _fields(node, common | {"id"})
+            definition_id = node["id"]
+            if type(definition_id) is not int or definition_id < 0:
+                raise ValueError("Invalid expression reference id")
+            if definition_id >= len(self._definitions):
+                if self._definition_context:
+                    raise ValueError("Forward or cyclic expression reference")
+                raise ValueError("Invalid expression reference id")
+            expression = self._definitions[definition_id]
+            if bits != expression.size:
+                raise ValueError("Expression reference width mismatch")
+            free_registers, max_prefix, expression_depth = self._definition_metadata[definition_id]
+            if free_registers - self.registers.keys():
+                raise ValueError("Unsupported architectural input register through expression reference")
+            if max_prefix >= 0 and (
+                self.memory_prefix_limit is None or max_prefix > self.memory_prefix_limit
+            ):
+                raise ValueError("Invalid ordered-memory prefix through expression reference")
+            if depth + expression_depth > _MAX_EXPRESSION_DAG_DEPTH:
+                raise ValueError("Oracle expression DAG depth limit exceeded")
+            return expression
         if kind == "constant":
             _fields(node, common | {"value"})
             raw = node["value"]
@@ -189,6 +297,23 @@ class _ExpressionDecoder:
             if condition.size != 1 or lhs.size != bits or rhs.size != bits:
                 raise ValueError("Oracle conditional width mismatch")
             return ExprCond(condition, lhs, rhs)
+        if kind == "memory_after":
+            _fields(node, common | {"address", "prefix"})
+            prefix = node["prefix"]
+            if (self.memory_prefix_limit is None or type(prefix) is not int
+                    or not 0 <= prefix <= self.memory_prefix_limit):
+                raise ValueError("Invalid ordered-memory prefix")
+            address = self.decode(node["address"], depth + 1)
+            if address.size != 64 or bits % 8:
+                raise ValueError("Ordered-memory read width mismatch")
+            # Prefix counts write slots, including inactive conditional writes.
+            # The shared composer adjusts it when preceding steps are appended.
+            byte_values = [
+                ExprOp("focaccia_memory_byte", address + ExprInt(offset, 64),
+                       ExprInt(prefix, 64))[0:8]
+                for offset in range(bits // 8)
+            ]
+            return byte_values[0] if len(byte_values) == 1 else ExprCompose(*byte_values)
         if kind == "memory":
             _fields(node, common | {"address"})
             address = self.decode(node["address"], depth + 1)

@@ -500,10 +500,13 @@ class MemoryWrite:
     value: Expr
     address_mask: Expr | None = None
     value_mask: Expr | None = None
+    condition: Expr | None = None
 
     def __post_init__(self) -> None:
         if self.value.size <= 0 or self.value.size % 8 != 0:
             raise ValueError("Symbolic memory writes must contain whole bytes.")
+        if self.condition is not None and self.condition.size != 1:
+            raise ValueError("Memory write conditions must be one-bit expressions.")
         if self.address_mask is not None and self.address_mask.size != self.address.size:
             raise ValueError("Memory address definedness mask width mismatch.")
         if self.value_mask is not None and self.value_mask.size != self.value.size:
@@ -529,11 +532,24 @@ class _TransformEvaluator(MiasmSymbolResolver):
     ):
         super().__init__(state, LocationDB())
         self._writes = writes
-        self._knownness_inputs = knownness_inputs or {}
+        # Snapshot runtime evidence: evaluator caches are valid only for this
+        # immutable knownness view, even if the caller later mutates its dict.
+        self._knownness_inputs = dict(knownness_inputs or {})
         self._versions: dict[int, list[tuple[int, int]]] = {}
         self._concrete_writes: list[tuple[int, bytes]] = []
         self._indexed_write_count = 0
         self._building_index = False
+        # eval_expr memo is scoped to this concrete prestate and ordered-write
+        # history. It is never shared across evaluators/states.
+        self._resolved_expression_cache: dict[int, tuple[Expr, ExprInt]] = {}
+        # Successful expression values are stable for this evaluator's fixed
+        # prestate/ordered-write list. Retain the Expr object with each id-keyed
+        # entry so Python id reuse cannot alias a later transient expression.
+        self._evaluation_cache: dict[int, tuple[Expr, int]] = {}
+        # Both caches below belong to this immutable prestate/write-history
+        # evaluator. Definedness additionally keys the exact checked prefix.
+        self._deferred_rewrite_cache: dict[int, tuple[Expr, Expr]] = {}
+        self._source_definedness_cache: dict[tuple[int, int | None], tuple[Expr, int]] = {}
 
     def resolve_register(self, regname: str) -> int | None:
         if regname.startswith(_SYMBOLIC_KNOWNNESS_PREFIX):
@@ -586,11 +602,14 @@ class _TransformEvaluator(MiasmSymbolResolver):
         try:
             for index in range(self._indexed_write_count, target):
                 write = self._writes[index]
+                version = index + 1
+                if write.condition is not None and self.evaluate(write.condition) == 0:
+                    self._indexed_write_count = version
+                    continue
                 address = self.evaluate(write.address)
                 value = self.evaluate(write.value)
                 data = value.to_bytes(write.size_bytes, byteorder=self.endianness)
                 self._concrete_writes.append((address, data))
-                version = index + 1
                 for offset, byte in enumerate(data):
                     self._versions.setdefault(address + offset, []).append((version, byte))
                 self._indexed_write_count = version
@@ -625,19 +644,30 @@ class _TransformEvaluator(MiasmSymbolResolver):
     def _rewrite_deferred_memory(self, expression: Expr) -> Expr:
         """Resolve concrete deferred bytes bottom-up before generic evaluation."""
         results: dict[int, Expr] = {}
+        deferred_children: dict[int, bool] = {}
         pending: list[tuple[Expr, bool]] = [(expression, False)]
         while pending:
             current, expanded = pending.pop()
             key = id(current)
             if key in results:
                 continue
+            if not self._building_index:
+                cached = self._deferred_rewrite_cache.get(key)
+                if cached is not None and cached[0] is current:
+                    results[key] = cached[1]
+                    deferred_children[key] = False
+                    continue
             children = expression_children(current)
             if not expanded:
                 pending.append((current, True))
-                pending.extend(
-                    (child, False) for child in reversed(children)
-                    if id(child) not in results
-                )
+                if isinstance(current, ExprCond):
+                    if id(current.cond) not in results:
+                        pending.append((current.cond, False))
+                else:
+                    pending.extend(
+                        (child, False) for child in reversed(children)
+                        if id(child) not in results
+                    )
                 continue
             if isinstance(current, (ExprInt, ExprId, ExprLoc)):
                 rewritten = current
@@ -646,10 +676,23 @@ class _TransformEvaluator(MiasmSymbolResolver):
             elif isinstance(current, ExprSlice):
                 rewritten = ExprSlice(results[id(current.arg)], current.start, current.stop)
             elif isinstance(current, ExprCond):
-                rewritten = ExprCond(
-                    results[id(current.cond)], results[id(current.src1)],
-                    results[id(current.src2)],
-                )
+                condition = results[id(current.cond)]
+                if isinstance(condition, ExprInt):
+                    selected = current.src1 if int(condition) else current.src2
+                    if id(selected) not in results:
+                        pending.append((current, True))
+                        pending.append((selected, False))
+                        continue
+                    rewritten = results[id(selected)]
+                else:
+                    missing = [arm for arm in (current.src1, current.src2) if id(arm) not in results]
+                    if missing:
+                        pending.append((current, True))
+                        pending.extend((arm, False) for arm in reversed(missing))
+                        continue
+                    rewritten = ExprCond(
+                        condition, results[id(current.src1)], results[id(current.src2)],
+                    )
             elif isinstance(current, ExprCompose):
                 rewritten = ExprCompose(*(results[id(arg)] for arg in current.args))
             elif isinstance(current, ExprOp):
@@ -657,7 +700,12 @@ class _TransformEvaluator(MiasmSymbolResolver):
                 rewritten = ExprOp(current.op, *args)
                 if current.op == _DEFERRED_MEMORY_BYTE_OP and len(args) == 2:
                     concrete_args = tuple(
-                        expr_simp(eval_expr(arg, self)) for arg in args
+                        expr_simp(eval_expr(
+                            arg, self,
+                            _resolved=(None if self._building_index
+                                       else self._resolved_expression_cache),
+                        ))
+                        for arg in args
                     )
                     resolved = self.resolve_environment_operation(
                         current.op, concrete_args
@@ -666,23 +714,48 @@ class _TransformEvaluator(MiasmSymbolResolver):
                         rewritten = resolved
             else:
                 rewritten = current
-            results[key] = expr_simp(rewritten)
+            rewritten = expr_simp(rewritten)
+            results[key] = rewritten
+            if isinstance(current, ExprCond) and isinstance(results[id(current.cond)], ExprInt):
+                selected = current.src1 if int(results[id(current.cond)]) else current.src2
+                contains_deferred = deferred_children[id(current.cond)] or deferred_children[id(selected)]
+            else:
+                contains_deferred = any(deferred_children.get(id(child), False) for child in children)
+            if isinstance(current, ExprOp) and current.op == _DEFERRED_MEMORY_BYTE_OP:
+                contains_deferred = not isinstance(rewritten, ExprInt)
+            deferred_children[key] = contains_deferred
+            # Keep only fully rewritten nodes; unresolved deferred reads remain
+            # uncached and can never leak across prefix construction.
+            if not self._building_index and not contains_deferred:
+                self._deferred_rewrite_cache[key] = (current, rewritten)
         return results[id(expression)]
 
     def evaluate(self, expression: Expr) -> int:
+        cache_key = id(expression)
+        if not self._building_index:
+            cached = self._evaluation_cache.get(cache_key)
+            if cached is not None and cached[0] is expression:
+                return cached[1]
+        original_expression = expression
         for node in iter_expression_dag(expression):
             if isinstance(node, ExprId) and isinstance(node.name, str):
                 contextual = node.name == EXECUTION_TID.name or _allocation_occurrence(node.name) is not None
                 if contextual and node.size != 64:
                     raise SymbolEvaluationError("Execution context requires 64-bit expression width.")
         expression = self._rewrite_deferred_memory(expression)
-        result = expr_simp(eval_expr(expression, self))
+        result = expr_simp(eval_expr(
+            expression, self,
+            _resolved=(None if self._building_index else self._resolved_expression_cache),
+        ))
         if not isinstance(result, ExprInt):
             failing = None
             for node in iter_expression_dag(expression):
                 children = expression_children(node)
-                child_results = [expr_simp(eval_expr(child, self)) for child in children]
-                node_result = expr_simp(eval_expr(node, self))
+                resolved = (None if self._building_index
+                            else self._resolved_expression_cache)
+                child_results = [expr_simp(eval_expr(child, self, _resolved=resolved))
+                                 for child in children]
+                node_result = expr_simp(eval_expr(node, self, _resolved=resolved))
                 if (
                     not isinstance(node_result, ExprInt)
                     and all(isinstance(value, ExprInt) for value in child_results)
@@ -704,7 +777,13 @@ class _TransformEvaluator(MiasmSymbolResolver):
                 f"result={type(result).__name__}/{result.size}, "
                 f"smallest={failing!r}, direct={direct!r})."
             )
-        return int(result)
+        value = int(result)
+        # During ordered-write construction, a self/future prefix may still be
+        # unresolved. Never memoize that partial history; later independent
+        # guards/conditions can safely reuse values after construction.
+        if not self._building_index:
+            self._evaluation_cache[cache_key] = (original_expression, value)
+        return value
 
     def concrete_writes(self) -> tuple[tuple[int, bytes], ...]:
         self._ensure_write_index()
@@ -792,6 +871,7 @@ class SymbolicTransform:
         *,
         defined_masks: dict[str, Expr] | None = None,
         memory_defined_masks: dict[ExprMem, tuple[Expr, Expr]] | None = None,
+        memory_write_conditions: dict[ExprMem, Expr] | None = None,
         guards: tuple[Expr, ...] = (),
         source_owned: bool = False,
     ):
@@ -832,7 +912,7 @@ class SymbolicTransform:
         """The sequence of instructions that comprise this transformation."""
         if type(source_owned) is not bool:
             raise SymbolicCompositionError("source_owned must be a boolean.")
-        if not source_owned and (defined_masks is not None or memory_defined_masks is not None or guards):
+        if not source_owned and (defined_masks is not None or memory_defined_masks is not None or memory_write_conditions is not None or guards):
             raise SymbolicCompositionError("Source metadata requires source_owned=True.")
         self.source_owned = source_owned
         self.guards = tuple(guards)
@@ -863,8 +943,9 @@ class SymbolicTransform:
                 if dst.size != expr.size or expr.size % 8 != 0:
                     raise ValueError("Memory destination and value widths must match in bytes.")
                 masks = (memory_defined_masks or {}).get(dst)
+                condition = (memory_write_conditions or {}).get(dst)
                 self.memory_writes.append(
-                    MemoryWrite(dst.ptr, expr, *(masks or (None, None)))
+                    MemoryWrite(dst.ptr, expr, *(masks or (None, None)), condition)
                 )
             else:
                 assert isinstance(dst, ExprId)
@@ -885,10 +966,11 @@ class SymbolicTransform:
                     )
                 self.changed_regs[regname] = expr
 
-        if memory_defined_masks is not None:
-            memory_destinations = {destination for destination in transform if isinstance(destination, ExprMem)}
-            if set(memory_defined_masks) - memory_destinations:
-                raise SymbolicCompositionError("Memory definedness metadata has no matching store.")
+        memory_destinations = {destination for destination in transform if isinstance(destination, ExprMem)}
+        if memory_defined_masks is not None and set(memory_defined_masks) - memory_destinations:
+            raise SymbolicCompositionError("Memory definedness metadata has no matching store.")
+        if memory_write_conditions is not None and set(memory_write_conditions) - memory_destinations:
+            raise SymbolicCompositionError("Memory condition metadata has no matching store.")
         if self.source_owned:
             written_names = set(self.changed_regs)
             if written_names - self.defined_masks.keys():
@@ -1006,6 +1088,9 @@ class SymbolicTransform:
             *self.guards,
             *(write.address for write in self.memory_writes),
             *(write.value for write in self.memory_writes),
+            *(write.address_mask for write in self.memory_writes if write.address_mask is not None),
+            *(write.value_mask for write in self.memory_writes if write.value_mask is not None),
+            *(write.condition for write in self.memory_writes if write.condition is not None),
         ]
         for expression in expressions:
             for node in iter_expression_dag(expression):
@@ -1025,7 +1110,7 @@ class SymbolicTransform:
         """
         validation_accessors = [
             accessor
-            for name in self.validation_register_outputs()
+            for name in self._validation_register_outputs()
             if (accessor := self.arch.get_reg_accessor(name)) is not None
         ]
         expressions = [
@@ -1042,6 +1127,9 @@ class SymbolicTransform:
         ]
         expressions.extend(write.address for write in self.memory_writes)
         expressions.extend(write.value for write in self.memory_writes)
+        expressions.extend(write.address_mask for write in self.memory_writes if write.address_mask is not None)
+        expressions.extend(write.value_mask for write in self.memory_writes if write.value_mask is not None)
+        expressions.extend(write.condition for write in self.memory_writes if write.condition is not None)
         expressions.extend(self.defined_masks.values())
         expressions.extend(self.guards)
 
@@ -1098,6 +1186,9 @@ class SymbolicTransform:
             *self.guards,
             *(write.address for write in self.memory_writes),
             *(write.value for write in self.memory_writes),
+            *(write.address_mask for write in self.memory_writes if write.address_mask is not None),
+            *(write.value_mask for write in self.memory_writes if write.value_mask is not None),
+            *(write.condition for write in self.memory_writes if write.condition is not None),
         ]
         for expression in expressions:
             for node in iter_expression_dag(expression):
@@ -1167,15 +1258,33 @@ class SymbolicTransform:
         self._validation_register_output_cache_key = cache_key
         return outputs.copy()
 
-    def validation_register_outputs_with_masks(self) -> dict[str, tuple[Expr, Expr]]:
+    def validation_register_outputs_with_masks(
+        self, register_names=None,
+    ) -> dict[str, tuple[Expr, Expr]]:
         """Return defined register equations paired with symbolic definedness masks.
 
         Masks are expressions over the transform source, not concrete booleans;
         callers must evaluate them with the same runtime knownness inputs as values.
         """
-        outputs = self._validation_register_outputs()
         state = _SymbolicState.identity(self.arch)
         _apply_symbolic_transform(state, self)
+        if register_names is None:
+            outputs = self._validation_register_outputs()
+        else:
+            # The requested-register path projects directly from this symbolic
+            # state. Building all validation outputs first would apply the same
+            # transform a second time, which is expensive for large prefixes.
+            outputs = {}
+            for requested in register_names:
+                canonical = self.arch.to_regname(requested)
+                accessor = self.arch.get_reg_accessor(canonical) if canonical is not None else None
+                if accessor is None:
+                    raise SymbolicCompositionError(f"Unsupported requested validation register {requested!r}.")
+                base = state.registers[accessor.base_reg]
+                outputs[canonical] = (
+                    base if accessor.start == 0 and accessor.end == base.size
+                    else expr_simp(ExprSlice(base, accessor.start, accessor.end))
+                )
         result: dict[str, tuple[Expr, Expr]] = {}
         for name, expression in outputs.items():
             accessor = self.arch.get_reg_accessor(name)
@@ -1224,18 +1333,42 @@ class SymbolicTransform:
             if evaluator.evaluate(guard) != 1:
                 raise SymbolEvaluationError(f"Source runtime guard {index} is false.")
 
+    def eval_source_transition(
+        self,
+        conc_state: ReadableProgramState,
+        knownness_inputs: dict[str, int],
+        register_names=None,
+    ) -> tuple[dict[str, tuple[int, int]], tuple[tuple[int, bytes], ...]]:
+        """Evaluate source register outputs and ordered stores in one checked context.
+
+        The immutable input state and ordered-write list share one evaluator and
+        one guard pass. Stores are validated first, preserving fail-closed
+        conditional/address/value semantics, then register values/masks reuse
+        the evaluator's successful value cache.
+        """
+        if not self.source_owned:
+            raise SymbolEvaluationError("Source transition prediction requires source-owned metadata.")
+        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
+        self._check_source_guards(conc_state, knownness_inputs, evaluator)
+        stores = self.eval_source_ordered_memory_transforms(
+            conc_state, knownness_inputs, _evaluator=evaluator, _check_guards=False,
+        )
+        result: dict[str, tuple[int, int]] = {}
+        for name, (value, mask) in self.validation_register_outputs_with_masks(register_names).items():
+            result[name] = (evaluator.evaluate(value), evaluator.evaluate(mask))
+        return result, stores
+
     def eval_validation_register_transforms_with_masks(
         self,
         conc_state: ReadableProgramState,
         knownness_inputs: dict[str, int],
+        register_names=None,
     ) -> dict[str, tuple[int, int]]:
         """Evaluate source value/mask pairs using explicit runtime knownness inputs."""
-        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
-        self._check_source_guards(conc_state, knownness_inputs, evaluator)
-        result: dict[str, tuple[int, int]] = {}
-        for name, (value, mask) in self.validation_register_outputs_with_masks().items():
-            result[name] = (evaluator.evaluate(value), evaluator.evaluate(mask))
-        return result
+        pairs, _stores = self.eval_source_transition(
+            conc_state, knownness_inputs, register_names,
+        )
+        return pairs
 
     def eval_validation_register_transforms(
         self,
@@ -1291,6 +1424,9 @@ class SymbolicTransform:
         self,
         conc_state: ReadableProgramState,
         knownness_inputs: dict[str, int],
+        *,
+        _evaluator: _TransformEvaluator | None = None,
+        _check_guards: bool = True,
     ) -> tuple[tuple[int, bytes], ...]:
         """Evaluate source stores after checking guards and symbolic definedness.
 
@@ -1299,9 +1435,27 @@ class SymbolicTransform:
         """
         if not self.source_owned:
             raise SymbolEvaluationError("Source memory evaluation requires source-owned metadata.")
-        evaluator = _TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
-        self._check_source_guards(conc_state, knownness_inputs, evaluator)
+        evaluator = (_TransformEvaluator(conc_state, self.memory_writes, knownness_inputs)
+                     if _evaluator is None else _evaluator)
+        if evaluator._state is not conc_state or evaluator._writes is not self.memory_writes:
+            raise SymbolEvaluationError("Source ordered-write evaluator context does not match transform.")
+        if _check_guards:
+            self._check_source_guards(conc_state, knownness_inputs, evaluator)
         for index, write in enumerate(self.memory_writes):
+            if write.condition is not None:
+                condition_mask = self._eval_source_definedness(
+                    write.condition, conc_state, knownness_inputs, evaluator,
+                    write_prefix=index,
+                )
+                if condition_mask != 1:
+                    raise SymbolEvaluationError(
+                        f"Source memory store {index} has an undefined condition."
+                    )
+                if evaluator.evaluate(write.condition) == 0:
+                    # Retain its ordinal slot for deferred-read prefixes, but do
+                    # not inspect masks/address/value or touch memory.
+                    evaluator._ensure_write_index(index + 1)
+                    continue
             if write.address_mask is None or write.value_mask is None:
                 raise SymbolEvaluationError(
                     f"Source memory store {index} lacks address/value definedness metadata."
@@ -1364,6 +1518,12 @@ class SymbolicTransform:
         write_prefix: int | None = None,
     ) -> int:
         """Conservatively propagate bit-definedness through the supported Expr DAG."""
+        if evaluator._state is not conc_state:
+            raise SymbolEvaluationError("Definedness evaluator context does not match source state.")
+        if knownness_inputs != evaluator._knownness_inputs:
+            raise SymbolEvaluationError(
+                "Definedness evaluator context does not match runtime knownness evidence."
+            )
         masks: dict[int, int] = {}
         pending: list[tuple[Expr, bool]] = [(expression, False)]
         while pending:
@@ -1371,11 +1531,30 @@ class SymbolicTransform:
             key = id(node)
             if key in masks:
                 continue
+            cache_key = (key, write_prefix)
+            cached = evaluator._source_definedness_cache.get(cache_key)
+            if cached is not None and cached[0] is node:
+                masks[key] = cached[1]
+                continue
             children = expression_children(node)
             if not expanded and children:
                 pending.append((node, True))
-                pending.extend((child, False) for child in reversed(children) if id(child) not in masks)
+                if isinstance(node, ExprCond):
+                    if id(node.cond) not in masks:
+                        pending.append((node.cond, False))
+                else:
+                    pending.extend((child, False) for child in reversed(children) if id(child) not in masks)
                 continue
+            if isinstance(node, ExprCond):
+                condition_mask = masks[id(node.cond)]
+                if condition_mask != (1 << node.cond.size) - 1:
+                    raise SymbolEvaluationError("Source definedness depends on an undefined condition.")
+                condition = evaluator.evaluate(node.cond)
+                selected = node.src1 if condition else node.src2
+                if id(selected) not in masks:
+                    pending.append((node, True))
+                    pending.append((selected, False))
+                    continue
             full = (1 << node.size) - 1
             if isinstance(node, ExprInt):
                 mask = full
@@ -1435,7 +1614,7 @@ class SymbolicTransform:
                     shift += child.size
             elif isinstance(node, ExprCond):
                 condition_mask = masks[id(node.cond)]
-                if condition_mask != 1:
+                if condition_mask != (1 << node.cond.size) - 1:
                     raise SymbolEvaluationError("Source definedness depends on an undefined condition.")
                 condition = evaluator.evaluate(node.cond)
                 mask = masks[id(node.src1 if condition else node.src2)]
@@ -1455,6 +1634,40 @@ class SymbolicTransform:
                     if address_mask != (1 << node.args[0].size) - 1:
                         raise SymbolEvaluationError("Deferred source read has an undefined address.")
                     address = evaluator.evaluate(node.args[0])
+                    # A register output or runtime guard can depend on a prior
+                    # store even when it never invokes the public memory-output
+                    # validator. Prove every store in that prefix before
+                    # treating forwarded bytes as defined.
+                    for store_index, write in enumerate(self.memory_writes[:prefix]):
+                        if write.condition is not None:
+                            condition_mask = self._eval_source_definedness(
+                                write.condition, conc_state, knownness_inputs, evaluator,
+                                write_prefix=store_index,
+                            )
+                            if condition_mask != 1:
+                                raise SymbolEvaluationError(
+                                    f"Prior source store {store_index} has an undefined condition."
+                                )
+                            if evaluator.evaluate(write.condition) == 0:
+                                continue
+                        if write.address_mask is None or write.value_mask is None:
+                            raise SymbolEvaluationError(
+                                f"Prior source store {store_index} lacks definedness metadata."
+                            )
+                        for checked_mask in (write.address_mask, write.value_mask):
+                            checked_definedness = self._eval_source_definedness(
+                                checked_mask, conc_state, knownness_inputs, evaluator,
+                                write_prefix=store_index,
+                            )
+                            if checked_definedness != (1 << checked_mask.size) - 1:
+                                raise SymbolEvaluationError(
+                                    f"Prior source store {store_index} has an undefined definedness mask."
+                                )
+                            if evaluator.evaluate(checked_mask) != (1 << checked_mask.size) - 1:
+                                label = "address" if checked_mask is write.address_mask else "value"
+                                raise SymbolEvaluationError(
+                                    f"Prior source store {store_index} has an undefined {label} bit."
+                                )
                     evaluator._ensure_write_index(prefix)
                     if address not in evaluator._versions or not any(
                         version <= prefix for version, _byte in evaluator._versions[address]
@@ -1480,6 +1693,7 @@ class SymbolicTransform:
                     f"Unsupported source definedness expression {type(node).__name__}."
                 )
             masks[key] = mask
+            evaluator._source_definedness_cache[cache_key] = (node, mask)
         return masks[id(expression)]
 
     def eval_ordered_memory_transforms(
@@ -1581,6 +1795,7 @@ class SymbolicTransform:
                     parse(write["address"]), parse(write["value"]),
                     parse(write["address_mask"]) if "address_mask" in write else None,
                     parse(write["value_mask"]) if "value_mask" in write else None,
+                    parse(write["condition"]) if "condition" in write else None,
                 )
                 for write in data["memory_writes"]
             ]
@@ -1642,6 +1857,7 @@ class SymbolicTransform:
                     "address": repr(write.address), "value": repr(write.value),
                     **({"address_mask": repr(write.address_mask)} if write.address_mask is not None else {}),
                     **({"value_mask": repr(write.value_mask)} if write.value_mask is not None else {}),
+                    **({"condition": repr(write.condition)} if write.condition is not None else {}),
                 }
                 for write in self.memory_writes
             ],
@@ -1679,6 +1895,7 @@ class _SymbolicState:
     memory_writes: list[MemoryWrite]
     defined_masks: dict[str, Expr]
     guards: list[Expr]
+    depth_cache: dict[int, tuple[Expr, int]]
 
     @classmethod
     def identity(cls, arch: Arch) -> _SymbolicState:
@@ -1696,25 +1913,34 @@ class _SymbolicState:
             if accessor is None:
                 raise SymbolicCompositionError(f"Missing accessor for {base_reg}.")
             defined_masks[base_reg] = knownness_symbol(base_reg, accessor.num_bits)
-        return cls(arch, registers, register_depths, [], defined_masks, [])
+        return cls(arch, registers, register_depths, [], defined_masks, [], {})
 
 
-def _simplify_with_depth(expression: Expr, depth: int) -> tuple[Expr, int]:
+def _simplify_with_depth(
+    expression: Expr,
+    depth: int,
+    depth_cache: dict[int, tuple[Expr, int]] | None = None,
+) -> tuple[Expr, int]:
     """Simplify a shallow node and retain its depth without rescanning deep children."""
     result = simplify_if_shallow(expression, depth)
     if result is expression:
         return result, depth
     # Simplification is attempted only below the recursive depth limit, so a
     # changed result is bounded and inexpensive to measure exactly.
-    return result, expression_depth(result)
+    return result, expression_depth(result, _cache=depth_cache)
 
 
-def _pointer_with_offset(pointer: Expr, depth: int, offset: int) -> tuple[Expr, int]:
+def _pointer_with_offset(
+    pointer: Expr,
+    depth: int,
+    offset: int,
+    depth_cache: dict[int, tuple[Expr, int]] | None = None,
+) -> tuple[Expr, int]:
     if offset == 0:
         return pointer, depth
     mask = (1 << pointer.size) - 1
     expression = pointer + ExprInt(offset & mask, pointer.size)
-    return _simplify_with_depth(expression, depth + 1)
+    return _simplify_with_depth(expression, depth + 1, depth_cache)
 
 
 def _constant_address_delta(left: Expr, right: Expr) -> int | None:
@@ -1741,6 +1967,7 @@ def _memory_value_byte(write: MemoryWrite, offset: int, endianness: Arch.Endiann
 def _assemble_memory_bytes(
     values: list[tuple[Expr, int]],
     endianness: Arch.Endianness,
+    depth_cache: dict[int, tuple[Expr, int]] | None = None,
 ) -> tuple[Expr, int]:
     if not values:
         raise SymbolicCompositionError("Cannot assemble an empty memory read.")
@@ -1749,7 +1976,7 @@ def _assemble_memory_bytes(
         return significance_order[0]
     expression = ExprCompose(*(value for value, _depth in significance_order))
     depth = 1 + max(depth for _value, depth in significance_order)
-    return _simplify_with_depth(expression, depth)
+    return _simplify_with_depth(expression, depth, depth_cache)
 
 
 def _read_symbolic_memory(
@@ -1764,12 +1991,14 @@ def _read_symbolic_memory(
     prefix = ExprInt(len(state.memory_writes), state.arch.ptr_size)
     values: list[tuple[Expr, int]] = []
     for load_offset in range(size_bits // 8):
-        load_address, load_address_depth = _pointer_with_offset(address, address_depth, load_offset)
+        load_address, load_address_depth = _pointer_with_offset(
+            address, address_depth, load_offset, state.depth_cache,
+        )
         deferred = ExprOp(_DEFERRED_MEMORY_BYTE_OP, load_address, prefix)
         deferred_depth = load_address_depth + 1
         value = ExprSlice(deferred, 0, 8)
         values.append((value, deferred_depth + 1))
-    return _assemble_memory_bytes(values, state.arch.endianness)
+    return _assemble_memory_bytes(values, state.arch.endianness, state.depth_cache)
 
 
 def _read_symbolic_register(
@@ -1783,7 +2012,7 @@ def _read_symbolic_register(
         expression = state.defined_masks.get(base_reg)
         if expression is None or identifier.size != expression.size:
             raise SymbolicCompositionError("Unresolved synthetic knownness input.")
-        return expression, expression_depth(expression)
+        return expression, expression_depth(expression, _cache=state.depth_cache)
     if identifier.name == EXECUTION_TID.name or _allocation_occurrence(identifier.name) is not None:
         if identifier.size != 64:
             raise SymbolicCompositionError("Execution-context expression must have width 64.")
@@ -1814,7 +2043,9 @@ def _read_symbolic_register(
         )
     if accessor.start == 0 and accessor.end == base.size:
         return base, base_depth
-    return _simplify_with_depth(ExprSlice(base, accessor.start, accessor.end), base_depth + 1)
+    return _simplify_with_depth(
+        ExprSlice(base, accessor.start, accessor.end), base_depth + 1, state.depth_cache,
+    )
 
 
 def _rewrite_symbolic_expression(
@@ -1891,7 +2122,7 @@ def _rewrite_symbolic_expression(
             depth = replacement_depth
         else:
             depth = 1 + max((depths[id(child)] for child in children), default=-1)
-        result, result_depth = _simplify_with_depth(rewritten, depth)
+        result, result_depth = _simplify_with_depth(rewritten, depth, state.depth_cache)
         results[key] = result
         depths[key] = result_depth
     return results[id(expression)], depths[id(expression)]
@@ -1905,6 +2136,7 @@ def _write_symbolic_register(
     value_depth: int,
     *,
     zero_extend: bool,
+    depth_cache: dict[int, tuple[Expr, int]] | None = None,
 ) -> tuple[Expr, int]:
     if value.size != accessor.num_bits:
         raise SymbolicCompositionError(
@@ -1926,7 +2158,7 @@ def _write_symbolic_register(
         return parts[0]
     expression = ExprCompose(*(part for part, _depth in parts))
     depth = 1 + max(depth for _part, depth in parts)
-    return _simplify_with_depth(expression, depth)
+    return _simplify_with_depth(expression, depth, depth_cache)
 
 
 def _apply_symbolic_transform(
@@ -1945,6 +2177,7 @@ def _apply_symbolic_transform(
         state.memory_writes,
         state.defined_masks.copy(),
         list(state.guards),
+        state.depth_cache,
     )
     register_updates: list[tuple[str, RegisterAccessor, Expr, int]] = []
     written_masks: dict[str, int] = {}
@@ -2002,7 +2235,11 @@ def _apply_symbolic_transform(
             _rewrite_symbolic_expression(write.value_mask, before, memory_dependencies)[0]
             if write.value_mask is not None else None
         )
-        memory_updates.append(MemoryWrite(address, value, address_mask, value_mask))
+        condition = (
+            _rewrite_symbolic_expression(write.condition, before, memory_dependencies)[0]
+            if write.condition is not None else None
+        )
+        memory_updates.append(MemoryWrite(address, value, address_mask, value_mask, condition))
 
     for canonical, accessor, value, value_depth in register_updates:
         current = state.registers[accessor.base_reg]
@@ -2014,6 +2251,7 @@ def _apply_symbolic_transform(
             value,
             value_depth,
             zero_extend=state.arch.register_write_zero_extends(canonical),
+            depth_cache=state.depth_cache,
         )
         state.registers[accessor.base_reg] = updated
         state.register_depths[accessor.base_reg] = updated_depth
@@ -2033,7 +2271,8 @@ def _apply_symbolic_transform(
         else:
             state.defined_masks[accessor.base_reg] = _write_symbolic_register(
                 current_mask, expression_depth(current_mask), accessor, mask,
-                expression_depth(mask), zero_extend=False,
+                expression_depth(mask, _cache=state.depth_cache), zero_extend=False,
+                depth_cache=state.depth_cache,
             )[0]
     state.guards.extend(rewritten_guards)
     state.memory_writes.extend(memory_updates)
@@ -2067,6 +2306,76 @@ class SymbolicTransformComposer:
         self._dependency_memory: list[ExprMem] = []
         self._dependency_memory_keys: set[tuple[int, int]] = set()
         self.append(first)
+
+    def fork(self) -> SymbolicTransformComposer:
+        """Return an independent composer continuing from this exact prefix.
+
+        Expression DAG nodes and immutable MemoryWrite entries are shared, but
+        all mutable maps/lists are copied. The fork may append suffixes without
+        rebuilding the prefix from its original instructions.
+        """
+        clone = object.__new__(SymbolicTransformComposer)
+        clone._arch = self._arch
+        clone._tid = self._tid
+        clone._start = self._start
+        clone._end = self._end
+        clone._source_owned = self._source_owned
+        clone._state = _SymbolicState(
+            self._state.arch, self._state.registers.copy(),
+            self._state.register_depths.copy(), list(self._state.memory_writes),
+            self._state.defined_masks.copy(), list(self._state.guards),
+            self._state.depth_cache.copy(),
+        )
+        clone._instructions = list(self._instructions)
+        clone._validation_register_names = set(self._validation_register_names)
+        clone._track_dependencies = self._track_dependencies
+        clone._dependency_registers = set(self._dependency_registers)
+        clone._dependency_memory = list(self._dependency_memory)
+        clone._dependency_memory_keys = set(self._dependency_memory_keys)
+        return clone
+
+    def source_projection(
+        self,
+        transform: SymbolicTransform,
+        register_names,
+    ) -> SymbolicTransform:
+        """Project a source-owned suffix over this prefix without mutating it.
+
+        Only ``transform`` is applied to a fork of the current symbolic state;
+        the returned transform is root-relative and retains the complete ordered
+        write/guard history needed to validate the projected register aliases.
+        """
+        if not self._source_owned or not transform.source_owned:
+            raise SymbolicCompositionError(
+                "Source projections require source-owned prefix and suffix transforms."
+            )
+        requested: set[str] = set()
+        for name in register_names:
+            canonical = self._arch.to_regname(name)
+            if canonical is None or self._arch.get_reg_accessor(canonical) is None:
+                raise SymbolicCompositionError(
+                    f"Unsupported requested validation register {name!r}."
+                )
+            requested.add(canonical)
+
+        projection = self.fork()
+        projection.append(transform)  # Enforces arch, TID, and contiguous range.
+        result = projection.finish()
+        requested_bases = {
+            self._arch.get_reg_accessor(name).base_reg for name in requested
+        }
+        identity = _SymbolicState.identity(self._arch)
+        result.changed_regs = {
+            base: projection._state.registers[base]
+            for base in requested_bases
+            if projection._state.registers[base] != identity.registers[base]
+        }
+        result.defined_masks = {
+            base: projection._state.defined_masks[base]
+            for base in result.changed_regs
+        }
+        result._validation_register_names = requested
+        return result
 
     def append(self, transform: SymbolicTransform) -> None:
         if self._arch != transform.arch:
@@ -2114,6 +2423,9 @@ class SymbolicTransformComposer:
                 *transform.guards,
                 *(write.address for write in transform.memory_writes),
                 *(write.value for write in transform.memory_writes),
+                *(write.address_mask for write in transform.memory_writes if write.address_mask is not None),
+                *(write.value_mask for write in transform.memory_writes if write.value_mask is not None),
+                *(write.condition for write in transform.memory_writes if write.condition is not None),
             ]
             for expression in expressions:
                 for node in iter_expression_dag(expression):

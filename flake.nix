@@ -31,7 +31,7 @@
     };
 
     qemu-submodule = {
-      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=0d1ca5d180b889c04f69eeeae4e2a7f80550ee83&submodules=1";
+      url = "git+https://github.com/TUM-DSE/focaccia-qemu.git?rev=467610cce03744cadb633c9a1f4a4a249e2a4048&submodules=1";
       flake = true;
     };
 

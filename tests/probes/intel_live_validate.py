@@ -19,6 +19,10 @@ from types import SimpleNamespace
 
 from focaccia.arch import supported_architectures
 from focaccia.intel_client import IntelOracle, IntelOracleError, bits, bit_value
+from focaccia.intel_symbolic import (
+    IntelSymbolicBackend, SymbolicIntelLiveModel, compare_intel_boundary,
+    normalize_observed_registers,
+)
 from focaccia.qemu.transport import (
     CAP_BOUNDARY_SNAPSHOTS, CAP_INTEGER, CAP_MEMORY_PERMISSIONS, CAP_PC, CAP_STATUS, CAP_STORE_FOOTPRINT, CAP_VECTOR,
     EVENT_AARCH64_SVC_ENTRY, EVENT_AARCH64_SVC_SUCCESSOR, EVENT_TRANSLATION_BLOCK,
@@ -401,6 +405,59 @@ def store_negative_control(writes, footprint):
     raise ValidationError('accepted deliberate extra observed store')
 
 
+def prediction_store_bytes(prediction):
+    result = {}
+    for address, data in prediction.ordered_writes:
+        result.update({address + offset: byte for offset, byte in enumerate(data)})
+    return result
+
+
+def compare_symbolic_prediction(prediction, observed, transport, footprint):
+    registers = normalize_observed_registers(observed)
+    memory = {
+        address: transport.read_memory(address, len(data))
+        for address, data in prediction.memory.items()
+    }
+    addresses = {address for span in footprint.spans
+                 for address in range(span.address, span.address + span.size)}
+    result = compare_intel_boundary(
+        prediction, registers, memory, addresses, require_store_coverage=True,
+    )
+    if not result.ok:
+        raise ValidationError(f"shared Intel boundary comparison failed: {result.diagnostics}")
+    return result
+
+
+def compare_pending_prediction(prediction, observed, transport, footprint):
+    if hasattr(prediction, 'registers') and hasattr(prediction, 'ordered_writes'):
+        return compare_symbolic_prediction(prediction, observed, transport, footprint)
+    compare_state(prediction, observed)
+    return None
+
+
+def summarize_prediction(prediction):
+    return {
+        'registers': {name: {'value': item.value, 'mask': item.mask, 'width': item.width}
+                      for name, item in prediction.registers.items()},
+        'ordered_writes': [{'address': address, 'value': value.hex()}
+                           for address, value in prediction.ordered_writes],
+        'memory': {str(address): value.hex() for address, value in prediction.memory.items()},
+    }
+
+
+def check_symbolic_writes(transport, prediction, footprint, evidence=None, sequence=None):
+    writes = prediction_store_bytes(prediction)
+    compare_store_footprint(writes, footprint)
+    actual = {address: transport.read_memory(address, 1)[0] for address in writes}
+    if evidence is not None:
+        evidence.write(json.dumps({'kind':'actual-post-memory','sequence':sequence,'bytes':actual})+'\n')
+        evidence.flush()
+    for address, expected in writes.items():
+        if expected != actual[address]:
+            raise ValidationError(f'memory {address:#x}: expected {expected:#x}, observed {actual[address]:#x}')
+    return len(writes)
+
+
 def check_writes(transport, state, footprint, evidence=None, sequence=None):
     writes = dirty_bytes(state)
     compare_store_footprint(writes,footprint)
@@ -431,6 +488,11 @@ class PermissionEvidence:
         if not result & 8:
             return False, False
         return bool(result & 1), bool(result & 2)
+
+
+def symbolic_enabled(args):
+    """Programmatic callers default to the symbolic acceptance path too."""
+    return getattr(args, 'symbolic', True)
 
 
 def run(args):
@@ -474,6 +536,8 @@ def run(args):
     command += ['-plugin', option, str(args.binary), *argv]
     stdout_path, stderr_path = Path(str(args.output)+'.stdout'), Path(str(args.output)+'.stderr')
     report = {'schema':'focaccia-intel-live-validation-v1', 'command':command,
+              'prediction_backend':('intel-symbolic-source' if symbolic_enabled(args)
+                                    else 'intel-concrete-evaluator-legacy'),
               'model_sha256':sha256(model_copy), 'model_path':str(args.model),
               'oracle':args.oracle, 'decoder':str(args.decoder), 'binary_sha256':identity.binary_sha256,
               'cpu_profile':cpu_profile, 'semantic_validation':False, 'whole_program_completed':False,
@@ -490,8 +554,10 @@ def run(args):
     evidence_path = Path(str(args.output) + '.evidence.jsonl')
     report['evidence_file'] = str(evidence_path)
     try:
+        symbolic_mode = symbolic_enabled(args)
+        compile_timeout = min(args.timeout, 90.0) if symbolic_mode else args.timeout
         with evidence_path.open('w') as evidence, stdout_path.open('w') as stdout, stderr_path.open('w') as stderr, \
-             IntelOracle(args.oracle, model_copy, timeout=args.timeout) as oracle, \
+             IntelOracle(args.oracle, model_copy, timeout=compile_timeout) as oracle, \
              module.Decoder(args.decoder, timeout=args.timeout) as decoder:
             process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
             listener._server.settimeout(min(args.timeout,0.25))
@@ -506,7 +572,15 @@ def run(args):
                         raise ValidationError(f'QEMU exited before handshake ({process.returncode}): {stderr_path.read_text()[-4096:]}')
                     if time.monotonic() >= deadline:
                         raise ValidationError('QEMU handshake timeout')
-            model = LiveModel(oracle, decoder, transport, PermissionEvidence(transport,address_limit),address_limit,args.instruction_limit)
+            if symbolic_enabled(args):
+                model = SymbolicIntelLiveModel(
+                    IntelSymbolicBackend(oracle, sha256(model_copy)), decoder, transport,
+                    handshake.pid, guest_limit=address_limit,
+                    step_limit=args.instruction_limit,
+                )
+            else:
+                model = LiveModel(oracle, decoder, transport,
+                    PermissionEvidence(transport,address_limit),address_limit,args.instruction_limit)
             plans, pending, os_pending, os_obligation = set(), None, None, None
             pending_count = 0
             pending_pre_syscall = None
@@ -531,24 +605,37 @@ def run(args):
                     'spans':[(s.address,s.size) for s in footprint.spans]})+'\n')
                 evidence.flush()
                 if event.kind == EVENT_AARCH64_SVC_ENTRY:
-                    if pending is None or not pending['User_Environment_Cutpoint']:
+                    source_cutpoint = (model.environment_cutpoint if isinstance(model, SymbolicIntelLiveModel)
+                                       else pending is not None and pending['User_Environment_Cutpoint'])
+                    if pending is None or not source_cutpoint:
                         raise ValidationError('unexpected syscall entry without model cutpoint')
                     observed = snapshot(transport, event, plans,address_limit)
                     evidence.write(json.dumps({'kind':'syscall-entry', 'sequence':event.sequence, 'observed':observed})+'\n')
                     evidence.flush()
                     if pending_pre_syscall is None:
                         raise ValidationError('syscall has no retained source pre-instruction obligation')
-                    report['checked_write_bytes'] += check_writes(transport,pending,footprint,evidence,event.sequence)
+                    if isinstance(model, SymbolicIntelLiveModel):
+                        report['checked_write_bytes'] += check_symbolic_writes(
+                            transport, pending, footprint, evidence, event.sequence)
+                        compare_pending_prediction(pending_pre_syscall, observed, transport, footprint)
+                    else:
+                        report['checked_write_bytes'] += check_writes(transport,pending,footprint,evidence,event.sequence)
+                        compare_state(pending_pre_syscall, observed)
                     report['store_footprints_checked'] += 1
-                    compare_state(pending_pre_syscall, observed)
                     os_pending = event.auxiliary
                     if os_pending != observed['rax'] or event.address != observed['rdi']:
                         raise ValidationError('syscall event metadata disagrees with entry register evidence')
                     if os_pending in NONLOCAL_SYSCALLS:
                         raise ValidationError('syscall outside ordinary Linux user return contract')
-                    if known_mask(pending['__known_Next_IP'],64) != 2**64-1:
-                        raise ValidationError('undefined source syscall resume PC')
-                    os_obligation = {'entry':dict(observed), 'next_pc':bit_value(pending['Next_IP'],64),
+                    if isinstance(model, SymbolicIntelLiveModel):
+                        next_pc = model.next_ip
+                        if type(next_pc) is not int or not 0 <= next_pc < 1 << 64:
+                            raise ValidationError('undefined source syscall resume PC')
+                    else:
+                        if known_mask(pending['__known_Next_IP'],64) != 2**64-1:
+                            raise ValidationError('undefined source syscall resume PC')
+                        next_pc = bit_value(pending['Next_IP'],64)
+                    os_obligation = {'entry':dict(observed), 'next_pc':next_pc,
                                      'source_pc':event.pc, 'number':os_pending}
                     report['syscall_cutpoints'].append({'sequence':event.sequence, 'pc':event.pc,
                         'number':os_pending, 'argument0':observed['rdi'], 'cpu_prestate_checked':True,
@@ -599,20 +686,27 @@ def run(args):
                         raise ValidationError('whole-program first boundary is not ELF entry')
                     first = False
                 if pending is not None:
-                    if pending['User_Environment_Cutpoint']:
+                    if (model.environment_cutpoint if isinstance(model, SymbolicIntelLiveModel)
+                            else pending['User_Environment_Cutpoint']):
                         raise ValidationError('missing syscall entry observation')
-                    report['checked_write_bytes'] += check_writes(transport,pending,footprint,evidence,event.sequence)
+                    if isinstance(model, SymbolicIntelLiveModel):
+                        report['checked_write_bytes'] += check_symbolic_writes(
+                            transport, pending, footprint, evidence, event.sequence)
+                    else:
+                        report['checked_write_bytes'] += check_writes(transport,pending,footprint,evidence,event.sequence)
                     report['store_footprints_checked'] += 1
-                    compare_state(pending, observed)
+                    compare_pending_prediction(pending, observed, transport, footprint)
                     report['validated_blocks'] += 1
                     report['validated_instructions'] += pending_count
                     if report['store_negative_control'] is None:
-                        report['store_negative_control'] = store_negative_control(dirty_bytes(pending),footprint)
+                        writes = (prediction_store_bytes(pending) if isinstance(model, SymbolicIntelLiveModel)
+                                  else dirty_bytes(pending))
+                        report['store_negative_control'] = store_negative_control(writes,footprint)
                     if not report['negative_control_rejected']:
                         corrupted = dict(observed)
                         corrupted['pc'] ^= 1
                         try:
-                            compare_state(pending, corrupted)
+                            compare_pending_prediction(pending, corrupted, transport, footprint)
                         except ValidationError as rejection:
                             report['negative_control_rejected'] = True
                             report['negative_control'] = {'sequence':event.sequence, 'field':'RIP',
@@ -645,14 +739,24 @@ def run(args):
                 model.boundary(observed)
                 pending = model.predict(event)
                 pending_pre_syscall = model.syscall_prestate
+                if isinstance(model, SymbolicIntelLiveModel):
+                    predicted = summarize_prediction(pending)
+                    dirty = prediction_store_bytes(pending)
+                    syscall_summary = (summarize_prediction(pending_pre_syscall)
+                                       if pending_pre_syscall is not None else None)
+                    pending_count = sum(item.get('source_iterations', 1) for item in model.decoded)
+                else:
+                    predicted = {k:v for k,v in pending.items()
+                                 if k not in ('User_Address','User_Byte','User_Dirty','__known_User_Address',
+                                              '__known_User_Byte','__known_User_Dirty')}
+                    dirty = dirty_bytes(pending)
+                    syscall_summary = pending_pre_syscall
+                    pending_count = len(model.decoded)
                 evidence.write(json.dumps({'kind':'prediction-before-advance', 'sequence':event.sequence,
                     'instructions':model.decoded, 'memory_inputs':model.memory,
-                    'memory_permissions':model.memory_permissions, 'syscall_prestate':pending_pre_syscall,
-                    'dirty_bytes':dirty_bytes(pending), 'predicted':{k:v for k,v in pending.items()
-                    if k not in ('User_Address','User_Byte','User_Dirty','__known_User_Address',
-                                 '__known_User_Byte','__known_User_Dirty')}})+'\n')
+                    'memory_permissions':model.memory_permissions, 'syscall_prestate':syscall_summary,
+                    'dirty_bytes':dirty, 'predicted':predicted})+'\n')
                 evidence.flush()
-                pending_count = len(model.decoded)
                 report['predicted_source_steps'] = model.instructions
                 report['forms'] = sorted(model.forms)
                 if report['validated_blocks'] % 100 == 0:
@@ -713,6 +817,12 @@ def main(argv=None):
                    help='explicit guest VA reservation (bytes), bounded to canonical48 lower half')
     p.add_argument('--timeout', type=float, default=120)
     p.add_argument('--instruction-limit', type=int, default=10_000_000)
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--symbolic', dest='symbolic', action='store_true',
+                      help='use source residuals, shared symbolic composition and boundary comparison (default)')
+    mode.add_argument('--concrete-diagnostic', dest='symbolic', action='store_false',
+                      help='explicitly select the legacy concrete evaluator for diagnostics only')
+    p.set_defaults(symbolic=True)
     args = p.parse_args(argv)
     if args.timeout <= 0 or args.instruction_limit <= 0:
         p.error('limits must be positive')

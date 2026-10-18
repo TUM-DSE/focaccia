@@ -303,24 +303,31 @@ def expression_children(expression: Expr) -> tuple[Expr, ...]:
     raise TypeError(f"Unknown expression type {type(expression).__name__}")
 
 
-def expression_depth(expression: Expr) -> int:
-    """Measure expression DAG depth iteratively, without structural hashing."""
-    depths: dict[int, int] = {}
+def expression_depth(expression: Expr, *, _cache: dict[int, tuple[Expr, int]] | None = None) -> int:
+    """Measure DAG depth, optionally sharing a lifetime-safe local memo.
+
+    Entries retain their expression so Python cannot reuse an id while the
+    memo exists. Callers should scope this cache to one evaluation, not to
+    mutable architectural state or the lifetime of the process.
+    """
+    cache = {} if _cache is None else _cache
     pending: list[tuple[Expr, bool]] = [(expression, False)]
     while pending:
         current, expanded = pending.pop()
         key = id(current)
-        if key in depths:
+        cached = cache.get(key)
+        if cached is not None and cached[0] is current:
             continue
         children = expression_children(current)
         if not expanded:
             pending.append((current, True))
             pending.extend(
-                (child, False) for child in reversed(children) if id(child) not in depths
+                (child, False) for child in reversed(children)
+                if id(child) not in cache or cache[id(child)][0] is not child
             )
             continue
-        depths[key] = 1 + max((depths[id(child)] for child in children), default=-1)
-    return depths[id(expression)]
+        cache[key] = (current, 1 + max((cache[id(child)][1] for child in children), default=-1))
+    return cache[id(expression)][1]
 
 
 def simplify_if_shallow(expression: Expr, depth: int | None = None) -> Expr:
@@ -345,10 +352,20 @@ def iter_expression_dag(expression: Expr):
         pending.extend(reversed(expression_children(current)))
 
 
-def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
-    """Evaluate and simplify an expression DAG using an iterative work list."""
+def eval_expr(
+    expr: Expr, conc_state: MiasmSymbolResolver, *,
+    _resolved: dict[int, tuple[Expr, ExprInt]] | None = None,
+) -> Expr:
+    """Evaluate a DAG, optionally memoizing concrete nodes in one fixed context.
+
+    A supplied memo must not outlive its immutable input state and ordered-write
+    history. Ordinary callers get a fresh memo and retain mutable-state behavior.
+    Unresolved expressions and failures are never cached.
+    """
+    resolved_nodes = {} if _resolved is None else _resolved
     results: dict[int, Expr] = {}
     depths: dict[int, int] = {}
+    result_depths: dict[int, tuple[Expr, int]] = {}
     pending: list[tuple[Expr, bool]] = [(expr, False)]
 
     while pending:
@@ -356,11 +373,19 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
         key = id(current)
         if key in results:
             continue
+        cached = resolved_nodes.get(key)
+        if cached is not None and cached[0] is current:
+            results[key] = cached[1]
+            depths[key] = 0
+            continue
         children = expression_children(current)
         direct_register_slice = isinstance(current, ExprSlice) and isinstance(current.arg, ExprId)
         if not expanded:
             pending.append((current, True))
-            if not direct_register_slice:
+            if isinstance(current, ExprCond):
+                if id(current.cond) not in results:
+                    pending.append((current.cond, False))
+            elif not direct_register_slice:
                 pending.extend(
                     (child, False) for child in reversed(children) if id(child) not in results
                 )
@@ -411,8 +436,17 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
             condition = results[id(current.cond)]
             if isinstance(condition, ExprInt):
                 selected = current.src1 if int(condition) != 0 else current.src2
+                if id(selected) not in results:
+                    pending.append((current, True))
+                    pending.append((selected, False))
+                    continue
                 rebuilt = results[id(selected)]
             else:
+                missing = [arm for arm in (current.src1, current.src2) if id(arm) not in results]
+                if missing:
+                    pending.append((current, True))
+                    pending.extend((arm, False) for arm in reversed(missing))
+                    continue
                 rebuilt = ExprCond(
                     condition,
                     results[id(current.src1)],
@@ -433,6 +467,8 @@ def eval_expr(expr: Expr, conc_state: MiasmSymbolResolver) -> Expr:
         )
         result = simplify_if_shallow(rebuilt, rebuilt_depth)
         results[key] = result
-        depths[key] = rebuilt_depth if result is rebuilt else expression_depth(result)
+        if isinstance(result, ExprInt):
+            resolved_nodes[key] = (current, result)
+        depths[key] = expression_depth(result, _cache=result_depths)
 
     return results[id(expr)]

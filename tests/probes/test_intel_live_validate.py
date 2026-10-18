@@ -5,12 +5,41 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from focaccia.intel_client import IntelOracle, bits, bit_value
+import intel_live_validate as live
 from intel_live_validate import (GPRS, LiveModel, PermissionEvidence, ValidationError, compare_state,
     compare_syscall_preserved, syscall_negative_controls, compare_store_footprint, store_negative_control,
     dirty_bytes, register_value, guest_range, physical_prefixes)
+
+
+class CliModeTests(unittest.TestCase):
+    def test_symbolic_is_default_and_flags_select_modes(self):
+        required = ['--qemu', 'qemu', '--plugin', 'plugin', '--output', 'report']
+        for mode, expected in (([], True), (['--symbolic'], True),
+                               (['--concrete-diagnostic'], False)):
+            argv = [*required, *mode]
+            captured = {}
+            def capture(args):
+                captured['args'] = args
+            with self.subTest(argv=argv), patch.object(live, 'run', side_effect=capture):
+                self.assertEqual(live.main(argv), 0)
+            self.assertIs(captured['args'].symbolic, expected)
+
+    def test_programmatic_callers_default_to_symbolic(self):
+        self.assertTrue(live.symbolic_enabled(SimpleNamespace()))
+        self.assertFalse(live.symbolic_enabled(SimpleNamespace(symbolic=False)))
+        self.assertTrue(live.symbolic_enabled(SimpleNamespace(symbolic=True)))
+
+    def test_symbolic_and_concrete_flags_conflict(self):
+        with patch.object(live, 'run') as run:
+            with self.assertRaises(SystemExit) as error:
+                live.main(['--qemu', 'qemu', '--plugin', 'plugin', '--output', 'report',
+                           '--symbolic', '--concrete-diagnostic'])
+        self.assertEqual(error.exception.code, 2)
+        run.assert_not_called()
 
 
 def fixture():

@@ -45,6 +45,21 @@ def test_predicts_synthetic_register_transform_across_architectures(arch, name, 
     assert prediction.registers[name].mask == (1 << arch.get_reg_accessor(name).num_bits) - 1
 
 
+@pytest.mark.parametrize("source_owned", [False, True])
+def test_prediction_coalesces_checked_stores_without_a_second_memory_pass(monkeypatch, source_owned):
+    arch = ArchX86()
+    transform = make_transform(arch, "RAX", source_owned)
+    method = "eval_source_memory_transforms" if source_owned else "eval_memory_transforms"
+
+    def unexpected_second_pass(*args, **kwargs):
+        raise AssertionError("final memory must come from the already evaluated ordered stores")
+
+    monkeypatch.setattr(transform, method, unexpected_second_pass)
+    result = predict(transform, State(arch, {"RAX": 1}), knownness_inputs={})
+    assert result.memory == {}
+    assert result.registers["RAX"].value == 7
+
+
 def test_required_bits_differ_from_comparison_mask_and_zero_required_still_compares():
     pred = BoundaryPrediction({"FLAGS": RegisterPrediction(0b10, 0b11, 2)}, (), {})
     result = compare(pred, {"FLAGS": 0}, {}, required_masks={"FLAGS": 0})
@@ -86,6 +101,36 @@ def test_comparison_rejects_missing_store_evidence_and_extra_address():
     assert not compare(prediction, {}, {}, require_store_coverage=True).ok
     result = compare(prediction, {}, {}, actual_store_addresses={1, 2}, require_store_coverage=True)
     assert any(d["kind"] == "extra_store" and d["address"] == 2 for d in result.diagnostics)
+
+
+def test_source_observation_view_checks_unchanged_registers_and_flag_aliases():
+    from focaccia.snapshot import ProgramState
+
+    arch = ArchX86()
+    state = ProgramState(arch)
+    state.write_register("RBX", 41)
+    state.write_register("RFLAGS", 0x202)
+    state.write_register("XMM0", 7)
+    transform = SymbolicTransform(1, {ExprId("CF", 1): ExprInt(1, 1)}, [], arch, 0, 1,
+                                  source_owned=True, defined_masks={"CF": ExprInt(1, 1)})
+    prediction = predict(transform, state,
+                         knownness_inputs={"RBX": 2**64 - 1, "RFLAGS": 2**64 - 1,
+                                           "ZMM0": 2**128 - 1},
+                         register_names=("RBX", "RFLAGS", "XMM0"))
+    assert prediction.registers["RFLAGS"].value == 0x203
+    assert prediction.registers["XMM0"].value == 7
+    observed = {"RBX": 41, "RFLAGS": 0x203, "XMM0": 7}
+    assert compare(prediction, observed, {}).ok
+    observed["RBX"] ^= 1
+    result = compare(prediction, observed, {})
+    assert not result.ok
+    assert any(d.get("register") == "RBX" for d in result.diagnostics)
+
+
+def test_legacy_prediction_cannot_silently_invent_complete_source_view():
+    arch = ArchX86()
+    with pytest.raises(ValueError, match="source-owned"):
+        predict(make_transform(arch, "RAX"), State(arch), register_names=("RAX", "RBX"))
 
 
 def test_arm_probe_boundary_comparison_uses_shared_comparator():
