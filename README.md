@@ -165,6 +165,28 @@ block/store/syscall evidence, cache statistics, terminal evidence, and reports.
 `result.json` summarizes the two cases. The default Focaccia build remains
 TIR-free; this app and its check are explicit opt-ins.
 
+### Sail x86 as an additional specification source
+
+Sail x86 residuals feed the same source-owned symbolic transforms, composition,
+definedness, memory obligations and boundary comparator as the existing sources.
+There is no concrete-opcode or Miasm fallback. The pinned Nix model preserves
+undefined values; strict specialization retains compliance guards and never
+uses host x87 execution as an oracle.
+
+```sh
+nix build .#sail-oracle .#sail-x86-specification
+nix build .#checks.aarch64-linux.sail-source-validation
+nix run .#validate-native-sail -- --help
+```
+
+The check includes real-model arithmetic/flags, load/store, branch, composition
+and corruption cases. It is not full-ISA, whole-application or native x86
+hardware acceptance. Unsupported semantics fail closed. See
+[`docs/sail-spec-backend.md`](docs/sail-spec-backend.md) for exact scope and
+[`docs/native-spec-backend.md`](docs/native-spec-backend.md) for observation
+contracts. ARM's optional oracle-JIT retains its separately pinned compatible
+source revision; both source builds use the shared pipeline.
+
 ## How To Use
 
 `focaccia` is the main executable. Invoke `focaccia --help` to see what you can do with it.

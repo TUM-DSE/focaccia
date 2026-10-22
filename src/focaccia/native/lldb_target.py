@@ -978,7 +978,9 @@ class LLDBLocalTarget(LLDBConcreteTarget):
                  executable: str,
                  argv: list[str] | None = None,
                  envp: list[str] | None = None,
-                 profiler: TraceProfiler | None = None):
+                 profiler: TraceProfiler | None = None,
+                 stdout_path: str | None = None,
+                 stderr_path: str | None = None):
         """Construct an LLDB local target. Stop at entry.
 
         :param executable: Name of executable to run under LLDB.
@@ -1005,7 +1007,7 @@ class LLDBLocalTarget(LLDBConcreteTarget):
         error = lldb.SBError()
         process = target.Launch(debugger.GetListener(),
                                 argv, envp,        # argv, envp
-                                None, None, None,  # stdin, stdout, stderr
+                                None, stdout_path, stderr_path,  # stdin, stdout, stderr
                                 None,              # working directory
                                 0,
                                 True, error)

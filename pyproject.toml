@@ -39,6 +39,7 @@ experimental-scheduler = [
 focaccia = "focaccia.cli:main"
 convert = "focaccia.tools.convert:main"
 validate-qemu = "focaccia.tools.validate_qemu:main"
+validate-native-spec = "focaccia.native.spec_validate:main"
 capture-transforms = "focaccia.tools.capture_transforms:main"
 rr-qemu-smoke = "focaccia.tools.rr_qemu_smoke:main"
 

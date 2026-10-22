@@ -10,7 +10,11 @@
 
     # Track the development branch; flake.lock pins the exact tested revision.
     # Keep TIR's own toolchain/nixpkgs pins rather than replacing its tested build inputs.
-    tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=ta/carbonara-oracle-jit&shallow=1";
+    tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=carbonara&shallow=1";
+    # The optional ARM JIT API predates the merged Sail frontend. Keep its
+    # validated source revision explicit rather than disabling kernel checks
+    # or silently falling back when building the new Sail source adapter.
+    arm-tir.url = "git+ssh://git@github.com/TUM-DSE/airlift.git?ref=ta/intel-isa-oracle&rev=99f4b3be1db27a024c4b2b8adf6c4e21a7733e27&shallow=1";
 
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
@@ -51,6 +55,7 @@
     qemu-submodule,
     rr-submodule,
     tir,
+    arm-tir,
     ...
   }:
   flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
@@ -59,7 +64,9 @@
 
     python = pkgs.python312;
     tirPackages = tir.packages.${system};
-    tirOracle = import ./nix/tir-oracle.nix { inherit tir system; };
+    tirOracle = import ./nix/tir-oracle.nix { tir = arm-tir; inherit system; };
+    sailOracle = import ./nix/tir-oracle.nix { inherit tir system; sailOnly = true; };
+    sailModel = tirPackages.sail-x86-specification;
 
     musl-pkgs = import nixpkgs {
       inherit system;
@@ -239,6 +246,40 @@
       exec ${pythonEnv}/bin/validate-qemu --gdb "${gdbInternal}/bin/gdb" "$@"
     '';
 
+    nativeHardwareProfile = pkgs.stdenv.mkDerivation {
+      pname = "focaccia-native-hardware-profile";
+      version = "1";
+      src = ./src/focaccia/native/hardware_profile.c;
+      dontUnpack = true;
+      buildPhase = ''
+        $CC -std=c11 -Wall -Wextra -Werror -O2 "$src" -o focaccia-native-hardware-profile
+      '';
+      installPhase = ''
+        install -Dm755 focaccia-native-hardware-profile "$out/bin/focaccia-native-hardware-profile"
+      '';
+    };
+
+    nativeSpecRunner = pkgs.writeShellApplication {
+      name = "validate-native-spec";
+      runtimeInputs = [ pythonEnv ];
+      text = ''
+        exec ${pythonEnv}/bin/validate-native-spec \
+          --arm-oracle ${tirOracle}/bin/focaccia-tir-oracle \
+          --hardware-profile-helper ${nativeHardwareProfile}/bin/focaccia-native-hardware-profile "$@"
+      '';
+    };
+
+    nativeSailRunner = pkgs.writeShellApplication {
+      name = "validate-native-sail";
+      runtimeInputs = [ pythonEnv ];
+      text = ''
+        exec ${pythonEnv}/bin/validate-native-spec \
+          --x86-spec sail \
+          --sail-oracle ${sailOracle}/bin/focaccia-tir-oracle \
+          --sail-model ${sailModel}/x86.tir "$@"
+      '';
+    };
+
     tirLuaFixture = pkgs.stdenvNoCC.mkDerivation {
       pname = "tir-lua-static-musl-fixture";
       version = "1";
@@ -268,7 +309,7 @@
     };
 
     tirLuaRunner = pkgs.writeShellApplication { name = "tir-lua-online"; runtimeInputs = [ pythonEnv ]; text = ''
-      exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} --issue 0 --fixed-only --fixture ${tirLuaFixture} --oracle ${tirOracle}/bin/focaccia-tir-oracle --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --tir-revision ${tir.rev} --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 "$@"
+      exec ${pythonEnv}/bin/python ${./tests/probes/tir_no_replay_smoke.py} --issue 0 --fixed-only --fixture ${tirLuaFixture} --oracle ${tirOracle}/bin/focaccia-tir-oracle --qemu-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/bin/qemu-aarch64 --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so --tir-revision ${arm-tir.rev} --qemu-revision ${qemu-submodule.rev} "$@"
     ''; };
 
     # Exact upstream #2248 source, linked as a static-musl AArch64 process.
@@ -353,8 +394,8 @@
           --qemu-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/bin/qemu-aarch64 \
           --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
           --plugin-injected ${qemu-submodule.packages.${system}.with-focaccia-plugin-2248}/lib/plugins/libfocaccia.so \
-          --tir-revision ${tir.rev} \
-          --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 \
+          --tir-revision ${arm-tir.rev} \
+          --qemu-revision ${qemu-submodule.rev} \
           "$@"
       '';
     };
@@ -450,8 +491,8 @@
             --qemu-injected ${injectedPackage}/bin/qemu-aarch64 \
             --plugin-fixed ${qemu-submodule.packages.${system}.with-focaccia-plugin}/lib/plugins/libfocaccia.so \
             --plugin-injected ${injectedPackage}/lib/plugins/libfocaccia.so \
-            --tir-revision ${tir.rev} \
-            --qemu-revision 0d1ca5d180b889c04f69eeeae4e2a7f80550ee83 \
+            --tir-revision ${arm-tir.rev} \
+            --qemu-revision ${qemu-submodule.rev} \
             "$@"
         '';
       };
@@ -2479,7 +2520,7 @@
     '';
 
     flakeSourceBoundaryCheck =
-      assert qemu-submodule.rev == "0d1ca5d180b889c04f69eeeae4e2a7f80550ee83";
+      assert qemu-submodule.rev == "467610cce03744cadb633c9a1f4a4a249e2a4048";
       assert rr-submodule.rev == "f248913aa51ccf61932145a67e08a1e811953a2b";
       pkgs.runCommand "flake-source-boundary" {
         nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -3830,6 +3871,11 @@
 
       rr = rrTool;
 
+      native-hardware-profile = nativeHardwareProfile;
+      validate-native-spec = nativeSpecRunner;
+      validate-native-sail = nativeSailRunner;
+      sail-x86-specification = sailModel;
+      sail-oracle = sailOracle;
       tir-lua-fixture = tirLuaFixture;
       tir-lua-online = tirLuaRunner;
       tir-no-replay-fixture = tirSmokeFixture;
@@ -3849,6 +3895,14 @@
     };
 
     apps = {
+      validate-native-spec = {
+        type = "app";
+        program = "${nativeSpecRunner}/bin/validate-native-spec";
+      };
+      validate-native-sail = {
+        type = "app";
+        program = "${nativeSailRunner}/bin/validate-native-sail";
+      };
       tir-no-replay-smoke = {
         type = "app";
         program = "${tirSmokeRunner}/bin/tir-no-replay-smoke";
@@ -4166,6 +4220,24 @@
                 assert native["variant_hits"] > 0
         PY
       '';
+      sail-source-validation = pkgs.stdenvNoCC.mkDerivation {
+        name = "sail-source-validation";
+        src = staticUnitSource;
+        dontBuild = true;
+        doCheck = true;
+        nativeCheckInputs = [ pythonStaticUnitEnv sailOracle pkgs.nodejs ];
+        FOCACCIA_SAIL_ORACLE = "${sailOracle}/bin/focaccia-tir-oracle";
+        FOCACCIA_SAIL_MODEL = "${sailModel}/x86.tir";
+        checkPhase = ''
+          test -s "$FOCACCIA_SAIL_MODEL"
+          ruff check src/focaccia/sail_symbolic.py src/focaccia/native/sail_spec.py \
+            tests/test_sail_symbolic.py tests/test_native_sail_spec.py
+          python -m pyright --pythonpath "$(command -v python)" \
+            tests/test_sail_symbolic.py tests/test_native_sail_spec.py
+          python -m pytest -q tests/test_sail_symbolic.py tests/test_native_sail_spec.py
+        '';
+        installPhase = "mkdir -p $out";
+      };
       tir-oracle-validation = pkgs.stdenvNoCC.mkDerivation {
         name = "tir-oracle-validation";
         src = staticUnitSource;

@@ -7,6 +7,7 @@ returned state/write predictions against separate output observations.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import select
@@ -29,14 +30,17 @@ def _pairs(pairs):
 
 class IntelOracle:
     def __init__(self, executable: str, model: Path, *, timeout: float = 60,
-                 max_response: int = 16 * 1024 * 1024):
-        if timeout <= 0 or max_response <= 0:
+                 max_response: int = 16 * 1024 * 1024,
+                 command: tuple[str, ...] | None = None,
+                 env: dict[str, str] | None = None):
+        if (not math.isfinite(timeout) or timeout <= 0
+                or type(max_response) is not int or max_response <= 0):
             raise ValueError("oracle limits must be positive")
         self.timeout = timeout
         self.max_response = max_response
         self.process = subprocess.Popen(
-            [executable, "--json-lines", str(model)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
+            list(command) if command is not None else [executable, "--json-lines", str(model)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0, env=env,
         )
         self.closed = False
         self.requests = 0
@@ -90,13 +94,16 @@ class IntelOracle:
                 if len(data) > self.max_response or b"\n" in data[:-1]:
                     raise IntelOracleError("oversized or multiple oracle responses")
             response = json.loads(data, object_pairs_hook=_pairs)
-            if not isinstance(response, dict) or type(response.get("ok")) is not bool:
-                raise IntelOracleError("malformed oracle response")
+            self.validate_response(response)
             self.requests += 1
             return response
         except (OSError, ValueError, IntelOracleError) as error:
             self.close()
             raise IntelOracleError(str(error)) from error
+
+    def validate_response(self, response: object) -> None:
+        if not isinstance(response, dict) or type(response.get("ok")) is not bool:
+            raise IntelOracleError("malformed oracle response")
 
     def checked(self, request: dict) -> dict:
         response = self.request(request)

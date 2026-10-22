@@ -8,6 +8,7 @@ remain explicit failures, including when the Miasm backend supports the opcode.
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -22,12 +23,21 @@ from focaccia.symbolic import (
     Instruction,
     SymbolEvaluationError,
     UnsupportedInstructionError,
+    SymbolicTransform,
     eval_symbol,
 )
 from focaccia.miasm_util import expression_children
 
 _MAX_EXPRESSION_TREE_DEPTH = 128
 _MAX_EXPRESSION_DAG_DEPTH = 2048
+
+@dataclass(frozen=True)
+class RegionCandidate:
+    activation: Expr
+    transform: SymbolicTransform
+    monitor_event: str
+    memory_reads: tuple[tuple[Expr, int], ...]
+
 
 _REGISTERS = {
     **{f"X{i}": 64 for i in range(31)},
@@ -323,8 +333,14 @@ class _ExpressionDecoder:
         raise ValueError(f"Unsupported oracle expression kind {kind!r}")
 
 
-def decode_response(text: str, pc: int, code: bytes) -> tuple[Expr, dict[Expr, Expr]]:
-    """Validate the versioned response before constructing shared expressions."""
+def decode_response(
+    text: str, pc: int, code: bytes, *, expected_native_config: dict[str, int] | None = None
+) -> tuple[Expr, dict[Expr, Expr]]:
+    """Validate the versioned response before constructing shared expressions.
+
+    Native profile responses are accepted only when the caller independently
+    supplies the exact configuration it established for the tracee.
+    """
     if len(text) > 1_048_576:
         raise SymbolEvaluationError("TIR response exceeds the size limit")
     try:
@@ -344,13 +360,32 @@ def decode_response(text: str, pc: int, code: bytes) -> tuple[Expr, dict[Expr, E
         status = response.get("status")
         if status not in ("ok", "unsupported"):
             raise ValueError("Unknown oracle status")
-        _fields(response, common | ({"outputs", "memory_writes"} if status == "ok" else {"reason"}))
+        profile = response.get("profile")
+        if expected_native_config is None:
+            expected_profile = "aarch64-fullspec-el0"
+            expected_metadata = None
+        else:
+            if (not isinstance(expected_native_config, dict)
+                    or set(expected_native_config) != {"dczid_el0"}
+                    or type(expected_native_config["dczid_el0"]) is not int
+                    or not 0 <= expected_native_config["dczid_el0"] <= 31
+                    or (expected_native_config["dczid_el0"] & 0xF) > 9):
+                raise ValueError("Invalid expected native configuration")
+            expected_profile = "aarch64-native-dczid-el0"
+            dczid = expected_native_config["dczid_el0"]
+            expected_metadata = {
+                "dczid_el0": str(dczid),
+                "dczva_el0_permitted": not bool(dczid & 0x10),
+            }
+        _fields(response, common | ({"outputs", "memory_writes"} if status == "ok" else {"reason"})
+                | ({"configuration"} if expected_metadata is not None else set()))
         if (
             type(response["schema"]) is not int
             or response["schema"] != 1
             or response["architecture"] != "aarch64"
             or response["endianness"] != "little"
-            or response["profile"] != "aarch64-fullspec-el0"
+            or profile != expected_profile
+            or response.get("configuration") != expected_metadata
             or response["pc"] != str(pc)
             or response["instruction"] != code.hex()
         ):
@@ -395,6 +430,154 @@ def decode_response(text: str, pc: int, code: bytes) -> tuple[Expr, dict[Expr, E
         raise SymbolEvaluationError(f"Invalid TIR oracle response: {error}") from error
 
 
+def decode_region_response(text: str, request: dict, *, expected_native_config: dict[str, int] | None = None):
+    """Validate source-derived finite-region outcomes without choosing a path."""
+    if len(text) > 1_048_576:
+        raise SymbolEvaluationError("TIR region response exceeds the size limit")
+    try:
+        if (not isinstance(request, dict) or set(request) != {"schema", "entry_pc", "instructions", "exit_pcs", "max_steps"}
+                or request.get("schema") != 1 or not isinstance(request.get("entry_pc"), str)
+                or not request["entry_pc"].isdecimal() or not isinstance(request.get("instructions"), list)
+                or not request["instructions"] or len(request["instructions"]) > 128
+                or not isinstance(request.get("exit_pcs"), list) or not request["exit_pcs"]
+                or any(not isinstance(pc, str) or not pc.isdecimal() for pc in request["exit_pcs"])
+                or type(request.get("max_steps")) is not int or not 1 <= request["max_steps"] <= 128
+                or any(not isinstance(item, dict) or set(item) != {"pc", "instruction"}
+                       or not isinstance(item["pc"], str) or not item["pc"].isdecimal()
+                       or not isinstance(item["instruction"], str)
+                       or re.fullmatch(r"[0-9a-fA-F]{8}", item["instruction"]) is None
+                       for item in request["instructions"])):
+            raise ValueError("Malformed region request")
+        response = json.loads(text, object_pairs_hook=_object_pairs)
+        if not isinstance(response, dict) or response.get("schema") != 1:
+            raise ValueError("Malformed region response")
+        if response.get("status") == "unsupported":
+            reason = response.get("reason")
+            if not isinstance(reason, str) or not reason or len(reason) > 4096:
+                raise ValueError("Malformed unsupported-region diagnostic")
+            raise UnsupportedInstructionError(f"TIR region: {reason}")
+        common = {"schema", "architecture", "endianness", "tir_revision", "profile", "status",
+                  "request", "entry_pc", "first_instruction", "outcomes"}
+        if expected_native_config is not None:
+            common.add("configuration")
+        _fields(response, common)
+        if (response["architecture"] != "aarch64" or response["endianness"] != "little"
+                or response["status"] != "ok" or response["request"] != request
+                or response["entry_pc"] != request.get("entry_pc")
+                or response["first_instruction"] != request.get("instructions", [{}])[0].get("instruction", "").lower()):
+            raise ValueError("Region response does not match request identity")
+        revision = response["tir_revision"]
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            raise ValueError("Malformed oracle revision")
+        if expected_native_config is None:
+            expected_profile, expected_metadata = "aarch64-fullspec-el0", None
+        else:
+            if (set(expected_native_config) != {"dczid_el0"}
+                    or type(expected_native_config["dczid_el0"]) is not int
+                    or not 0 <= expected_native_config["dczid_el0"] <= 31
+                    or (expected_native_config["dczid_el0"] & 0xF) > 9):
+                raise ValueError("Invalid native region configuration")
+            dczid = expected_native_config["dczid_el0"]
+            expected_profile = "aarch64-native-dczid-el0"
+            expected_metadata = {"dczid_el0": str(dczid), "dczva_el0_permitted": not bool(dczid & 0x10)}
+        if response["profile"] != expected_profile or response.get("configuration") != expected_metadata:
+            raise ValueError("Region profile/configuration mismatch")
+        outcomes = response["outcomes"]
+        if not isinstance(outcomes, list) or not outcomes or len(outcomes) > 16:
+            raise ValueError("Malformed region outcome set")
+        decoder = _ExpressionDecoder()
+        decoded = []
+        for outcome in outcomes:
+            _fields(outcome, {"exit_pc", "activation", "guards", "outputs", "memory_reads", "memory_writes", "monitor_event"})
+            if outcome["monitor_event"] not in ("none", "clear-before-store"):
+                raise ValueError("Unknown monitor event")
+            activation = decoder.decode(outcome["activation"])
+            guards = outcome["guards"]
+            if activation.size != 1 or not isinstance(guards, list) or len(guards) > 128:
+                raise ValueError("Malformed region activation/guards")
+            guards = [decoder.decode(guard) for guard in guards]
+            if any(guard.size != 1 for guard in guards):
+                raise ValueError("Region guard must be boolean")
+            outputs = outcome["outputs"]
+            if not isinstance(outputs, dict) or not outputs or len(outputs) > len(_REGISTERS):
+                raise ValueError("Malformed region architectural outputs")
+            mapped = {}
+            for name, expression in outputs.items():
+                if name not in _REGISTERS:
+                    raise ValueError(f"Unsupported region output {name!r}")
+                value = decoder.decode(expression)
+                if value.size != _REGISTERS[name]:
+                    raise ValueError(f"Wrong region output width for {name}")
+                mapped[ExprId(name, value.size)] = value
+            reads = outcome["memory_reads"]
+            if not isinstance(reads, list) or len(reads) > 64:
+                raise ValueError("Malformed region memory reads")
+            decoded_reads = []
+            for read in reads:
+                _fields(read, {"address", "bits"})
+                address = decoder.decode(read["address"])
+                bits = read["bits"]
+                if not 1 <= address.size <= 64 or type(bits) is not int or bits <= 0 or bits % 8:
+                    raise ValueError("Malformed region memory read")
+                decoded_reads.append((address.zeroExtend(64), bits))
+            writes = outcome["memory_writes"]
+            if not isinstance(writes, list) or len(writes) > 16:
+                raise ValueError("Malformed region memory writes")
+            for write in writes:
+                _fields(write, {"address", "value"})
+                address, value = decoder.decode(write["address"]), decoder.decode(write["value"])
+                if not 1 <= address.size <= 64 or value.size % 8:
+                    raise ValueError("Malformed region memory write")
+                mapped[ExprMem(address.zeroExtend(64), value.size)] = value
+            if ExprId("PC", 64) not in mapped:
+                raise ValueError("Missing region final PC")
+            exit_pc = outcome["exit_pc"]
+            if not isinstance(exit_pc, str) or not exit_pc.isdecimal() or exit_pc not in request.get("exit_pcs", []):
+                raise ValueError("Region outcome exit does not match declared exits")
+            decoded.append((activation, guards, mapped, outcome["monitor_event"], decoded_reads, int(exit_pc)))
+        return decoded
+    except UnsupportedInstructionError:
+        raise
+    except (ValueError, KeyError, TypeError, RecursionError) as error:
+        raise SymbolEvaluationError(f"Invalid TIR region response: {error}") from error
+
+
+def decode_region_transforms(text: str, request: dict, *, arch, instructions=(), tid=0,
+                             expected_native_config: dict[str, int] | None = None):
+    """Build source-owned candidate transforms; activation is not an assertion guard."""
+    from miasm.expression.expression import ExprMem
+
+    from_addr = int(request["entry_pc"])
+    candidates = decode_region_response(
+        text, request, expected_native_config=expected_native_config
+    )
+    result = []
+    for activation, guards, outputs, event, reads, to_addr in candidates:
+        defined_masks = {}
+        memory_defined_masks = {}
+        for destination in outputs:
+            if isinstance(destination, ExprMem):
+                memory_defined_masks[destination] = (
+                    ExprInt((1 << destination.ptr.size) - 1, destination.ptr.size),
+                    ExprInt((1 << destination.size) - 1, destination.size),
+                )
+            elif isinstance(destination, ExprId):
+                accessor = arch.get_reg_accessor(destination.name)
+                if accessor is None:
+                    raise SymbolEvaluationError(f"No architecture accessor for {destination.name}")
+                defined_masks[destination.name] = ExprInt(
+                    (1 << accessor.num_bits) - 1, accessor.num_bits
+                )
+        transform = SymbolicTransform(
+            tid, outputs, list(instructions), arch, from_addr, to_addr,
+            defined_masks=defined_masks,
+            memory_defined_masks=memory_defined_masks,
+            guards=tuple(guards), source_owned=True,
+        )
+        result.append(RegionCandidate(activation, transform, event, tuple(reads)))
+    return result
+
+
 class TirBackend:
     """AArch64 little-endian immediate arithmetic, with explicit unsupported gaps."""
 
@@ -411,6 +594,46 @@ class TirBackend:
         self.timeout = timeout
         self.cache_size = cache_size
         self._cache: OrderedDict[tuple[int, bytes], tuple[Expr, dict[Expr, Expr]]] = OrderedDict()
+
+    def _export_region_text(self, request: dict, *, expected_native_config: dict[str, int] | None = None):
+        """Issue one bounded region request and return its unparsed response."""
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith(("TIR_", "TIRAMISU_", "FOCACCIA_TIR_MODULE"))
+        }
+        command = [self.executable, "--export-regions"]
+        if expected_native_config is not None:
+            if (set(expected_native_config) != {"dczid_el0"}
+                    or type(expected_native_config["dczid_el0"]) is not int):
+                raise SymbolEvaluationError("Invalid expected native region configuration")
+            command.extend(["--dczid-el0", str(expected_native_config["dczid_el0"])])
+        try:
+            completed = subprocess.run(
+                command, input=json.dumps(request) + "\n", capture_output=True,
+                text=True, timeout=self.timeout, env=env, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
+            raise SymbolEvaluationError(f"Unable to execute TIR region oracle: {error}") from error
+        if completed.returncode != 0:
+            diagnostic = completed.stderr[-4096:].strip()
+            raise SymbolEvaluationError(f"TIR region oracle failed ({completed.returncode}): {diagnostic}")
+        return completed.stdout
+
+    def export_region(self, request: dict, *, expected_native_config: dict[str, int] | None = None):
+        """Export every source candidate for one bounded region."""
+        return decode_region_response(
+            self._export_region_text(request, expected_native_config=expected_native_config),
+            request, expected_native_config=expected_native_config,
+        )
+
+    def export_region_transforms(self, request: dict, *, arch, tid=0,
+                                 expected_native_config: dict[str, int] | None = None):
+        """Return source-owned candidate transforms with activation kept separate."""
+        return decode_region_transforms(
+            self._export_region_text(request, expected_native_config=expected_native_config),
+            request, arch=arch, instructions=(), tid=tid,
+            expected_native_config=expected_native_config,
+        )
 
     def generate(
         self, instruction: Instruction, state: ReadableProgramState, context: DisassemblyContext

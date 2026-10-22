@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import re
+from typing import Protocol
 
 from miasm.expression.expression import (
     Expr, ExprCompose, ExprCond, ExprId, ExprInt, ExprMem, ExprOp, ExprSlice,
@@ -576,10 +577,10 @@ def _evaluate_composed_register(transform: SymbolicTransform, register: str,
     )
     full = (1 << mask.size) - 1
     if defined != full:
-        raise SymbolEvaluationError(f"Projected Intel register {canonical} has undefined mask inputs.")
+        raise SymbolEvaluationError(f"Projected source register {register} has undefined mask inputs.")
     mask_value = evaluator.evaluate(mask)
     if mask_value != full:
-        raise SymbolEvaluationError(f"Projected Intel register {canonical} is not fully defined.")
+        raise SymbolEvaluationError(f"Projected source register {register} is not fully defined.")
     return evaluator.evaluate(value)
 
 
@@ -890,6 +891,12 @@ def normalize_observed_registers(observations: Mapping[str, int]) -> dict[str, i
     return result
 
 
+class X86ResidualBackend(Protocol):
+    """A specification source supplying the shared x86 residual contract."""
+
+    def specialize(self, instruction) -> IntelInstructionResidual: ...
+
+
 class SymbolicIntelLiveModel:
     """Specialize/compose one observed TB entirely from source residuals.
 
@@ -898,7 +905,7 @@ class SymbolicIntelLiveModel:
     or post-boundary memory is used as prediction input.
     """
 
-    def __init__(self, backend: IntelSymbolicBackend, decoder, transport, tid: int,
+    def __init__(self, backend: X86ResidualBackend, decoder, transport, tid: int,
                  *, guest_limit: int | None = None, step_limit: int = 10_000_000):
         self.backend, self.decoder, self.transport, self.tid = backend, decoder, transport, tid
         self.guest_limit, self.step_limit = guest_limit, step_limit
